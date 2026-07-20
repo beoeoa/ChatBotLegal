@@ -1,0 +1,7 @@
+REMOVE FIELD IF EXISTS ai_assessment.domain ON TABLE legal_crawl_candidate;
+REMOVE FIELD IF EXISTS ai_assessment.scope ON TABLE legal_crawl_candidate;
+REMOVE FIELD IF EXISTS ai_assessment.official_level ON TABLE legal_crawl_candidate;
+REMOVE FIELD IF EXISTS ai_assessment.effective_status ON TABLE legal_crawl_candidate;
+REMOVE FIELD IF EXISTS ai_assessment.duplicate_risk ON TABLE legal_crawl_candidate;
+REMOVE FIELD IF EXISTS ai_assessment.confidence ON TABLE legal_crawl_candidate;
+REMOVE FIELD IF EXISTS ai_assessment.reasons ON TABLE legal_crawl_candidate;

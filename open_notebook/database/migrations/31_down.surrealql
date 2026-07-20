@@ -1,0 +1,13 @@
+-- Rollback migration 31.
+
+REMOVE INDEX IF EXISTS idx_legal_crawl_run_source_started ON TABLE legal_crawl_run;
+REMOVE TABLE IF EXISTS legal_crawl_run;
+
+REMOVE FIELD IF EXISTS last_status ON TABLE legal_crawl_source;
+REMOVE FIELD IF EXISTS source_freshness ON TABLE legal_crawl_source;
+REMOVE FIELD IF EXISTS last_run_stats ON TABLE legal_crawl_source;
+REMOVE FIELD IF EXISTS max_listing_pages_per_run ON TABLE legal_crawl_source;
+REMOVE FIELD IF EXISTS listing_cursor ON TABLE legal_crawl_source;
+REMOVE FIELD IF EXISTS content_fetch_allowed ON TABLE legal_crawl_source;
+REMOVE FIELD IF EXISTS rate_limit_seconds ON TABLE legal_crawl_source;
+REMOVE FIELD IF EXISTS domains ON TABLE legal_crawl_source;

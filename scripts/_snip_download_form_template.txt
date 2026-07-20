@@ -1,0 +1,46 @@
+async def download_form_template(procedure_id: str, form_index: int):
+    """Prefer real uploaded/official form files only.
+
+    Temporary seed content is never returned as an official downloadable form.
+    """
+    import os
+    from fastapi.responses import FileResponse, JSONResponse
+
+    # Resolve procedure metadata from DB, then seed (metadata only).
+    proc_data = None
+    try:
+        rows = await repo_query("SELECT * FROM ward_procedure;", {})
+        for row in rows:
+            proc_id = str(row.get("id") or "")
+            forms_list = row.get("forms") or []
+            if forms_list and len(forms_list) > 0:
+                url = forms_list[0].get("download_url") or ""
+                match = re.search(r"/api/procedures/([^/]+)/forms", url)
+                if match:
+                    proc_id = match.group(1)
+            if ":" in proc_id:
+                proc_id = proc_id.split(":", 1)[1]
+            if proc_id == procedure_id:
+                proc_data = row
+                break
+    except Exception:
+        proc_data = None
+
+    if not proc_data:
+        seed_match = next((p for p in HAI_PHONG_PROCEDURES_SEED if p.get("id") == procedure_id), None)
+        if seed_match:
+            proc_data = seed_match
+
+    forms = (proc_data or {}).get("forms") or []
+    form = forms[form_index] if 0 <= form_index < len(forms) else {}
+
+    real_filepath = _resolve_real_form_file(procedure_id, form_index, form if isinstance(form, dict) else None)
+    if not real_filepath:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "code": "form_unavailable",
+                "message": "Biểu mẫu này chưa có file chính thức đã duyệt",
+                "needs_official_file": True,
+                "procedure_id": procedure_id,
+           

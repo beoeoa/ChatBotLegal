@@ -1,0 +1,9 @@
+-- Migration 28: complete message snapshot fields for persisted Ask conversations.
+-- Additive only; no legacy data is deleted or rewritten.
+DEFINE FIELD IF NOT EXISTS status ON TABLE conversation_message TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS recommended_forms ON TABLE conversation_message TYPE option<array<object>> FLEXIBLE;
+DEFINE FIELD IF NOT EXISTS faq_refs ON TABLE conversation_message TYPE option<array<string>>;
+DEFINE FIELD IF NOT EXISTS faqs ON TABLE conversation_message TYPE option<array<object>> FLEXIBLE;
+DEFINE FIELD IF NOT EXISTS procedure_detail ON TABLE conversation_message TYPE option<object> FLEXIBLE;
+DEFINE FIELD IF NOT EXISTS rag_trace ON TABLE conversation_message TYPE option<object> FLEXIBLE;
+DEFINE FIELD IF NOT EXISTS grounding_status ON TABLE conversation_message TYPE option<string>;

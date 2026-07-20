@@ -1,0 +1,3 @@
+-- Migration 32: review-only OCR/recommendation metadata.
+
+DEFINE FIELD IF NOT EXISTS review_recommendation ON TABLE legal_crawl_candidate TYPE option<object>;

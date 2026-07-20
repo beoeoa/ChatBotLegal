@@ -1,0 +1,12 @@
+-- Migration 34: repair crawler cursor fields on older databases.
+
+DEFINE FIELD IF NOT EXISTS listing_cursor ON TABLE legal_crawl_source TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS max_listing_pages_per_run ON TABLE legal_crawl_source TYPE option<int>;
+
+-- Keep review evidence available when an older deployment skipped migrations
+-- 30/32. These definitions are idempotent and do not rewrite candidate data.
+DEFINE FIELD IF NOT EXISTS extraction_result ON TABLE legal_crawl_candidate TYPE option<object>;
+DEFINE FIELD IF NOT EXISTS review_recommendation ON TABLE legal_crawl_candidate TYPE option<object>;
+DEFINE FIELD IF NOT EXISTS content_hash ON TABLE legal_crawl_candidate TYPE option<string>;
+DEFINE INDEX IF NOT EXISTS idx_legal_crawl_candidate_content_hash
+ON TABLE legal_crawl_candidate COLUMNS content_hash;

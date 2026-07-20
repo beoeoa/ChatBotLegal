@@ -1,0 +1,12 @@
+-- Migration 21: candidate review metadata fields used by admin approve/reject flow
+DEFINE FIELD IF NOT EXISTS content ON TABLE legal_crawl_candidate TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS reviewed_by ON TABLE legal_crawl_candidate TYPE option<record>;
+DEFINE FIELD IF NOT EXISTS reviewed_role ON TABLE legal_crawl_candidate TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS review_reason ON TABLE legal_crawl_candidate TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS review_status ON TABLE legal_crawl_candidate TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS approved_by ON TABLE legal_crawl_candidate TYPE option<record>;
+DEFINE FIELD IF NOT EXISTS approved_at ON TABLE legal_crawl_candidate TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS ai_review ON TABLE legal_crawl_candidate TYPE option<object>;
+DEFINE FIELD IF NOT EXISTS ai_assessment ON TABLE legal_crawl_candidate TYPE option<object>;
+DEFINE FIELD IF NOT EXISTS inferred_domain ON TABLE legal_crawl_candidate TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS suitability_recommendation ON TABLE legal_crawl_candidate TYPE option<string>;

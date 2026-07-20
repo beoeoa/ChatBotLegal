@@ -1,0 +1,49 @@
+==== streaming ====
+127: interface StreamingResponseProps {
+132:   ragTrace?: RagTrace | null
+137:   role?: 'citizen' | 'officer' | 'admin'
+138:   showRagTrace?: boolean
+141: export function StreamingResponse({
+146:   ragTrace,
+151:   role = 'citizen',
+152:   showRagTrace = false,
+153: }: StreamingResponseProps) {
+267:       role="region"
+460:       {ragTrace && role === 'admin' && showRagTrace && (
+467:                   Quy trình RAG
+475:                   <p>{ragTrace.input_question || 'Không có dữ liệu'}</p>
+479:                     <Badge variant="secondary">Chọn: {ragTrace.selected_domain || 'Tự nhận diện'}</Badge>
+481:                       Nhận diện: {ragTrace.detected_domain?.name || 'Chưa rõ'}
+487:                     {(ragTrace.retrieved_chunks || []).map((chunk) => (
+504:                   {Array.isArray(ragTrace.filtered_candidates) && ragTrace.filtered_candidates.length > 0 ? (
+506:                       {JSON.stringify(ragTrace.filtered_candidates || [], null, 2)}
+513:                   {Array.isArray(ragTrace.llm_sources) && ragTrace.llm_sources.length > 0 ? (
+515:                       {JSON.stringify(ragTrace.llm_sources || [], null, 2)}
+==== page ====
+24: import { StreamingResponse } from '@/components/search/StreamingResponse'
+99:   const role = useAuthStore((state) => state.role) || 'citizen'
+100:   const canUseSearchTab = role === 'officer' || role === 'admin'
+110:     rawMode === 'search' && (role === 'officer' || role === 'admin') ? 'search' : 'ask'
+127:   const [showRagTrace, setShowRagTrace] = useState(true)
+362:         if (role === 'officer') {
+397:   }, [hasHydrated, isAuthenticated, role])
+441:     ask.sendAsk(askQuestion, models, role, {
+445:       showRagTrace,
+447:   }, [askQuestion, modelDefaults, customModels, ask, role, offlineMode, offlineModel, selectedDomain, showRagTrace])
+495:   // Citizen must never stay on Search tab (direct link, stale state, role switch).
+538:                 {role === 'officer' && userDept && (
+717:                     <p className="text-xs text-destructive flex items-center gap-1" role="alert">
+725:                 {role === 'admin' && (
+744:                           id="show-rag-trace"
+745:                           checked={showRagTrace}
+750:                           <Label htmlFor="show-rag-trace">Hiển thị quy trình RAG</Label>
+875:                     role="alert"
+895:                           {role === 'officer' ? 'Bạn đang hỏi sai lĩnh vực' : 'Gợi ý chuyển lĩnh vực phù hợp'}
+898:                           {role === 'officer'
+929:                 <StreamingResponse
+934:                   ragTrace={ask.ragTrace}
+939:                   role={role}
+940:                   showRagTrace={showRagTrace}
+976:                 {role === 'officer' && userDept && (
+1024:                   <div className="space-y-2" role="group" aria-labelledby="search-type-label">
+1061:                   <div className="space-y-2" role="group" aria-labelledby="search-in-label">

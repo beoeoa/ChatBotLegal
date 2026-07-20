@@ -1,0 +1,8 @@
+-- Migration 25: define nested AI candidate assessment fields for SCHEMAFULL records
+DEFINE FIELD IF NOT EXISTS ai_assessment.domain ON TABLE legal_crawl_candidate TYPE string;
+DEFINE FIELD IF NOT EXISTS ai_assessment.scope ON TABLE legal_crawl_candidate TYPE string;
+DEFINE FIELD IF NOT EXISTS ai_assessment.official_level ON TABLE legal_crawl_candidate TYPE string;
+DEFINE FIELD IF NOT EXISTS ai_assessment.effective_status ON TABLE legal_crawl_candidate TYPE string;
+DEFINE FIELD IF NOT EXISTS ai_assessment.duplicate_risk ON TABLE legal_crawl_candidate TYPE string;
+DEFINE FIELD IF NOT EXISTS ai_assessment.confidence ON TABLE legal_crawl_candidate TYPE number;
+DEFINE FIELD IF NOT EXISTS ai_assessment.reasons ON TABLE legal_crawl_candidate TYPE array<string>;

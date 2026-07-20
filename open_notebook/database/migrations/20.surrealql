@@ -1,0 +1,18 @@
+-- Migration 20: Add ward_procedure table for city-wide procedures and forms
+DEFINE TABLE IF NOT EXISTS ward_procedure SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS name ON TABLE ward_procedure TYPE string;
+DEFINE FIELD IF NOT EXISTS department ON TABLE ward_procedure TYPE string;
+DEFINE FIELD IF NOT EXISTS domain_slug ON TABLE ward_procedure TYPE string;
+DEFINE FIELD IF NOT EXISTS steps ON TABLE ward_procedure TYPE array;
+DEFINE FIELD IF NOT EXISTS steps.* ON TABLE ward_procedure TYPE string;
+DEFINE FIELD IF NOT EXISTS documents_required ON TABLE ward_procedure TYPE array;
+DEFINE FIELD IF NOT EXISTS documents_required.* ON TABLE ward_procedure TYPE string;
+DEFINE FIELD IF NOT EXISTS duration ON TABLE ward_procedure TYPE string;
+DEFINE FIELD IF NOT EXISTS fee ON TABLE ward_procedure TYPE string;
+DEFINE FIELD IF NOT EXISTS forms ON TABLE ward_procedure TYPE array;
+DEFINE FIELD IF NOT EXISTS forms.* ON TABLE ward_procedure TYPE object;
+DEFINE FIELD IF NOT EXISTS forms.*.name ON TABLE ward_procedure TYPE string;
+DEFINE FIELD IF NOT EXISTS forms.*.file_type ON TABLE ward_procedure TYPE string;
+DEFINE FIELD IF NOT EXISTS forms.*.download_url ON TABLE ward_procedure TYPE string;
+DEFINE FIELD IF NOT EXISTS created ON TABLE ward_procedure TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS updated ON TABLE ward_procedure TYPE option<datetime>;

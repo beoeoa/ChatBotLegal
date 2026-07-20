@@ -1,0 +1,55 @@
+﻿name: Smoke Test E2E
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+    
+    services:
+      surrealdb:
+        image: surrealdb/surrealdb:latest
+        ports:
+          - 8000:8000
+        options: --start-server --user root --pass root
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    
+    - name: Install dependencies
+      run: |
+        pip install -r api/requirements.txt
+        pip install aiohttp
+    
+    - name: Start API server
+      run: |
+        cd api
+        python -m uvicorn main:app --host 0.0.0.0 --port 8080 &
+        sleep 10
+      env:
+        SURREALDB_URL: ws://localhost:8000/rpc
+        SURREALDB_NS: test
+        SURREALDB_DB: test
+        SURREALDB_USER: root
+        SURREALDB_PASS: root
+    
+    - name: Run smoke tests
+      run: |
+        python scripts/e2e_smoke_test.py
+      env:
+        API_BASE_URL: http://localhost:8080
+    
+    - name: Test Summary
+      if: always()
+      run: |
+        echo "Smoke test completed"

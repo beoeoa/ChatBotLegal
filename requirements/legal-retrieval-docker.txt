@@ -1,0 +1,15 @@
+# CPU runtime for the self-contained Docker retrieval service.
+# GPU/CUDA remains available through requirements/legal-retrieval-cu126.txt
+# for the native Windows launcher.
+--index-url https://pypi.org/simple
+torch==2.8.0
+chromadb==1.5.9
+fastapi==0.136.3
+numpy==2.4.6
+pydantic==2.13.4
+python-dotenv==1.2.2
+rank-bm25==0.2.2
+SQLAlchemy==2.0.50
+psycopg2-binary==2.9.12
+transformers==5.9.0
+uvicorn==0.48.0

@@ -1,0 +1,1 @@
+-- Down migration 22: preserve audit metadata fields (non-destructive).

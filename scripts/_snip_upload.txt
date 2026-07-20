@@ -1,0 +1,36 @@
+uploads" / "forms" / "official_candidates"
+)
+PRIORITY_FORMS_FILES_DIR = (
+    PROJECT_ROOT / "data" / "uploads" / "forms" / "priority_official"
+)
+FORMS_QUARANTINE_DIR = PROJECT_ROOT / "data" / "quarantine" / "forms_synthetic"
+
+class FormTemplate(BaseModel):
+    name: str = Field(..., description="Tên biểu mẫu (ví dụ: Tờ khai đăng ký kết hôn)")
+    file_type: str = Field("docx", description="Loại file (docx, pdf)")
+    download_url: str = Field(..., description="Đường dẫn tải biểu mẫu")
+    official_level: str = Field("official", description="official | reference")
+    review_status: str = Field("approved", description="approved | candidate_pending_review")
+
+class Procedure(BaseModel):
+    id: str = Field(..., description="ID quy trình")
+    name: str = Field(..., description="Tên thủ tục hành chính")
+    department: str = Field(..., description="Phòng ban phụ trách")
+    domain_slug: str = Field(..., description="Mã lĩnh vực")
+    steps: List[str] = Field(..., description="Các bước thực hiện")
+    documents_required: List[str] = Field(..., description="Hồ sơ cần nộp")
+    duration: str = Field(..., description="Thời gian giải quyết")
+    fee: str = Field(..., description="Lệ phí giải quyết")
+    forms: List[FormTemplate] = Field(default_factory=list, description="Danh sách biểu mẫu trống đính kèm")
+from datetime import datetime
+from open_notebook.database.repository import repo_query, repo_create, repo_update
+
+# Seed data for ALL of Hai Phong city procedures and forms
+HAI_PHONG_PROCEDURES_SEED: List[Dict[str, Any]] = [
+    {
+        "id": "dang_ky_khai_sinh",
+        "name": "Đăng ký khai sinh (Thẩm quyền cấp xã)",
+        "department": "Tư pháp - Hộ tịch",
+        "domain_slug": "ho_tich_chung_thuc",
+        "steps": [
+            "Bước 1: Người đi đăng ký khai sinh nộ

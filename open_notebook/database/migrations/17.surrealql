@@ -1,0 +1,9 @@
+DEFINE FIELD IF NOT EXISTS reviewed_by ON TABLE legal_crawl_candidate TYPE option<record<user_account>>;
+DEFINE FIELD IF NOT EXISTS reviewed_role ON TABLE legal_crawl_candidate TYPE option<string>;
+DEFINE INDEX IF NOT EXISTS legal_crawl_candidate_reviewed_by_idx
+ON TABLE legal_crawl_candidate COLUMNS reviewed_by;
+
+DEFINE FIELD IF NOT EXISTS source_scope ON TABLE source TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS review_status ON TABLE source TYPE option<string>;
+DEFINE INDEX IF NOT EXISTS idx_source_scope ON TABLE source COLUMNS source_scope;
+DEFINE INDEX IF NOT EXISTS idx_source_review_status ON TABLE source COLUMNS review_status;

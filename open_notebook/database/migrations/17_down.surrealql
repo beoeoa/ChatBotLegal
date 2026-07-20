@@ -1,0 +1,8 @@
+REMOVE INDEX IF EXISTS idx_source_review_status ON TABLE source;
+REMOVE INDEX IF EXISTS idx_source_scope ON TABLE source;
+REMOVE FIELD IF EXISTS review_status ON TABLE source;
+REMOVE FIELD IF EXISTS source_scope ON TABLE source;
+
+REMOVE INDEX IF EXISTS legal_crawl_candidate_reviewed_by_idx ON TABLE legal_crawl_candidate;
+REMOVE FIELD IF EXISTS reviewed_role ON TABLE legal_crawl_candidate;
+REMOVE FIELD IF EXISTS reviewed_by ON TABLE legal_crawl_candidate;

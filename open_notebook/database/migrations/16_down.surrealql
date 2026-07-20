@@ -1,0 +1,30 @@
+REMOVE INDEX IF EXISTS idx_chat_session_owner_user ON TABLE chat_session;
+REMOVE INDEX IF EXISTS idx_source_owner_user ON TABLE source;
+REMOVE INDEX IF EXISTS idx_note_owner_user ON TABLE note;
+REMOVE INDEX IF EXISTS idx_notebook_owner_user ON TABLE notebook;
+
+REMOVE FIELD IF EXISTS owner_user ON TABLE chat_session;
+REMOVE FIELD IF EXISTS owner_user ON TABLE source;
+REMOVE FIELD IF EXISTS owner_user ON TABLE note;
+REMOVE FIELD IF EXISTS owner_user ON TABLE notebook;
+
+REMOVE INDEX IF EXISTS idx_user_ask_history_created ON TABLE user_ask_history;
+REMOVE INDEX IF EXISTS idx_user_ask_history_owner ON TABLE user_ask_history;
+REMOVE TABLE IF EXISTS user_ask_history;
+
+REMOVE INDEX IF EXISTS idx_user_audit_log_action ON TABLE user_audit_log;
+REMOVE INDEX IF EXISTS idx_user_audit_log_target ON TABLE user_audit_log;
+REMOVE INDEX IF EXISTS idx_user_audit_log_actor ON TABLE user_audit_log;
+REMOVE TABLE IF EXISTS user_audit_log;
+
+REMOVE INDEX IF EXISTS idx_user_session_user ON TABLE user_session;
+REMOVE INDEX IF EXISTS idx_user_session_token ON TABLE user_session;
+REMOVE TABLE IF EXISTS user_session;
+
+REMOVE INDEX IF EXISTS idx_user_profile_user ON TABLE user_profile;
+REMOVE TABLE IF EXISTS user_profile;
+
+REMOVE INDEX IF EXISTS idx_user_account_role ON TABLE user_account;
+REMOVE INDEX IF EXISTS idx_user_account_email ON TABLE user_account;
+REMOVE INDEX IF EXISTS idx_user_account_username ON TABLE user_account;
+REMOVE TABLE IF EXISTS user_account;

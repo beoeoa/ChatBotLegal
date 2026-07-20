@@ -1,0 +1,51 @@
+async def download_seed_procedure_form(proc_id: str, form_index: int):
+    """Serve only real uploaded/official form files.
+
+    Seed metadata may still describe a form, but temporary generated content
+    must never be returned as an official downloadable template.
+    """
+    import os
+    from fastapi.responses import FileResponse, JSONResponse
+
+    proc = _find_seed_procedure(proc_id)
+    if not proc:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "code": "form_unavailable",
+                "message": "Biểu mẫu này chưa có file chính thức đã duyệt",
+                "needs_official_file": True,
+                "procedure_id": proc_id,
+                "form_index": form_index,
+            },
+        )
+
+    forms = proc.get("forms") or []
+    if form_index < 0 or form_index >= len(forms):
+        return JSONResponse(
+            status_code=404,
+            content={
+                "code": "form_unavailable",
+                "message": "Biểu mẫu này chưa có file chính thức đã duyệt",
+                "needs_official_file": True,
+                "procedure_id": proc_id,
+                "form_index": form_index,
+            },
+        )
+
+    form = forms[form_index]
+    real_filepath = _resolve_real_form_file(proc_id, form_index, form)
+    if not real_filepath:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "code": "form_unavailable",
+                "message": "Biểu mẫu này chưa có file chính thức đã duyệt",
+                "needs_official_file": True,
+                "procedure_id": proc_id,
+                "form_index": form_index,
+                "form_name": form.get("name"),
+            },
+        )
+
+    ext = os.path.splitext(real_filepath)[1].lstrip(".").lower() or s

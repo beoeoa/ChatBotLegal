@@ -1,0 +1,6 @@
+-- Rollback migration 36: queue data can be removed; candidate review evidence is retained.
+REMOVE INDEX IF EXISTS idx_legal_candidate_processing_job_status_created ON TABLE legal_candidate_processing_job;
+REMOVE INDEX IF EXISTS idx_legal_candidate_processing_job_candidate_status ON TABLE legal_candidate_processing_job;
+REMOVE TABLE IF EXISTS legal_candidate_processing_job;
+REMOVE FIELD IF EXISTS processing_status ON TABLE legal_crawl_candidate;
+REMOVE FIELD IF EXISTS processing_job ON TABLE legal_crawl_candidate;

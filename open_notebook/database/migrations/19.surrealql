@@ -1,0 +1,1 @@
+DEFINE FIELD IF NOT EXISTS scope ON TABLE source TYPE option<string>;

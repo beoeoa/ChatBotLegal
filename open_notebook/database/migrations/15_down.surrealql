@@ -1,0 +1,5 @@
+-- Migration 15 rollback: remove legal crawler tables
+
+REMOVE TABLE IF EXISTS legal_admin_notification;
+REMOVE TABLE IF EXISTS legal_crawl_candidate;
+REMOVE TABLE IF EXISTS legal_crawl_source;

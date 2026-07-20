@@ -1,0 +1,30 @@
+frontend/src/app/(dashboard)/search/page.tsx:127: const [showRagTrace, setShowRagTrace] = useState(true)
+frontend/src/app/(dashboard)/search/page.tsx:445: showRagTrace,
+frontend/src/app/(dashboard)/search/page.tsx:447: }, [askQuestion, modelDefaults, customModels, ask, role, offlineMode, offlineModel, selectedDomain, showRagTrace])
+frontend/src/app/(dashboard)/search/page.tsx:745: checked={showRagTrace}
+frontend/src/app/(dashboard)/search/page.tsx:934: ragTrace={ask.ragTrace}
+frontend/src/app/(dashboard)/search/page.tsx:940: showRagTrace={showRagTrace}
+frontend/src/components/search/StreamingResponse.tsx:23: // Backend still retains structured citations/rag_trace for audit.
+frontend/src/components/search/StreamingResponse.tsx:132: ragTrace?: RagTrace | null
+frontend/src/components/search/StreamingResponse.tsx:138: showRagTrace?: boolean
+frontend/src/components/search/StreamingResponse.tsx:146: ragTrace,
+frontend/src/components/search/StreamingResponse.tsx:152: showRagTrace = false,
+frontend/src/components/search/StreamingResponse.tsx:460: {ragTrace && role === 'admin' && showRagTrace && (
+frontend/src/components/search/StreamingResponse.tsx:467: Quy trình RAG
+frontend/src/components/search/StreamingResponse.tsx:475: <p>{ragTrace.input_question || 'Không có dữ liệu'}</p>
+frontend/src/components/search/StreamingResponse.tsx:479: <Badge variant="secondary">Chọn: {ragTrace.selected_domain || 'Tự nhận diện'}</Badge>
+frontend/src/components/search/StreamingResponse.tsx:481: Nhận diện: {ragTrace.detected_domain?.name || 'Chưa rõ'}
+frontend/src/components/search/StreamingResponse.tsx:487: {(ragTrace.retrieved_chunks || []).map((chunk) => (
+frontend/src/components/search/StreamingResponse.tsx:504: {Array.isArray(ragTrace.filtered_candidates) && ragTrace.filtered_candidates.length > 0 ? (
+frontend/src/components/search/StreamingResponse.tsx:506: {JSON.stringify(ragTrace.filtered_candidates || [], null, 2)}
+frontend/src/components/search/StreamingResponse.tsx:513: {Array.isArray(ragTrace.llm_sources) && ragTrace.llm_sources.length > 0 ? (
+frontend/src/components/search/StreamingResponse.tsx:515: {JSON.stringify(ragTrace.llm_sources || [], null, 2)}
+frontend/src/lib/hooks/use-ask.ts:27: ragTrace: RagTrace | null
+frontend/src/lib/hooks/use-ask.ts:43: showRagTrace?: boolean
+frontend/src/lib/hooks/use-ask.ts:53: ragTrace: null,
+frontend/src/lib/hooks/use-ask.ts:88: ragTrace: null,
+frontend/src/lib/hooks/use-ask.ts:110: show_rag_trace: options.showRagTrace ?? true
+frontend/src/lib/hooks/use-ask.ts:120: ragTrace: response.rag_trace || null,
+frontend/src/lib/hooks/use-ask.ts:155: ragTrace: null,
+frontend/src/lib/types/search.ts:59: show_rag_trace?: boolean
+frontend/src/lib/types/search.ts:65: rag_trace?: RagTrace | null

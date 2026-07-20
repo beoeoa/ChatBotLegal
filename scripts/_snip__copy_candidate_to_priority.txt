@@ -1,0 +1,47 @@
+def _copy_candidate_to_priority(record: Dict[str, Any]) -> Dict[str, str]:
+    import shutil
+    from datetime import datetime, timezone
+
+    source = _candidate_source_path(record)
+    if not source:
+        raise HTTPException(
+            status_code=404,
+            detail="Khong tim thay file candidate de duyet. Can nạp file truoc khi approve.",
+        )
+    PRIORITY_FORMS_FILES_DIR.mkdir(parents=True, exist_ok=True)
+    # keep original extension, prefix with form id for stable lookup
+    dest_name = f"{record.get('id')}-{source.name}"
+    dest = PRIORITY_FORMS_FILES_DIR / dest_name
+    if not dest.exists():
+        shutil.copy2(source, dest)
+    rel = str(dest.relative_to(PROJECT_ROOT)).replace("\\", "/")
+    return {
+        "source_package_path": rel,
+        "local_path": rel,
+        "file_name": dest.name,
+        "copied_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _upsert_official_index_from_candidate(
+    record: Dict[str, Any],
+    *,
+    decision: str,
+    review_note: str,
+    form_name: Optional[str],
+    procedure_id: Optional[str],
+    domain: Optional[str],
+    package_paths: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    from datetime import datetime, timezone
+
+    index_payload = _load_forms_json(
+        OFFICIAL_FORMS_INDEX_PATH,
+        {"generated_at": None, "summary": {}, "forms": [], "errors": []},
+    )
+    forms = list(index_payload.get("forms") or [])
+    form_id = str(record.get("id"))
+    existing = next((f for f in forms if str(f.get("id")) == form_id), None)
+    title = (form_name or record.get("detected_form_name") or record.get("file_name") or form_id).strip()
+    domain_val = (domain or record.get("suggested_domain") or "unknown")
+    proc_id = procedure_id if procedure_id is not None else record.get("sugges

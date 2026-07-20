@@ -1,0 +1,7 @@
+﻿-- Rollback migration 35. It removes job state only; approved/imported candidates and source files are retained for audit.
+REMOVE INDEX IF EXISTS idx_legal_import_job_status_created ON TABLE legal_import_job;
+REMOVE INDEX IF EXISTS idx_legal_import_job_candidate_created ON TABLE legal_import_job;
+REMOVE TABLE IF EXISTS legal_import_job;
+REMOVE FIELD IF EXISTS source_asset ON TABLE legal_crawl_candidate;
+REMOVE FIELD IF EXISTS import_status ON TABLE legal_crawl_candidate;
+REMOVE FIELD IF EXISTS import_job ON TABLE legal_crawl_candidate;

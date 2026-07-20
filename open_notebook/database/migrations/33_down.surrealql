@@ -1,0 +1,2 @@
+DEFINE FIELD OVERWRITE statistics ON TABLE legal_crawl_run TYPE object;
+DEFINE FIELD OVERWRITE last_run_stats ON TABLE legal_crawl_source TYPE option<object>;

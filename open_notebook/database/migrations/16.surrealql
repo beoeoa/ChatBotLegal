@@ -1,0 +1,86 @@
+DEFINE TABLE IF NOT EXISTS user_account SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS username ON TABLE user_account TYPE string;
+DEFINE FIELD IF NOT EXISTS email ON TABLE user_account TYPE string;
+DEFINE FIELD IF NOT EXISTS role ON TABLE user_account TYPE string;
+DEFINE FIELD IF NOT EXISTS password_hash ON TABLE user_account TYPE string;
+DEFINE FIELD IF NOT EXISTS is_active ON TABLE user_account TYPE bool DEFAULT true;
+DEFINE FIELD IF NOT EXISTS created ON TABLE user_account TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS updated ON TABLE user_account TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS last_login_at ON TABLE user_account TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS legacy_password_login ON TABLE user_account TYPE bool DEFAULT false;
+
+DEFINE INDEX IF NOT EXISTS idx_user_account_username ON TABLE user_account COLUMNS username UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_user_account_email ON TABLE user_account COLUMNS email UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_user_account_role ON TABLE user_account COLUMNS role;
+
+DEFINE TABLE IF NOT EXISTS user_profile SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS user ON TABLE user_profile TYPE record<user_account>;
+DEFINE FIELD IF NOT EXISTS full_name ON TABLE user_profile TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS phone ON TABLE user_profile TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS department ON TABLE user_profile TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS job_title ON TABLE user_profile TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS notes ON TABLE user_profile TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS preferences ON TABLE user_profile TYPE option<object> FLEXIBLE;
+DEFINE FIELD IF NOT EXISTS created ON TABLE user_profile TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS updated ON TABLE user_profile TYPE option<datetime>;
+
+DEFINE INDEX IF NOT EXISTS idx_user_profile_user ON TABLE user_profile COLUMNS user UNIQUE;
+
+DEFINE TABLE IF NOT EXISTS user_session SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS user ON TABLE user_session TYPE record<user_account>;
+DEFINE FIELD IF NOT EXISTS session_token_hash ON TABLE user_session TYPE string;
+DEFINE FIELD IF NOT EXISTS role ON TABLE user_session TYPE string;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE user_session TYPE datetime;
+DEFINE FIELD IF NOT EXISTS revoked_at ON TABLE user_session TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS last_seen_at ON TABLE user_session TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS created ON TABLE user_session TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS updated ON TABLE user_session TYPE option<datetime>;
+
+DEFINE INDEX IF NOT EXISTS idx_user_session_token ON TABLE user_session COLUMNS session_token_hash UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_user_session_user ON TABLE user_session COLUMNS user;
+
+DEFINE TABLE IF NOT EXISTS user_audit_log SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS actor_user ON TABLE user_audit_log TYPE option<record<user_account>>;
+DEFINE FIELD IF NOT EXISTS actor_role ON TABLE user_audit_log TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS target_user ON TABLE user_audit_log TYPE option<record<user_account>>;
+DEFINE FIELD IF NOT EXISTS action ON TABLE user_audit_log TYPE string;
+DEFINE FIELD IF NOT EXISTS entity_type ON TABLE user_audit_log TYPE string;
+DEFINE FIELD IF NOT EXISTS entity_id ON TABLE user_audit_log TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS details ON TABLE user_audit_log TYPE option<object> FLEXIBLE;
+DEFINE FIELD IF NOT EXISTS ip_address ON TABLE user_audit_log TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS user_agent ON TABLE user_audit_log TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS created ON TABLE user_audit_log TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS updated ON TABLE user_audit_log TYPE option<datetime>;
+
+DEFINE INDEX IF NOT EXISTS idx_user_audit_log_actor ON TABLE user_audit_log COLUMNS actor_user;
+DEFINE INDEX IF NOT EXISTS idx_user_audit_log_target ON TABLE user_audit_log COLUMNS target_user;
+DEFINE INDEX IF NOT EXISTS idx_user_audit_log_action ON TABLE user_audit_log COLUMNS action;
+
+DEFINE TABLE IF NOT EXISTS user_ask_history SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS owner_user ON TABLE user_ask_history TYPE option<record<user_account>>;
+DEFINE FIELD IF NOT EXISTS owner_role ON TABLE user_ask_history TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS question ON TABLE user_ask_history TYPE string;
+DEFINE FIELD IF NOT EXISTS answer ON TABLE user_ask_history TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS domain ON TABLE user_ask_history TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS strategy_model ON TABLE user_ask_history TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS answer_model ON TABLE user_ask_history TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS final_answer_model ON TABLE user_ask_history TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS offline_mode ON TABLE user_ask_history TYPE bool DEFAULT false;
+DEFINE FIELD IF NOT EXISTS offline_model ON TABLE user_ask_history TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS rag_trace ON TABLE user_ask_history TYPE option<object> FLEXIBLE;
+DEFINE FIELD IF NOT EXISTS duration_ms ON TABLE user_ask_history TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS created ON TABLE user_ask_history TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS updated ON TABLE user_ask_history TYPE option<datetime>;
+
+DEFINE INDEX IF NOT EXISTS idx_user_ask_history_owner ON TABLE user_ask_history COLUMNS owner_user;
+DEFINE INDEX IF NOT EXISTS idx_user_ask_history_created ON TABLE user_ask_history COLUMNS created;
+
+DEFINE FIELD IF NOT EXISTS owner_user ON TABLE notebook TYPE option<record<user_account>>;
+DEFINE FIELD IF NOT EXISTS owner_user ON TABLE note TYPE option<record<user_account>>;
+DEFINE FIELD IF NOT EXISTS owner_user ON TABLE source TYPE option<record<user_account>>;
+DEFINE FIELD IF NOT EXISTS owner_user ON TABLE chat_session TYPE option<record<user_account>>;
+
+DEFINE INDEX IF NOT EXISTS idx_notebook_owner_user ON TABLE notebook COLUMNS owner_user;
+DEFINE INDEX IF NOT EXISTS idx_note_owner_user ON TABLE note COLUMNS owner_user;
+DEFINE INDEX IF NOT EXISTS idx_source_owner_user ON TABLE source COLUMNS owner_user;
+DEFINE INDEX IF NOT EXISTS idx_chat_session_owner_user ON TABLE chat_session COLUMNS owner_user;

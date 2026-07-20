@@ -1,0 +1,1 @@
+DEFINE FIELD IF NOT EXISTS detected_change_details ON TABLE legal_crawl_candidate TYPE option<array>;

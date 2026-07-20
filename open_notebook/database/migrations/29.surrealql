@@ -1,0 +1,63 @@
+-- Migration 29: complete ownership/retention metadata missing from the chat-platform baseline.
+-- Additive only. Core tables and fields were introduced in migrations 16, 27, and 28.
+-- This migration never rewrites or assigns existing records.
+
+-- Preserve explicit notebook sharing through a support session for a later access-control step.
+DEFINE FIELD IF NOT EXISTS shared_notebook_ids ON TABLE support_session TYPE option<array<string>>;
+DEFINE FIELD IF NOT EXISTS linked_notebook_ids ON TABLE support_session TYPE option<array<string>>;
+DEFINE INDEX IF NOT EXISTS idx_support_session_legacy_source_path ON TABLE support_session COLUMNS legacy_source_path;
+
+-- Legal-case metadata needed for isolated account-level case management.
+DEFINE FIELD IF NOT EXISTS title ON TABLE legal_case TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS domain ON TABLE legal_case TYPE option<string>;
+DEFINE INDEX IF NOT EXISTS idx_legal_case_legacy_source_path ON TABLE legal_case COLUMNS legacy_source_path;
+
+-- Keep a 24-month expiry timestamp alongside immutable-style audit rows.
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE sensitive_access_audit TYPE option<datetime>;
+DEFINE INDEX IF NOT EXISTS idx_sensitive_access_audit_expires ON TABLE sensitive_access_audit COLUMNS expires_at;
+
+-- Existing legal-profile data may have no reliable owner. Mark such records for admin review;
+-- a separate backfill script is responsible for setting this flag, never this migration.
+DEFINE FIELD IF NOT EXISTS ownership_status ON TABLE notebook TYPE option<string> DEFAULT 'resolved';
+DEFINE FIELD IF NOT EXISTS ownership_status ON TABLE note TYPE option<string> DEFAULT 'resolved';
+DEFINE FIELD IF NOT EXISTS ownership_status ON TABLE source TYPE option<string> DEFAULT 'resolved';
+DEFINE FIELD IF NOT EXISTS ownership_status ON TABLE chat_session TYPE option<string> DEFAULT 'resolved';
+DEFINE INDEX IF NOT EXISTS idx_notebook_ownership_status ON TABLE notebook COLUMNS ownership_status;
+DEFINE INDEX IF NOT EXISTS idx_note_ownership_status ON TABLE note COLUMNS ownership_status;
+DEFINE INDEX IF NOT EXISTS idx_source_ownership_status ON TABLE source COLUMNS ownership_status;
+DEFINE INDEX IF NOT EXISTS idx_chat_session_ownership_status ON TABLE chat_session COLUMNS ownership_status;
+
+-- Retention configuration records the approved operational policy. A later retention job
+-- performs deletion/archiving; this migration does not delete any record.
+DEFINE TABLE IF NOT EXISTS retention_policy SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS policy_key ON TABLE retention_policy TYPE string;
+DEFINE FIELD IF NOT EXISTS resource_type ON TABLE retention_policy TYPE string;
+DEFINE FIELD IF NOT EXISTS retention_months ON TABLE retention_policy TYPE number;
+DEFINE FIELD IF NOT EXISTS notes ON TABLE retention_policy TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS created ON TABLE retention_policy TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS updated ON TABLE retention_policy TYPE option<datetime>;
+DEFINE INDEX IF NOT EXISTS idx_retention_policy_key ON TABLE retention_policy COLUMNS policy_key UNIQUE;
+
+UPSERT retention_policy:chat_messages SET
+  policy_key = 'chat_messages',
+  resource_type = 'conversation',
+  retention_months = 12,
+  notes = 'Chat thường lưu 12 tháng',
+  updated = time::now(),
+  created = time::now();
+
+UPSERT retention_policy:legal_case_attachments SET
+  policy_key = 'legal_case_attachments',
+  resource_type = 'legal_case',
+  retention_months = 6,
+  notes = 'Hồ sơ đính kèm lưu 6 tháng sau khi xử lý xong',
+  updated = time::now(),
+  created = time::now();
+
+UPSERT retention_policy:sensitive_access_audit SET
+  policy_key = 'sensitive_access_audit',
+  resource_type = 'sensitive_access_audit',
+  retention_months = 24,
+  notes = 'Audit log lưu 24 tháng',
+  updated = time::now(),
+  created = time::now();

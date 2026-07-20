@@ -1,0 +1,8 @@
+-- Rollback migration 28: remove only fields introduced in migration 28.
+REMOVE FIELD IF EXISTS grounding_status ON TABLE conversation_message;
+REMOVE FIELD IF EXISTS rag_trace ON TABLE conversation_message;
+REMOVE FIELD IF EXISTS procedure_detail ON TABLE conversation_message;
+REMOVE FIELD IF EXISTS faqs ON TABLE conversation_message;
+REMOVE FIELD IF EXISTS faq_refs ON TABLE conversation_message;
+REMOVE FIELD IF EXISTS recommended_forms ON TABLE conversation_message;
+REMOVE FIELD IF EXISTS status ON TABLE conversation_message;

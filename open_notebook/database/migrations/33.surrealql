@@ -1,0 +1,4 @@
+-- Migration 33: crawler run statistics contain deterministic counter keys.
+
+DEFINE FIELD OVERWRITE statistics ON TABLE legal_crawl_run TYPE object FLEXIBLE;
+DEFINE FIELD OVERWRITE last_run_stats ON TABLE legal_crawl_source TYPE option<object> FLEXIBLE;

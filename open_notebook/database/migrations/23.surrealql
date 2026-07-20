@@ -1,0 +1,2 @@
+-- Migration 23: allow structured source objects in SCHEMAFULL Ask audit records
+DEFINE FIELD IF NOT EXISTS sources.* ON TABLE user_ask_history TYPE object FLEXIBLE;

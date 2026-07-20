@@ -1,0 +1,27 @@
+﻿-- Migration 35: persistent approval-to-embedding jobs and source-asset provenance.
+-- Candidate review remains additive; no existing candidate is auto-assigned or activated.
+
+DEFINE TABLE IF NOT EXISTS legal_import_job SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS candidate ON TABLE legal_import_job TYPE record<legal_crawl_candidate>;
+DEFINE FIELD IF NOT EXISTS status ON TABLE legal_import_job TYPE string;
+DEFINE FIELD IF NOT EXISTS attempts ON TABLE legal_import_job TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS error_reason ON TABLE legal_import_job TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE legal_import_job TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS started_at ON TABLE legal_import_job TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS completed_at ON TABLE legal_import_job TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS document_id ON TABLE legal_import_job TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS structure ON TABLE legal_import_job TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS article_count ON TABLE legal_import_job TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS chunk_count ON TABLE legal_import_job TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS source_asset ON TABLE legal_import_job TYPE option<object> FLEXIBLE;
+DEFINE FIELD IF NOT EXISTS embedding_result ON TABLE legal_import_job TYPE option<object> FLEXIBLE;
+DEFINE FIELD IF NOT EXISTS created ON TABLE legal_import_job TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS updated ON TABLE legal_import_job TYPE option<datetime>;
+DEFINE INDEX IF NOT EXISTS idx_legal_import_job_candidate_created
+ON TABLE legal_import_job COLUMNS candidate, created_at;
+DEFINE INDEX IF NOT EXISTS idx_legal_import_job_status_created
+ON TABLE legal_import_job COLUMNS status, created_at;
+
+DEFINE FIELD IF NOT EXISTS import_job ON TABLE legal_crawl_candidate TYPE option<record<legal_import_job>>;
+DEFINE FIELD IF NOT EXISTS import_status ON TABLE legal_crawl_candidate TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS source_asset ON TABLE legal_crawl_candidate TYPE option<object> FLEXIBLE;

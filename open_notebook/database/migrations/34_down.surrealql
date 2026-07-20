@@ -1,0 +1,3 @@
+REMOVE FIELD IF EXISTS max_listing_pages_per_run ON TABLE legal_crawl_source;
+REMOVE FIELD IF EXISTS listing_cursor ON TABLE legal_crawl_source;
+REMOVE INDEX IF EXISTS idx_legal_crawl_candidate_content_hash ON TABLE legal_crawl_candidate;

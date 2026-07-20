@@ -1,0 +1,63 @@
+-- Migration 15: Legal crawler sources, review queue, and admin notifications
+
+DEFINE TABLE IF NOT EXISTS legal_crawl_source SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS name ON TABLE legal_crawl_source TYPE string;
+DEFINE FIELD IF NOT EXISTS source_type ON TABLE legal_crawl_source TYPE string;
+DEFINE FIELD IF NOT EXISTS sitemap_scope ON TABLE legal_crawl_source TYPE string;
+DEFINE FIELD IF NOT EXISTS base_url ON TABLE legal_crawl_source TYPE string;
+DEFINE FIELD IF NOT EXISTS enabled ON TABLE legal_crawl_source TYPE bool;
+DEFINE FIELD IF NOT EXISTS interval_minutes ON TABLE legal_crawl_source TYPE int;
+DEFINE FIELD IF NOT EXISTS lookback_days ON TABLE legal_crawl_source TYPE int;
+DEFINE FIELD IF NOT EXISTS max_documents_per_run ON TABLE legal_crawl_source TYPE int;
+DEFINE FIELD IF NOT EXISTS filter_keyword ON TABLE legal_crawl_source TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS last_checked_at ON TABLE legal_crawl_source TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS last_success_at ON TABLE legal_crawl_source TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS last_error ON TABLE legal_crawl_source TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS created ON TABLE legal_crawl_source TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS updated ON TABLE legal_crawl_source TYPE option<datetime>;
+
+DEFINE TABLE IF NOT EXISTS legal_crawl_candidate SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS source ON TABLE legal_crawl_candidate TYPE record<legal_crawl_source>;
+DEFINE FIELD IF NOT EXISTS external_id ON TABLE legal_crawl_candidate TYPE string;
+DEFINE FIELD IF NOT EXISTS detail_url ON TABLE legal_crawl_candidate TYPE string;
+DEFINE FIELD IF NOT EXISTS source_url ON TABLE legal_crawl_candidate TYPE string;
+DEFINE FIELD IF NOT EXISTS sitemap_url ON TABLE legal_crawl_candidate TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS sitemap_lastmod ON TABLE legal_crawl_candidate TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS law_number ON TABLE legal_crawl_candidate TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS title ON TABLE legal_crawl_candidate TYPE string;
+DEFINE FIELD IF NOT EXISTS description ON TABLE legal_crawl_candidate TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS document_type ON TABLE legal_crawl_candidate TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS issuing_agency ON TABLE legal_crawl_candidate TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS scope ON TABLE legal_crawl_candidate TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS status ON TABLE legal_crawl_candidate TYPE string;
+DEFINE FIELD IF NOT EXISTS suggested_action ON TABLE legal_crawl_candidate TYPE string;
+DEFINE FIELD IF NOT EXISTS comparison_status ON TABLE legal_crawl_candidate TYPE string;
+DEFINE FIELD IF NOT EXISTS detected_changes ON TABLE legal_crawl_candidate TYPE array;
+DEFINE FIELD IF NOT EXISTS review_note ON TABLE legal_crawl_candidate TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS imported_document ON TABLE legal_crawl_candidate TYPE option<object>;
+DEFINE FIELD IF NOT EXISTS raw_metadata ON TABLE legal_crawl_candidate TYPE option<object>;
+DEFINE FIELD IF NOT EXISTS content_hash ON TABLE legal_crawl_candidate TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS reviewed_at ON TABLE legal_crawl_candidate TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS created ON TABLE legal_crawl_candidate TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS updated ON TABLE legal_crawl_candidate TYPE option<datetime>;
+
+DEFINE INDEX IF NOT EXISTS legal_crawl_candidate_external_id_idx
+ON TABLE legal_crawl_candidate COLUMNS external_id UNIQUE;
+
+DEFINE INDEX IF NOT EXISTS legal_crawl_candidate_status_idx
+ON TABLE legal_crawl_candidate COLUMNS status;
+
+DEFINE INDEX IF NOT EXISTS legal_crawl_candidate_law_number_idx
+ON TABLE legal_crawl_candidate COLUMNS law_number;
+
+DEFINE TABLE IF NOT EXISTS legal_admin_notification SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS type ON TABLE legal_admin_notification TYPE string;
+DEFINE FIELD IF NOT EXISTS title ON TABLE legal_admin_notification TYPE string;
+DEFINE FIELD IF NOT EXISTS message ON TABLE legal_admin_notification TYPE string;
+DEFINE FIELD IF NOT EXISTS candidate ON TABLE legal_admin_notification TYPE option<record<legal_crawl_candidate>>;
+DEFINE FIELD IF NOT EXISTS read_at ON TABLE legal_admin_notification TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS created ON TABLE legal_admin_notification TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS updated ON TABLE legal_admin_notification TYPE option<datetime>;
+
+DEFINE INDEX IF NOT EXISTS legal_admin_notification_read_idx
+ON TABLE legal_admin_notification COLUMNS read_at;

@@ -1,0 +1,6 @@
+Found 1 article links
+  https://dbndhaiphong.gov.vn/van-ban-cua-cac-co-quan-trung-uong-tra-loi-kien-nghi-cu-tri-tp-hai-phong
+    Ý kiến các cơ quan Trung ương trả lời cử tri TP. Hải Phòng
+
+H1s: ['Thành phố Hải Phòng', 'English|Japanese|Korean|Chinese', 'Văn bản quy phạm pháp luật']
+Title: Văn bản quy phạm pháp luật - Cổng Thông tin điện tử Thành phố Hải Phòng

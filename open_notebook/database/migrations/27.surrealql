@@ -1,0 +1,131 @@
+-- Migration 27: persistent chat, support, legal-case, sensitive-access, and document-proposal baseline
+-- Additive only. Existing JSON-based Ask sessions and support tickets remain unchanged
+-- until an explicit backfill safely resolves an owner.
+
+-- User profile extensions for operational assignment and first-login hygiene.
+DEFINE FIELD IF NOT EXISTS ward ON TABLE user_profile TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS ward_scope ON TABLE user_profile TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS allowed_domains ON TABLE user_profile TYPE option<array<string>>;
+DEFINE FIELD IF NOT EXISTS must_change_password ON TABLE user_profile TYPE bool DEFAULT false;
+
+-- Persistent AI and human conversations. owner_user is nullable only to permit an
+-- explicit needs_admin_review backfill record; new application writes must require it.
+DEFINE TABLE IF NOT EXISTS conversation SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS owner_user ON TABLE conversation TYPE option<record<user_account>>;
+DEFINE FIELD IF NOT EXISTS role_context ON TABLE conversation TYPE string;
+DEFINE FIELD IF NOT EXISTS domain ON TABLE conversation TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS title ON TABLE conversation TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS status ON TABLE conversation TYPE string DEFAULT 'active';
+DEFINE FIELD IF NOT EXISTS ownership_status ON TABLE conversation TYPE string DEFAULT 'resolved';
+DEFINE FIELD IF NOT EXISTS legacy_source_path ON TABLE conversation TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE conversation TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS last_message_at ON TABLE conversation TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE conversation TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS created ON TABLE conversation TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS updated ON TABLE conversation TYPE option<datetime>;
+
+DEFINE INDEX IF NOT EXISTS idx_conversation_owner_last_message
+ON TABLE conversation COLUMNS owner_user, last_message_at;
+DEFINE INDEX IF NOT EXISTS idx_conversation_status_expires
+ON TABLE conversation COLUMNS status, expires_at;
+DEFINE INDEX IF NOT EXISTS idx_conversation_ownership_status
+ON TABLE conversation COLUMNS ownership_status;
+
+DEFINE TABLE IF NOT EXISTS conversation_message SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS conversation ON TABLE conversation_message TYPE record<conversation>;
+DEFINE FIELD IF NOT EXISTS sender_user ON TABLE conversation_message TYPE option<record<user_account>>;
+DEFINE FIELD IF NOT EXISTS sender_role ON TABLE conversation_message TYPE string;
+DEFINE FIELD IF NOT EXISTS content ON TABLE conversation_message TYPE string;
+DEFINE FIELD IF NOT EXISTS attachments ON TABLE conversation_message TYPE option<array<object>> FLEXIBLE;
+DEFINE FIELD IF NOT EXISTS citations_snapshot ON TABLE conversation_message TYPE option<array<object>> FLEXIBLE;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE conversation_message TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS created ON TABLE conversation_message TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS updated ON TABLE conversation_message TYPE option<datetime>;
+
+DEFINE INDEX IF NOT EXISTS idx_conversation_message_conversation_created
+ON TABLE conversation_message COLUMNS conversation, created_at;
+DEFINE INDEX IF NOT EXISTS idx_conversation_message_sender
+ON TABLE conversation_message COLUMNS sender_user;
+
+-- Live-support assignment state. Messages remain conversation_message rows when the
+-- support transport is migrated; legacy ticket JSON is preserved until then.
+DEFINE TABLE IF NOT EXISTS support_session SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS citizen ON TABLE support_session TYPE option<record<user_account>>;
+DEFINE FIELD IF NOT EXISTS officer ON TABLE support_session TYPE option<record<user_account>>;
+DEFINE FIELD IF NOT EXISTS conversation ON TABLE support_session TYPE option<record<conversation>>;
+DEFINE FIELD IF NOT EXISTS domain ON TABLE support_session TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS queue_status ON TABLE support_session TYPE string DEFAULT 'queued';
+DEFINE FIELD IF NOT EXISTS ownership_status ON TABLE support_session TYPE string DEFAULT 'resolved';
+DEFINE FIELD IF NOT EXISTS legacy_source_path ON TABLE support_session TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS assigned_at ON TABLE support_session TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS closed_at ON TABLE support_session TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS resolution_note ON TABLE support_session TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS created ON TABLE support_session TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS updated ON TABLE support_session TYPE option<datetime>;
+
+DEFINE INDEX IF NOT EXISTS idx_support_session_citizen ON TABLE support_session COLUMNS citizen;
+DEFINE INDEX IF NOT EXISTS idx_support_session_officer_queue ON TABLE support_session COLUMNS officer, queue_status;
+DEFINE INDEX IF NOT EXISTS idx_support_session_domain_queue ON TABLE support_session COLUMNS domain, queue_status;
+DEFINE INDEX IF NOT EXISTS idx_support_session_ownership_status ON TABLE support_session COLUMNS ownership_status;
+
+-- A legal case is always account-scoped; no shared default folder is introduced.
+DEFINE TABLE IF NOT EXISTS legal_case SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS owner_user ON TABLE legal_case TYPE option<record<user_account>>;
+DEFINE FIELD IF NOT EXISTS assigned_officer ON TABLE legal_case TYPE option<record<user_account>>;
+DEFINE FIELD IF NOT EXISTS status ON TABLE legal_case TYPE string DEFAULT 'open';
+DEFINE FIELD IF NOT EXISTS ownership_status ON TABLE legal_case TYPE string DEFAULT 'resolved';
+DEFINE FIELD IF NOT EXISTS legacy_source_path ON TABLE legal_case TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS closed_at ON TABLE legal_case TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE legal_case TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS created ON TABLE legal_case TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS updated ON TABLE legal_case TYPE option<datetime>;
+
+DEFINE INDEX IF NOT EXISTS idx_legal_case_owner ON TABLE legal_case COLUMNS owner_user;
+DEFINE INDEX IF NOT EXISTS idx_legal_case_officer_status ON TABLE legal_case COLUMNS assigned_officer, status;
+DEFINE INDEX IF NOT EXISTS idx_legal_case_expires ON TABLE legal_case COLUMNS expires_at;
+DEFINE INDEX IF NOT EXISTS idx_legal_case_ownership_status ON TABLE legal_case COLUMNS ownership_status;
+
+-- Immutable-style access audit. The application must create a row before opening
+-- sensitive cross-account content and cannot update/delete rows through normal APIs.
+DEFINE TABLE IF NOT EXISTS sensitive_access_audit SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS actor ON TABLE sensitive_access_audit TYPE option<record<user_account>>;
+DEFINE FIELD IF NOT EXISTS resource_type ON TABLE sensitive_access_audit TYPE string;
+DEFINE FIELD IF NOT EXISTS resource_id ON TABLE sensitive_access_audit TYPE string;
+DEFINE FIELD IF NOT EXISTS reason ON TABLE sensitive_access_audit TYPE string;
+DEFINE FIELD IF NOT EXISTS action ON TABLE sensitive_access_audit TYPE string;
+DEFINE FIELD IF NOT EXISTS request_metadata ON TABLE sensitive_access_audit TYPE option<object> FLEXIBLE;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE sensitive_access_audit TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS created ON TABLE sensitive_access_audit TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS updated ON TABLE sensitive_access_audit TYPE option<datetime>;
+
+DEFINE INDEX IF NOT EXISTS idx_sensitive_access_audit_actor_created
+ON TABLE sensitive_access_audit COLUMNS actor, created_at;
+DEFINE INDEX IF NOT EXISTS idx_sensitive_access_audit_resource_created
+ON TABLE sensitive_access_audit COLUMNS resource_type, resource_id, created_at;
+
+-- Officer/admin document proposals. This table is distinct from legal_crawl_candidate
+-- so existing crawler workflow and approval state are never rewritten.
+DEFINE TABLE IF NOT EXISTS document_candidate SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS submitted_by ON TABLE document_candidate TYPE option<record<user_account>>;
+DEFINE FIELD IF NOT EXISTS domain ON TABLE document_candidate TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS source_type ON TABLE document_candidate TYPE string;
+DEFINE FIELD IF NOT EXISTS source_url ON TABLE document_candidate TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS title ON TABLE document_candidate TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS review_status ON TABLE document_candidate TYPE string DEFAULT 'pending_review';
+DEFINE FIELD IF NOT EXISTS ownership_status ON TABLE document_candidate TYPE string DEFAULT 'resolved';
+DEFINE FIELD IF NOT EXISTS legacy_source_path ON TABLE document_candidate TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS ocr_score ON TABLE document_candidate TYPE option<number>;
+DEFINE FIELD IF NOT EXISTS ai_relevance_score ON TABLE document_candidate TYPE option<number>;
+DEFINE FIELD IF NOT EXISTS ai_compatibility_score ON TABLE document_candidate TYPE option<number>;
+DEFINE FIELD IF NOT EXISTS ai_assessment ON TABLE document_candidate TYPE option<object> FLEXIBLE;
+DEFINE FIELD IF NOT EXISTS rejection_reason ON TABLE document_candidate TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS reviewed_by ON TABLE document_candidate TYPE option<record<user_account>>;
+DEFINE FIELD IF NOT EXISTS reviewed_at ON TABLE document_candidate TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS created ON TABLE document_candidate TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS updated ON TABLE document_candidate TYPE option<datetime>;
+
+DEFINE INDEX IF NOT EXISTS idx_document_candidate_submitter ON TABLE document_candidate COLUMNS submitted_by;
+DEFINE INDEX IF NOT EXISTS idx_document_candidate_domain_review
+ON TABLE document_candidate COLUMNS domain, review_status;
+DEFINE INDEX IF NOT EXISTS idx_document_candidate_ownership_status
+ON TABLE document_candidate COLUMNS ownership_status;

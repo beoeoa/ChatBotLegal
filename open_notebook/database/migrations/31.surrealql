@@ -1,0 +1,21 @@
+-- Migration 31: candidate-first VBPL crawler run history and safety controls.
+
+DEFINE FIELD IF NOT EXISTS domains ON TABLE legal_crawl_source TYPE option<array<string>>;
+DEFINE FIELD IF NOT EXISTS rate_limit_seconds ON TABLE legal_crawl_source TYPE option<number>;
+DEFINE FIELD IF NOT EXISTS content_fetch_allowed ON TABLE legal_crawl_source TYPE option<bool>;
+DEFINE FIELD IF NOT EXISTS listing_cursor ON TABLE legal_crawl_source TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS max_listing_pages_per_run ON TABLE legal_crawl_source TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS last_run_stats ON TABLE legal_crawl_source TYPE option<object>;
+DEFINE FIELD IF NOT EXISTS source_freshness ON TABLE legal_crawl_source TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS last_status ON TABLE legal_crawl_source TYPE option<string>;
+
+DEFINE TABLE IF NOT EXISTS legal_crawl_run SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS source ON TABLE legal_crawl_run TYPE record<legal_crawl_source>;
+DEFINE FIELD IF NOT EXISTS status ON TABLE legal_crawl_run TYPE string;
+DEFINE FIELD IF NOT EXISTS started_at ON TABLE legal_crawl_run TYPE datetime;
+DEFINE FIELD IF NOT EXISTS finished_at ON TABLE legal_crawl_run TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS statistics ON TABLE legal_crawl_run TYPE object;
+DEFINE FIELD IF NOT EXISTS failure_reason ON TABLE legal_crawl_run TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS source_freshness ON TABLE legal_crawl_run TYPE option<datetime>;
+DEFINE INDEX IF NOT EXISTS idx_legal_crawl_run_source_started
+ON TABLE legal_crawl_run COLUMNS source, started_at;

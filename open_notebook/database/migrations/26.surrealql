@@ -1,0 +1,9 @@
+-- Migration 26: allow structured imported_document snapshot on crawl candidates
+DEFINE FIELD OVERWRITE imported_document ON TABLE legal_crawl_candidate TYPE option<object> FLEXIBLE;
+DEFINE FIELD IF NOT EXISTS imported_document.document_id ON TABLE legal_crawl_candidate TYPE option<number>;
+DEFINE FIELD IF NOT EXISTS imported_document.law_number ON TABLE legal_crawl_candidate TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS imported_document.structure ON TABLE legal_crawl_candidate TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS imported_document.article_count ON TABLE legal_crawl_candidate TYPE option<number>;
+DEFINE FIELD IF NOT EXISTS imported_document.chunk_count ON TABLE legal_crawl_candidate TYPE option<number>;
+DEFINE FIELD IF NOT EXISTS imported_document.status ON TABLE legal_crawl_candidate TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS imported_document.model ON TABLE legal_crawl_candidate TYPE option<string>;

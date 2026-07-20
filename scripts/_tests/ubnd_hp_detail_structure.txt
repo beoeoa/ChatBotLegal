@@ -1,0 +1,55 @@
+TITLE: Chi tiết văn bản điều hành
+H1: Thành phố Hải Phòng
+
+SELECTOR: [class*=detail] -> 0 chars
+
+
+BEST ELEMENT: div len=3967 id= class=['MainStructure', 'table-3-col']
+Cổng thông tin điện tử
+Thành phố Hải Phòng
+English
+|
+Japanese
+|
+Korean
+|
+Chinese
+Trang chủ
+Tin tức - Sự kiện
+Tin lãnh đạo thành phố
+Tin sở, ngành
+Tin địa phương
+Công dân
+Doanh nghiệp
+Hoạt động hỗ trợ doanh nghiệp
+Cùng thành công
+Công bố thông tin của doanh nghiệp nhà nước
+Tiếp cận thông tin
+Thông tin giới thiệu
+Thành phố Hải Phòng
+Bộ máy tổ chức
+Danh sách người phát ngôn
+Lịch tiếp dân
+Thông báo kết luận Tiếp công dân
+Thông tin kinh tế, xã hội
+Báo Cáo Kinh Tế Xã Hội Thành Phố
+Bảng Giá Đất
+Chiến Lược, Định Hướng, Kế Hoạch Phát triển
+Chiến lược, Kế hoạch, Quy hoạch phát triển kinh tế - xã hội
+Công bố Quy hoạch
+Danh mục Dự án, Chương trình
+Đầu tư công
+Công khai ngân sách
+Hệ Thống Văn Bản
+Cơ sở dữ liệu văn bản pháp luật
+Văn bản Bộ, ngành Trung ương
+Công báo
+Văn bản quy phạm pháp luật
+Văn bản chỉ đạo điều hành
+Thủ tục Hành chính
+Kiểm soát TTHC
+Danh mục Thủ tục Hành chính
+Tra cứu Thủ tục hành chính
+Phổ biến, giáo dục pháp luật
+Thông tin đấu thầu, đấu giá
+Kết nối thủ tục giấy phép kinh doanh c

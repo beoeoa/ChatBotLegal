@@ -1,0 +1,14 @@
+-- Rollback migration 30: remove officer proposal metadata from candidate queue.
+
+REMOVE INDEX IF EXISTS idx_legal_crawl_candidate_submitted_by ON TABLE legal_crawl_candidate;
+REMOVE INDEX IF EXISTS idx_legal_crawl_candidate_domain_status ON TABLE legal_crawl_candidate;
+
+REMOVE FIELD IF EXISTS requested_changes_note ON TABLE legal_crawl_candidate;
+REMOVE FIELD IF EXISTS legal_validity_flags ON TABLE legal_crawl_candidate;
+REMOVE FIELD IF EXISTS duplicate_candidates ON TABLE legal_crawl_candidate;
+REMOVE FIELD IF EXISTS extraction_result ON TABLE legal_crawl_candidate;
+REMOVE FIELD IF EXISTS uploaded_file ON TABLE legal_crawl_candidate;
+REMOVE FIELD IF EXISTS proposal_reason ON TABLE legal_crawl_candidate;
+REMOVE FIELD IF EXISTS source_type ON TABLE legal_crawl_candidate;
+REMOVE FIELD IF EXISTS domain ON TABLE legal_crawl_candidate;
+REMOVE FIELD IF EXISTS submitted_by ON TABLE legal_crawl_candidate;

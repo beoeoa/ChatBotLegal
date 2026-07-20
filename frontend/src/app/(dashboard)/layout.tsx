@@ -1,0 +1,76 @@
+'use client'
+
+import { useAuth } from '@/lib/hooks/use-auth'
+import { useVersionCheck } from '@/lib/hooks/use-version-check'
+import { useRouter } from 'next/navigation'
+import dynamic from 'next/dynamic'
+import { useEffect, useState } from 'react'
+import { LoadingSpinner } from '@/components/common/LoadingSpinner'
+import { ErrorBoundary } from '@/components/common/ErrorBoundary'
+import { ModalProvider } from '@/components/providers/ModalProvider'
+import { CreateDialogsProvider } from '@/lib/hooks/use-create-dialogs'
+import { getAuthRedirect } from '@/lib/auth/route-guard'
+
+const CommandPalette = dynamic(
+  () => import('@/components/common/CommandPalette').then((module) => module.CommandPalette),
+  { ssr: false },
+)
+
+export default function DashboardLayout({
+  children,
+}: {
+  children: React.ReactNode
+}) {
+  const { isAuthenticated, isLoading, role, mustChangePassword } = useAuth()
+  const router = useRouter()
+  const [hasCheckedAuth, setHasCheckedAuth] = useState(false)
+
+  // Check for version updates once per session
+  useVersionCheck()
+
+  useEffect(() => {
+    // Mark that we've completed the initial auth check
+    if (!isLoading) {
+      setHasCheckedAuth(true)
+
+      if (!isAuthenticated) {
+        // Store the current path to redirect back after login
+        const currentPath = window.location.pathname + window.location.search
+        sessionStorage.setItem('redirectAfterLogin', currentPath)
+        router.push('/login')
+      } else {
+        const redirect = getAuthRedirect({
+          isAuthenticated,
+          role,
+          mustChangePassword,
+          pathname: window.location.pathname,
+        })
+        if (redirect) router.replace(redirect)
+      }
+    }
+  }, [isAuthenticated, isLoading, role, mustChangePassword, router])
+
+  // Show loading spinner during initial auth check or while loading
+  if (isLoading || !hasCheckedAuth) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <LoadingSpinner />
+      </div>
+    )
+  }
+
+  // Don't render anything if not authenticated (during redirect)
+  if (!isAuthenticated || !role) {
+    return null
+  }
+
+  return (
+    <ErrorBoundary>
+      <CreateDialogsProvider>
+        {children}
+        <ModalProvider />
+        <CommandPalette />
+      </CreateDialogsProvider>
+    </ErrorBoundary>
+  )
+}

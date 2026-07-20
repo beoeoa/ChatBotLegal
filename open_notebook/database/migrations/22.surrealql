@@ -1,0 +1,5 @@
+-- Migration 22: extend Ask audit history with grounding and upload-security metadata
+DEFINE FIELD IF NOT EXISTS department ON TABLE user_ask_history TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS sources ON TABLE user_ask_history TYPE option<array<object>> FLEXIBLE;
+DEFINE FIELD IF NOT EXISTS grounding_status ON TABLE user_ask_history TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS file_upload_metadata ON TABLE user_ask_history TYPE option<object> FLEXIBLE;

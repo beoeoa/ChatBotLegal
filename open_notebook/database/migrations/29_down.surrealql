@@ -1,0 +1,25 @@
+-- Rollback migration 29: remove only fields, indexes, and the table introduced in migration 29.
+-- Core chat-platform tables/fields from migrations 16, 27, and 28 are retained.
+
+REMOVE INDEX IF EXISTS idx_retention_policy_key ON TABLE retention_policy;
+REMOVE TABLE IF EXISTS retention_policy;
+
+REMOVE INDEX IF EXISTS idx_chat_session_ownership_status ON TABLE chat_session;
+REMOVE INDEX IF EXISTS idx_source_ownership_status ON TABLE source;
+REMOVE INDEX IF EXISTS idx_note_ownership_status ON TABLE note;
+REMOVE INDEX IF EXISTS idx_notebook_ownership_status ON TABLE notebook;
+REMOVE FIELD IF EXISTS ownership_status ON TABLE chat_session;
+REMOVE FIELD IF EXISTS ownership_status ON TABLE source;
+REMOVE FIELD IF EXISTS ownership_status ON TABLE note;
+REMOVE FIELD IF EXISTS ownership_status ON TABLE notebook;
+
+REMOVE INDEX IF EXISTS idx_sensitive_access_audit_expires ON TABLE sensitive_access_audit;
+REMOVE FIELD IF EXISTS expires_at ON TABLE sensitive_access_audit;
+
+REMOVE INDEX IF EXISTS idx_legal_case_legacy_source_path ON TABLE legal_case;
+REMOVE FIELD IF EXISTS domain ON TABLE legal_case;
+REMOVE FIELD IF EXISTS title ON TABLE legal_case;
+
+REMOVE INDEX IF EXISTS idx_support_session_legacy_source_path ON TABLE support_session;
+REMOVE FIELD IF EXISTS linked_notebook_ids ON TABLE support_session;
+REMOVE FIELD IF EXISTS shared_notebook_ids ON TABLE support_session;

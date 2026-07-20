@@ -1,0 +1,72 @@
+services:
+  surrealdb:
+    image: surrealdb/surrealdb:v2
+    command: start --log info --user root --pass ${SURREAL_PASSWORD} rocksdb:/mydata/mydatabase.db
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./release-data/surreal_data:/mydata
+    healthcheck:
+      test: ["CMD", "/surreal", "is-ready", "--endpoint", "http://localhost:8000"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 10s
+
+  legal_retrieval:
+    build:
+      context: .
+      dockerfile: Dockerfile.retrieval
+    image: chatbotlegal-retrieval:release
+    ports:
+      - "8765:8765"
+    environment:
+      LEGAL_DATA_ROOT: /data/legal
+      LEGAL_CHROMA_PATH: /data/legal/chroma_store
+      LEGAL_EMBED_DEVICE: ${LEGAL_EMBED_DEVICE:-cpu}
+    volumes:
+      - ./release-data/legal:/data/legal:ro
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8765/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_ASK_SSE_ENABLED: ${NEXT_PUBLIC_ASK_SSE_ENABLED:-false}
+    image: chatbotlegal-app:release
+    ports:
+      - "3000:8502"
+      - "5055:5055"
+    environment:
+      OPEN_NOTEBOOK_PASSWORD: ${OPEN_NOTEBOOK_PASSWORD}
+      OPEN_NOTEBOOK_ENCRYPTION_KEY: ${OPEN_NOTEBOOK_ENCRYPTION_KEY}
+      SURREAL_URL: ws://surrealdb:8000/rpc
+      SURREAL_USER: root
+      SURREAL_PASSWORD: ${SURREAL_PASSWORD}
+      SURREAL_NAMESPACE: open_notebook
+      SURREAL_DATABASE: open_notebook
+      LEGAL_SEARCH_URL: http://legal_retrieval:8765
+      LEGAL_LLM_TIMEOUT_SECONDS: ${LEGAL_LLM_TIMEOUT_SECONDS:-90}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      LEGAL_SECTION_GROUNDING_ENABLED: ${LEGAL_SECTION_GROUNDING_ENABLED:-false}
+    volumes:
+      - ./release-data/notebook_data:/app/data
+      - ./release-data/forms:/app/data/uploads/forms:ro
+    depends_on:
+      surrealdb:
+        condition: service_healthy
+      legal_retrieval:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:5055/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 45s

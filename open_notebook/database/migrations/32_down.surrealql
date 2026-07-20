@@ -1,0 +1,1 @@
+REMOVE FIELD IF EXISTS review_recommendation ON TABLE legal_crawl_candidate;

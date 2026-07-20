@@ -1,0 +1,37 @@
+-- Rollback migration 27. Run only after exporting the seven new tables if their
+-- records must be retained outside SurrealDB. Legacy JSON data is never touched.
+
+REMOVE INDEX IF EXISTS idx_document_candidate_ownership_status ON TABLE document_candidate;
+REMOVE INDEX IF EXISTS idx_document_candidate_domain_review ON TABLE document_candidate;
+REMOVE INDEX IF EXISTS idx_document_candidate_submitter ON TABLE document_candidate;
+REMOVE TABLE IF EXISTS document_candidate;
+
+REMOVE INDEX IF EXISTS idx_sensitive_access_audit_resource_created ON TABLE sensitive_access_audit;
+REMOVE INDEX IF EXISTS idx_sensitive_access_audit_actor_created ON TABLE sensitive_access_audit;
+REMOVE TABLE IF EXISTS sensitive_access_audit;
+
+REMOVE INDEX IF EXISTS idx_legal_case_ownership_status ON TABLE legal_case;
+REMOVE INDEX IF EXISTS idx_legal_case_expires ON TABLE legal_case;
+REMOVE INDEX IF EXISTS idx_legal_case_officer_status ON TABLE legal_case;
+REMOVE INDEX IF EXISTS idx_legal_case_owner ON TABLE legal_case;
+REMOVE TABLE IF EXISTS legal_case;
+
+REMOVE INDEX IF EXISTS idx_support_session_ownership_status ON TABLE support_session;
+REMOVE INDEX IF EXISTS idx_support_session_domain_queue ON TABLE support_session;
+REMOVE INDEX IF EXISTS idx_support_session_officer_queue ON TABLE support_session;
+REMOVE INDEX IF EXISTS idx_support_session_citizen ON TABLE support_session;
+REMOVE TABLE IF EXISTS support_session;
+
+REMOVE INDEX IF EXISTS idx_conversation_message_sender ON TABLE conversation_message;
+REMOVE INDEX IF EXISTS idx_conversation_message_conversation_created ON TABLE conversation_message;
+REMOVE TABLE IF EXISTS conversation_message;
+
+REMOVE INDEX IF EXISTS idx_conversation_ownership_status ON TABLE conversation;
+REMOVE INDEX IF EXISTS idx_conversation_status_expires ON TABLE conversation;
+REMOVE INDEX IF EXISTS idx_conversation_owner_last_message ON TABLE conversation;
+REMOVE TABLE IF EXISTS conversation;
+
+REMOVE FIELD IF EXISTS must_change_password ON TABLE user_profile;
+REMOVE FIELD IF EXISTS allowed_domains ON TABLE user_profile;
+REMOVE FIELD IF EXISTS ward_scope ON TABLE user_profile;
+REMOVE FIELD IF EXISTS ward ON TABLE user_profile;

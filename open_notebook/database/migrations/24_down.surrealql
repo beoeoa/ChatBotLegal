@@ -1,0 +1,2 @@
+DEFINE FIELD OVERWRITE sources ON TABLE user_ask_history TYPE option<array<object>> FLEXIBLE;
+REMOVE FIELD IF EXISTS sources.* ON TABLE user_ask_history;

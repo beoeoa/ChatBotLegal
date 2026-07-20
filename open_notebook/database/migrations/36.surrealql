@@ -1,0 +1,22 @@
+-- Migration 36: persistent candidate processing jobs (OCR/extraction).
+-- Heavy review extraction is off-request. Candidates remain pending until admin review.
+
+DEFINE TABLE IF NOT EXISTS legal_candidate_processing_job SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS candidate ON TABLE legal_candidate_processing_job TYPE record<legal_crawl_candidate>;
+DEFINE FIELD IF NOT EXISTS job_type ON TABLE legal_candidate_processing_job TYPE string;
+DEFINE FIELD IF NOT EXISTS status ON TABLE legal_candidate_processing_job TYPE string;
+DEFINE FIELD IF NOT EXISTS attempts ON TABLE legal_candidate_processing_job TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS error_reason ON TABLE legal_candidate_processing_job TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE legal_candidate_processing_job TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS started_at ON TABLE legal_candidate_processing_job TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS completed_at ON TABLE legal_candidate_processing_job TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS result_summary ON TABLE legal_candidate_processing_job TYPE option<object> FLEXIBLE;
+DEFINE FIELD IF NOT EXISTS created ON TABLE legal_candidate_processing_job TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS updated ON TABLE legal_candidate_processing_job TYPE option<datetime>;
+DEFINE INDEX IF NOT EXISTS idx_legal_candidate_processing_job_candidate_status
+ON TABLE legal_candidate_processing_job COLUMNS candidate, status;
+DEFINE INDEX IF NOT EXISTS idx_legal_candidate_processing_job_status_created
+ON TABLE legal_candidate_processing_job COLUMNS status, created_at;
+
+DEFINE FIELD IF NOT EXISTS processing_job ON TABLE legal_crawl_candidate TYPE option<record<legal_candidate_processing_job>>;
+DEFINE FIELD IF NOT EXISTS processing_status ON TABLE legal_crawl_candidate TYPE option<string>;

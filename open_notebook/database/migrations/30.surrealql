@@ -1,0 +1,18 @@
+-- Migration 30: officer document proposal metadata for candidate-first review.
+-- Additive only. Officer submissions remain pending until admin review/import.
+
+DEFINE FIELD IF NOT EXISTS submitted_by ON TABLE legal_crawl_candidate TYPE option<record>;
+DEFINE FIELD IF NOT EXISTS domain ON TABLE legal_crawl_candidate TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS source_type ON TABLE legal_crawl_candidate TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS proposal_reason ON TABLE legal_crawl_candidate TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS uploaded_file ON TABLE legal_crawl_candidate TYPE option<object>;
+DEFINE FIELD IF NOT EXISTS extraction_result ON TABLE legal_crawl_candidate TYPE option<object>;
+DEFINE FIELD IF NOT EXISTS duplicate_candidates ON TABLE legal_crawl_candidate TYPE option<array<object>>;
+DEFINE FIELD IF NOT EXISTS legal_validity_flags ON TABLE legal_crawl_candidate TYPE option<object>;
+DEFINE FIELD IF NOT EXISTS requested_changes_note ON TABLE legal_crawl_candidate TYPE option<string>;
+
+DEFINE INDEX IF NOT EXISTS idx_legal_crawl_candidate_domain_status
+ON TABLE legal_crawl_candidate COLUMNS domain, status;
+
+DEFINE INDEX IF NOT EXISTS idx_legal_crawl_candidate_submitted_by
+ON TABLE legal_crawl_candidate COLUMNS submitted_by;

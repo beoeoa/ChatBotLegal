@@ -1,0 +1,43 @@
+async def download_official_form_source(form_id: str):
+    """Serve only approved official form files.
+
+    Pending/rejected candidates must never be downloadable here.
+    """
+    approved_ids = _get_approved_form_ids()
+    if str(form_id) not in approved_ids:
+        raise HTTPException(
+            status_code=404,
+            detail="Bieu mau chua duoc duyet hoac khong ton tai.",
+        )
+
+    priority_payload = _load_forms_json(PRIORITY_FORMS_CATALOG_PATH, {"forms": []})
+    broad_payload = _load_forms_json(OFFICIAL_FORMS_CATALOG_PATH, {"forms": []})
+    index_payload = _load_forms_json(OFFICIAL_FORMS_INDEX_PATH, {"forms": []})
+    classified = _load_forms_json(CLASSIFIED_FORMS_CANDIDATES_PATH, {"records": []})
+
+    pool: list[dict] = []
+    pool.extend(priority_payload.get("forms") or [])
+    pool.extend(broad_payload.get("forms") or [])
+    pool.extend(index_payload.get("forms") or [])
+    # Map classified approved records into downloadable shape
+    for rec in classified.get("records") or []:
+        if str(rec.get("id")) != str(form_id):
+            continue
+        if rec.get("review_status") != "approved" and rec.get("is_approved") is not True:
+            continue
+        pool.append(
+            {
+                "id": rec.get("id"),
+                "review_status": "approved",
+                "catalog_status": "available_official_source",
+                "source_package_path": rec.get("priority_path")
+                or rec.get("local_path")
+                or rec.get("file_path"),
+                "local_path": rec.get("priority_path") or rec.get("local_path") or rec.get("file_path"),
+            }
+        )
+
+    record = None
+    for item in pool:
+        if str(item.get("id")) == str(form_id):
+            # prefer records that already point to priority_
