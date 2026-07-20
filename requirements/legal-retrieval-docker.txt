@@ -4,7 +4,7 @@
 --index-url https://pypi.org/simple
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.8.0+cpu
-chromadb==1.5.9
+chromadb==1.1.0
 fastapi==0.136.3
 numpy==2.4.6
 pydantic==2.13.4

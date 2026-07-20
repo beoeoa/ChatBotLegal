@@ -464,6 +464,16 @@ def _safe_pdf_filename(value: str) -> str:
     return safe[:80] or "legal-document"
 
 
+class _VectorUnavailableCollection:
+    """Neutral Chroma-compatible surface for the SQL-only fallback."""
+
+    def query(self, **_: Any) -> dict[str, list[list[Any]]]:
+        return {"ids": [[]], "metadatas": [[]], "distances": [[]]}
+
+    def count(self) -> int:
+        return 0
+
+
 class LegalRetriever:
     def __init__(self) -> None:
         self._load_lock = Lock()
@@ -476,6 +486,7 @@ class LegalRetriever:
         self._model = None
         self._collection = None
         self._source_collection = None
+        self._vector_index_available = True
         self._requested_device = os.getenv("LEGAL_EMBED_DEVICE", "auto").strip().lower()
         self._embedding_device = torch.device("cpu")
         self._embedding_dtype = torch.float32
@@ -548,9 +559,21 @@ class LegalRetriever:
                         pass
                     self._load_model_for_device(torch.device("cpu"), torch.float32)
             if self._collection is None:
-                client = chromadb.PersistentClient(path=str(CHROMA_PATH))
-                self._collection = client.get_collection(CHROMA_COLLECTION)
-                self._source_collection = client.get_collection(CHROMA_SOURCE_COLLECTION)
+                try:
+                    client = chromadb.PersistentClient(path=str(CHROMA_PATH))
+                    self._collection = client.get_collection(CHROMA_COLLECTION)
+                    self._source_collection = client.get_collection(
+                        CHROMA_SOURCE_COLLECTION
+                    )
+                    self._vector_index_available = True
+                except Exception:
+                    # A persisted index may have been written by an older
+                    # Chroma runtime. Keep legal search available through the
+                    # reviewed SQL lexical path rather than serving a 503 or
+                    # treating unrelated evidence as a substitute.
+                    self._collection = _VectorUnavailableCollection()
+                    self._source_collection = self._collection
+                    self._vector_index_available = False
 
     def _compute_query_embedding(self, prepared_query: str) -> np.ndarray:
         self._load()
@@ -1085,13 +1108,6 @@ class LegalRetriever:
                 _repair_display_row(dict(row))
                 for row in connection.execute(list_statement, params).mappings()
             ]
-        try:
-            indexed_records = self._collection.count()
-        except Exception:
-            # Older persisted Chroma stores can expose a Rust binding without
-            # the optional count helper; readiness must not fail solely on a
-            # diagnostic counter while query operations remain available.
-            indexed_records = None
         return {
             "items": items,
             "total": total,
@@ -2232,6 +2248,10 @@ class LegalRetriever:
             chunk_count = connection.execute(
                 text("SELECT count(*) FROM legal_article_chunks")
             ).scalar_one()
+        try:
+            indexed_records = self._collection.count()
+        except Exception:
+            indexed_records = None
         return {
             "status": "healthy",
             "ready": self._ready,
@@ -2243,6 +2263,7 @@ class LegalRetriever:
             "query_vector_cache": self._query_vector_cache.stats(),
             "collection": CHROMA_COLLECTION,
             "indexed_records": indexed_records,
+            "vector_index_available": self._vector_index_available,
             "database_chunks": chunk_count,
         }
 
