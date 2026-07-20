@@ -8,7 +8,7 @@ Set-Location $root
 if (-not (Test-Path -LiteralPath ".env")) {
     throw "Missing .env. Copy .env.release.example to .env and fill the deployment secrets first."
 }
-foreach ($path in @("release-data\legal", "release-data\surreal_data", "release-data\notebook_data", "release-data\forms")) {
+foreach ($path in @("release-data\legal", "release-data\legal-corpus", "release-data\postgres", "release-data\surreal_data", "release-data\notebook_data", "release-data\forms")) {
     if (-not (Test-Path -LiteralPath $path)) {
         throw "Missing release data directory: $path"
     }

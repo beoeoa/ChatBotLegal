@@ -3,7 +3,7 @@
 ## Maintainer
 
 1. Copy `.env.release.example` to `.env` and fill deployment secrets locally.
-2. Prepare a sanitized release-data bundle with `scripts/prepare_release_data.ps1`.
+2. Prepare a sanitized release-data bundle with `scripts/prepare_release_data.ps1`, then export the reviewed legal PostgreSQL corpus with `scripts/export_legal_postgres_release.ps1`.
 3. Start Docker Desktop.
 4. Run:
 
@@ -18,7 +18,7 @@
 
 The end user receives this repository plus the authorized release-data bundle.
 They copy `.env.release.example` to `.env`, fill their own password/API key,
-place the data under `release-data`, and run:
+place the approved data bundle (including `release-data/legal-corpus/legal-corpus.dump`) under `release-data`, and run:
 
 ```powershell
 .\scripts\start_release.ps1 -Build

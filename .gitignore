@@ -161,5 +161,7 @@ release-data/legal/chroma_store/
 release-data/surreal_data/*
 release-data/notebook_data/*
 release-data/forms/*
+release-data/postgres/*
+release-data/legal-corpus/*
 
 .mcp.json

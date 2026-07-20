@@ -1,4 +1,21 @@
 services:
+  legal_postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: legal_chatbot
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${LEGAL_POSTGRES_PASSWORD}
+    volumes:
+      - ./release-data/postgres:/var/lib/postgresql/data
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
+      - ./release-data/legal-corpus:/seed:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d legal_chatbot"]
+      interval: 5s
+      timeout: 3s
+      retries: 36
+      start_period: 10s
+
   surrealdb:
     image: surrealdb/surrealdb:v2
     command: start --log info --user root --pass ${SURREAL_PASSWORD} rocksdb:/mydata/mydatabase.db
@@ -25,7 +42,7 @@ services:
       LEGAL_CHROMA_PATH: /data/legal/chroma_store
       LEGAL_EMBED_DEVICE: ${LEGAL_EMBED_DEVICE:-cpu}
       VNLEGAL_LAL_MODEL_PATH: /data/legal/vnlegal-lal-model
-      LEGAL_DATABASE_URL: ${LEGAL_RELEASE_DATABASE_URL}
+      LEGAL_DATABASE_URL: postgresql+psycopg2://postgres:${LEGAL_POSTGRES_PASSWORD}@legal_postgres:5432/legal_chatbot
     volumes:
       - ./release-data/legal:/data/legal:ro
     healthcheck:
@@ -34,6 +51,9 @@ services:
       timeout: 5s
       retries: 20
       start_period: 60s
+    depends_on:
+      legal_postgres:
+        condition: service_healthy
 
   app:
     build:

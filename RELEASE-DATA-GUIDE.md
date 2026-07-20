@@ -7,6 +7,8 @@ data bundle before starting:
 ```text
 release-data/legal/chroma_store       # Chroma collections and metadata
 release-data/legal/legal_search.db    # retrieval metadata database, if used
+release-data/legal-corpus/legal-corpus.dump # reviewed PostgreSQL legal corpus
+release-data/postgres/                # created automatically on first run
 release-data/surreal_data/             # seeded SurrealDB data
 release-data/notebook_data/            # clean application data only
 release-data/forms/                    # forms approved for distribution
