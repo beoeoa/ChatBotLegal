@@ -2,7 +2,8 @@
 # GPU/CUDA remains available through requirements/legal-retrieval-cu126.txt
 # for the native Windows launcher.
 --index-url https://pypi.org/simple
-torch==2.8.0
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.8.0+cpu
 chromadb==1.5.9
 fastapi==0.136.3
 numpy==2.4.6
