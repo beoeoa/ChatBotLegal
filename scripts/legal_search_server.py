@@ -1085,6 +1085,13 @@ class LegalRetriever:
                 _repair_display_row(dict(row))
                 for row in connection.execute(list_statement, params).mappings()
             ]
+        try:
+            indexed_records = self._collection.count()
+        except Exception:
+            # Older persisted Chroma stores can expose a Rust binding without
+            # the optional count helper; readiness must not fail solely on a
+            # diagnostic counter while query operations remain available.
+            indexed_records = None
         return {
             "items": items,
             "total": total,
@@ -2235,7 +2242,7 @@ class LegalRetriever:
             "model_fingerprint": self._model_fingerprint,
             "query_vector_cache": self._query_vector_cache.stats(),
             "collection": CHROMA_COLLECTION,
-            "indexed_records": self._collection.count(),
+            "indexed_records": indexed_records,
             "database_chunks": chunk_count,
         }
 

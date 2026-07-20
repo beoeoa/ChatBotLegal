@@ -24,6 +24,7 @@ services:
       LEGAL_DATA_ROOT: /data/legal
       LEGAL_CHROMA_PATH: /data/legal/chroma_store
       LEGAL_EMBED_DEVICE: ${LEGAL_EMBED_DEVICE:-cpu}
+      VNLEGAL_LAL_MODEL_PATH: /data/legal/vnlegal-lal-model
     volumes:
       - ./release-data/legal:/data/legal:ro
     healthcheck:
