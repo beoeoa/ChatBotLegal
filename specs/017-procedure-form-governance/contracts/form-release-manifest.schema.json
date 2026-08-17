@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://chatbotlegal.local/schemas/form-release-manifest.schema.json",
+  "title": "FormReleaseManifest",
+  "type": "object",
+  "required": ["schema_version", "release_id", "version", "legal_as_of", "source_snapshot_sha256", "previous_release_id", "procedures", "assets", "bindings", "aliases", "coverage", "build"],
+  "properties": {
+    "schema_version": {"const": "form-release-v1"},
+    "release_id": {"type": "string", "minLength": 1},
+    "version": {"type": "integer", "minimum": 1},
+    "legal_as_of": {"type": "string", "format": "date"},
+    "source_snapshot_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "previous_release_id": {"type": ["string", "null"]},
+    "procedures": {"type": "array", "items": {"type": "object", "required": ["procedure_id", "domain", "coverage_status"], "additionalProperties": true}},
+    "assets": {"type": "array", "items": {"type": "object", "required": ["form_id", "asset_kind", "coverage_status", "source_checksum"], "additionalProperties": true}},
+    "bindings": {"type": "array", "items": {"type": "object", "required": ["binding_id", "procedure_id", "coverage_status", "audience"], "additionalProperties": true}},
+    "aliases": {"type": "array", "items": {"type": "object", "required": ["procedure_id", "alias", "alias_kind"], "additionalProperties": true}},
+    "gaps": {"type": "array", "items": {"type": "object", "required": ["target_type", "target_id", "reason_code", "evidence_source_url", "evidence_sha256", "legal_as_of"], "additionalProperties": true}},
+    "exclusions": {"type": "array", "items": {"type": "object", "required": ["target_type", "target_id", "reason_code", "decision_fingerprint", "decided_by", "decided_at", "public_eligible", "router_eligible"], "additionalProperties": true}},
+    "coverage": {"type": "object", "required": ["procedure_total", "procedure_decided", "identity_total", "identity_decided", "binding_total", "binding_decided", "complete"], "additionalProperties": true},
+    "build": {"type": "object", "required": ["pipeline_version"], "additionalProperties": true}
+  },
+  "additionalProperties": false
+}

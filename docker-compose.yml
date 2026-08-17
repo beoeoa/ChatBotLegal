@@ -24,7 +24,7 @@ services:
       dockerfile: Dockerfile
     image: hai-phong-legal-assistant:local
     ports:
-      - "8502:8502"  # Web UI
+      - "3000:8502"  # Web UI
       - "5055:5055"  # REST API
     environment:
       # REQUIRED: Change this to your own secret string
@@ -40,9 +40,16 @@ services:
       - OPEN_NOTEBOOK_PASSWORD=${OPEN_NOTEBOOK_PASSWORD:-change-this-password}
       - LEGAL_SEARCH_URL=http://host.docker.internal:8765
       - LEGAL_LLM_TIMEOUT_SECONDS=90
+      - LEGAL_STRUCTURED_GENERATION_TIMEOUT_SECONDS=${LEGAL_STRUCTURED_GENERATION_TIMEOUT_SECONDS:-60}
+      - LEGAL_STRUCTURED_HARD_GENERATION_TIMEOUT_SECONDS=${LEGAL_STRUCTURED_HARD_GENERATION_TIMEOUT_SECONDS:-120}
+      - LEGAL_STRUCTURED_TOTAL_TIMEOUT_SECONDS=${LEGAL_STRUCTURED_TOTAL_TIMEOUT_SECONDS:-90}
+      - LEGAL_STRUCTURED_HARD_TOTAL_TIMEOUT_SECONDS=${LEGAL_STRUCTURED_HARD_TOTAL_TIMEOUT_SECONDS:-180}
+      - LEGAL_STRUCTURED_MAX_OUTPUT_TOKENS=${LEGAL_STRUCTURED_MAX_OUTPUT_TOKENS:-2048}
+      - FORM_RELEASE_ASSET_ROOT=/app/release-data
     volumes:
       - ./notebook_data:/app/data
       - ./data/uploads/forms:/app/data/uploads/forms:ro
+      - ./release-data/feature017:/app/release-data/feature017:ro
     depends_on:
       surrealdb:
         condition: service_healthy

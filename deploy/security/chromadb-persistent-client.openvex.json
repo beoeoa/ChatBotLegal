@@ -1,0 +1,24 @@
+{
+  "@context": "https://openvex.dev/ns/v0.2.0",
+  "@id": "https://chatbotlegal.local/vex/chromadb-persistent-client/2026-07-29",
+  "author": "ChatBotLegal technical release gate",
+  "role": "Document Creator",
+  "timestamp": "2026-07-29T00:00:00+07:00",
+  "last_updated": "2026-07-29T00:00:00+07:00",
+  "version": 1,
+  "statements": [
+    {
+      "vulnerability": {
+        "name": "CVE-2026-45829"
+      },
+      "products": [
+        {
+          "@id": "pkg:pypi/chromadb@1.5.9"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The retrieval image embeds ChromaDB only through chromadb.PersistentClient. It does not start or mount chromadb.server.fastapi and does not expose the vulnerable /api/v2 collection-creation endpoint. The project retrieval API is a separate allowlisted query service reachable only on the internal Docker network."
+    }
+  ]
+}

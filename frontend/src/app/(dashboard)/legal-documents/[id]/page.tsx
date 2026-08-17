@@ -3,19 +3,33 @@
 import { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { useParams, useSearchParams } from 'next/navigation'
-import { ArrowLeft, BookOpen, Download, FileText } from 'lucide-react'
+import {
+  AlertTriangle,
+  ArrowLeft,
+  BookOpen,
+  ChevronDown,
+  ChevronRight,
+  Download,
+  RefreshCw,
+  ZoomIn,
+  ZoomOut,
+} from 'lucide-react'
 import { toast } from 'sonner'
 
 import { apiClient } from '@/lib/api/client'
 import { getApiUrl } from '@/lib/config'
+import { AppShell } from '@/components/layout/AppShell'
+import { DocumentLifecyclePanel } from '@/components/legal-management/DocumentLifecyclePanel'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { useAuthStore } from '@/lib/stores/auth-store'
 import {
   buildArticleAnchor,
-  buildInternalLegalUrl,
+  buildSectionAnchor,
+  buildVBPLLegalTocTree,
   getChunkHighlightState,
   isTargetArticle,
+  TocNode,
 } from '@/components/legal/legal-document-viewer-utils'
 
 interface LegalChunk {
@@ -46,11 +60,28 @@ interface LegalDocumentDetail {
   scope?: string
   effective_status?: string
   effective_date?: string | null
+  issued_date?: string | null
+  expired_date?: string | null
   field_name?: string
   article_index?: LegalArticleIndex[]
   articles?: LegalArticle[]
   content?: string
   source_file_available?: boolean
+  source_url?: string
+  validity_status?: string
+  serving_status?: string
+  current_answer_eligible?: boolean
+  historical_lookup_allowed?: boolean
+  validity_sync?: {
+    status: string
+    serving_action: string
+    display_label: string
+    current_answer_eligible: boolean
+    historical_lookup_allowed: boolean
+    effective_from?: string | null
+    effective_to?: string | null
+    source_url?: string | null
+  }
 }
 
 function getAuthToken(): string {
@@ -63,18 +94,26 @@ function getAuthToken(): string {
 }
 
 export default function LegalDocumentViewerPage() {
+  const role = useAuthStore((state) => state.role)
   const params = useParams<{ id: string }>()
   const searchParams = useSearchParams()
   const docId = decodeURIComponent(String(params?.id || '')).replace(/^legal:/, '')
-  const article = (searchParams.get('article') || '').trim()
-  const clause = (searchParams.get('clause') || '').trim()
-  const point = (searchParams.get('point') || '').trim()
+  const articleParam = (searchParams.get('article') || '').trim()
+  const clauseParam = (searchParams.get('clause') || '').trim()
+  const pointParam = (searchParams.get('point') || '').trim()
+
   const [document, setDocument] = useState<LegalDocumentDetail | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [tocOpen, setTocOpen] = useState(true)
+
+  // System design controls
+  const [rightTocOpen, setRightTocOpen] = useState(true)
+  const [fontSizePercent, setFontSizePercent] = useState(100)
+  const [activeNodeId, setActiveNodeId] = useState<string>('')
+  const [expandedNodes, setExpandedNodes] = useState<Record<string, boolean>>({})
+
   const [viewLatencyMs, setViewLatencyMs] = useState<number | null>(null)
-  const [downloadLatencyMs, setDownloadLatencyMs] = useState<number | null>(null)
+  const [downloadingPdf, setDownloadingPdf] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -84,144 +123,411 @@ export default function LegalDocumentViewerPage() {
         setLoading(false)
         return
       }
+
+      // Check session cache first to avoid re-fetching on back navigation
+      const cacheKey = `legal_doc_cache_${docId}`
+      try {
+        const cached = sessionStorage.getItem(cacheKey)
+        if (cached) {
+          const parsed = JSON.parse(cached)
+          const cachedDocument = parsed?.document
+          const cachedAt = Number(parsed?.cached_at || 0)
+          const cacheIsFresh = Date.now() - cachedAt < 5 * 60 * 1000
+          const hasCanonicalValidity =
+            typeof cachedDocument?.validity_sync?.current_answer_eligible === 'boolean'
+          if (!cancelled && cachedDocument?.doc_id && cacheIsFresh && hasCanonicalValidity) {
+            setDocument(cachedDocument)
+            setLoading(false)
+            return
+          }
+        }
+      } catch {
+        // Fallback to API if cache fails
+      }
+
       try {
         setLoading(true)
         setError(null)
-        const query = new URLSearchParams()
-        if (article) query.set('article', article)
         const viewStartedAt = performance.now()
         const response = await apiClient.get<LegalDocumentDetail>(
-          `/legal/docs/${encodeURIComponent(docId)}?${query.toString()}`,
+          `/legal/docs/${encodeURIComponent(docId)}?include_content=true`,
         )
-        if (!cancelled) {
+        if (!cancelled && response.data) {
           setDocument(response.data)
           setViewLatencyMs(Math.round(performance.now() - viewStartedAt))
+          try {
+            sessionStorage.setItem(
+              cacheKey,
+              JSON.stringify({ cached_at: Date.now(), document: response.data }),
+            )
+          } catch {
+            // Ignore quota errors
+          }
         }
       } catch (caught: unknown) {
         if (!cancelled) {
           const detail = (caught as { response?: { data?: { detail?: string } }; message?: string })
-          setError(detail.response?.data?.detail || detail.message || 'Không tải được văn bản.')
+          setError(detail.response?.data?.detail || detail.message || 'Không tải được nội dung văn bản.')
         }
       } finally {
         if (!cancelled) setLoading(false)
       }
     }
     void load()
-    return () => { cancelled = true }
-  }, [article, docId])
+    return () => {
+      cancelled = true
+    }
+  }, [docId])
 
+  // Build hierarchical tree for TOC (Chương -> Điều -> Khoản -> Điểm)
+  const tocTree = useMemo(() => {
+    return buildVBPLLegalTocTree(document?.articles || [])
+  }, [document?.articles])
+
+  // Auto expand all TOC nodes
   useEffect(() => {
-    if (!article || !document) return
-    const target = window.document.getElementById(buildArticleAnchor(article))
-    if (target) window.setTimeout(() => target.scrollIntoView({ behavior: 'smooth', block: 'start' }), 80)
-  }, [article, document])
+    if (tocTree.length > 0) {
+      const initial: Record<string, boolean> = {}
+      const traverse = (nodes: TocNode[]) => {
+        nodes.forEach((n) => {
+          initial[n.id] = true
+          if (n.children) traverse(n.children)
+        })
+      }
+      traverse(tocTree)
+      setExpandedNodes(initial)
+    }
+  }, [tocTree])
 
-  const articleIndex = useMemo(
-    () => document?.article_index || document?.articles || [],
-    [document],
-  )
+  // Auto scroll to target article/clause/point if query parameter exists
+  useEffect(() => {
+    if (!articleParam || !document) return
+    const anchorId = clauseParam
+      ? buildSectionAnchor(articleParam, clauseParam)
+      : (pointParam ? buildSectionAnchor(articleParam, undefined, pointParam) : buildArticleAnchor(articleParam))
 
-  const hasLoadedArticle = Boolean((document?.articles || []).some((item) => (item.chunks || []).length > 0))
+    setActiveNodeId(anchorId)
+    const target = window.document.getElementById(anchorId) || window.document.getElementById(buildArticleAnchor(articleParam))
+    if (target) {
+      window.setTimeout(() => target.scrollIntoView({ behavior: 'smooth', block: 'start' }), 120)
+    }
+  }, [articleParam, clauseParam, pointParam, document])
+
+  const toggleNodeExpand = (nodeId: string, e: React.MouseEvent) => {
+    e.stopPropagation()
+    setExpandedNodes((prev) => ({ ...prev, [nodeId]: !prev[nodeId] }))
+  }
+
+  // Smooth scroll to target Khoản / Điểm / Điều when clicked from TOC
+  const handleTocItemClick = (node: TocNode) => {
+    setActiveNodeId(node.id)
+    const target = window.document.getElementById(node.id)
+    if (target) {
+      target.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    } else if (node.articleNumber) {
+      const artTarget = window.document.getElementById(buildArticleAnchor(node.articleNumber))
+      if (artTarget) artTarget.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }
+  }
 
   const downloadPdf = async () => {
-    const downloadStartedAt = performance.now()
     try {
+      setDownloadingPdf(true)
       const apiUrl = await getApiUrl()
-      const query = article ? `?article=${encodeURIComponent(article)}` : ''
-      const response = await fetch(`${apiUrl}/api/legal/docs/${encodeURIComponent(docId)}/download.pdf${query}`, {
-        headers: getAuthToken() ? { Authorization: `Bearer ${getAuthToken()}` } : {},
-      })
+      const query = articleParam ? `?article=${encodeURIComponent(articleParam)}` : ''
+      const response = await fetch(
+        `${apiUrl}/api/legal/docs/${encodeURIComponent(docId)}/download.pdf${query}`,
+        {
+          headers: getAuthToken() ? { Authorization: `Bearer ${getAuthToken()}` } : {},
+        },
+      )
       if (!response.ok) {
         const payload = await response.json().catch(() => null)
         throw new Error(payload?.detail || 'Không tải được PDF.')
       }
-      setDownloadLatencyMs(Math.round(performance.now() - downloadStartedAt))
       const href = URL.createObjectURL(await response.blob())
       const anchor = window.document.createElement('a')
       anchor.href = href
       anchor.download = `${document?.law_number || docId}.pdf`
       anchor.click()
       URL.revokeObjectURL(href)
-      toast.success(document?.source_file_available ? 'Đã tải file PDF gốc.' : 'Đã tải bản trích xuất từ kho hệ thống.')
+      toast.success(
+        document?.source_file_available
+          ? 'Đã tải file PDF gốc thành công.'
+          : 'Đã tải bản trích xuất PDF từ hệ thống.',
+      )
     } catch (caught: unknown) {
-      toast.error(caught instanceof Error ? caught.message : 'Không tải được PDF.')
+      toast.error(caught instanceof Error ? caught.message : 'Không tải được file PDF.')
+    } finally {
+      setDownloadingPdf(false)
     }
   }
 
-  return (
-    <div className="flex h-[calc(100vh-4rem)] overflow-hidden bg-background">
-      <aside className={`hidden shrink-0 border-r bg-card md:flex md:flex-col ${tocOpen ? 'w-72' : 'w-0 overflow-hidden'}`}>
-        <div className="flex items-center justify-between border-b p-4">
-          <span className="flex items-center gap-2 text-sm font-semibold"><BookOpen className="h-4 w-4" />Mục lục</span>
-          <Button variant="ghost" size="sm" onClick={() => setTocOpen(false)}>‹</Button>
-        </div>
-        <nav className="flex-1 space-y-1 overflow-y-auto p-2" aria-label="Mục lục điều khoản">
-          {articleIndex.map((item) => {
-            const itemArticle = String(item.article_number || '').trim()
-            return (
-              <Link
-                key={itemArticle}
-                href={buildInternalLegalUrl(docId, itemArticle)}
-                className={`block w-full rounded-md px-3 py-2 text-left text-sm hover:bg-accent ${isTargetArticle(itemArticle, article) ? 'bg-primary/10 font-medium text-primary' : ''}`}
+  // Render tree view for TOC sidebar matching app design system
+  const renderTocNodes = (nodes: TocNode[], depth = 0) => {
+    return (
+      <ul className={`space-y-0.5 ${depth > 0 ? 'ml-3 border-l pl-2 border-border' : ''}`}>
+        {nodes.map((node) => {
+          const isExpanded = expandedNodes[node.id] ?? true
+          const hasChildren = node.children && node.children.length > 0
+          const isActive = activeNodeId === node.id || (node.articleNumber && isTargetArticle(node.articleNumber, articleParam))
+
+          return (
+            <li key={node.id} className="text-xs">
+              <div
+                onClick={() => handleTocItemClick(node)}
+                className={`group flex items-center justify-between rounded-md px-2.5 py-1.5 cursor-pointer transition-colors ${
+                  isActive
+                    ? 'bg-primary/15 font-semibold text-primary'
+                    : 'text-muted-foreground hover:bg-accent hover:text-foreground'
+                }`}
               >
-                Điều {itemArticle}{item.article_title ? ` - ${item.article_title}` : ''}
-              </Link>
-            )
-          })}
-        </nav>
-      </aside>
+                <div className="flex items-center gap-1.5 min-w-0">
+                  {hasChildren && (
+                    <button
+                      type="button"
+                      onClick={(e) => toggleNodeExpand(node.id, e)}
+                      className="p-0.5 text-muted-foreground hover:text-foreground"
+                    >
+                      {isExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+                    </button>
+                  )}
+                  {!hasChildren && <span className="w-3 text-center text-muted-foreground font-mono">•</span>}
+                  <span className="truncate">{node.title || node.label}</span>
+                </div>
+              </div>
+              {hasChildren && isExpanded && renderTocNodes(node.children!, depth + 1)}
+            </li>
+          )
+        })}
+      </ul>
+    )
+  }
 
-      <main className="flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-4xl space-y-5 p-6 pb-20">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex gap-2">
-              <Button asChild variant="outline" size="sm"><Link href="/search"><ArrowLeft className="mr-2 h-4 w-4" />Về hỏi đáp</Link></Button>
-              {!tocOpen && <Button variant="ghost" size="sm" onClick={() => setTocOpen(true)}>Mục lục</Button>}
+  return (
+    <AppShell>
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background">
+        {/* App Standard Header */}
+        <header className="border-b bg-card px-6 py-4">
+          <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <Button asChild variant="ghost" size="sm">
+                <Link href="/search">
+                  <ArrowLeft className="mr-2 h-4 w-4" /> Về Hỏi đáp
+                </Link>
+              </Button>
+              <span className="text-muted-foreground">/</span>
+              <span className="truncate text-sm font-medium max-w-md">
+                {document?.law_number || document?.document_title || docId}
+              </span>
             </div>
-            <Button size="sm" onClick={() => void downloadPdf()} disabled={!document}><Download className="mr-2 h-4 w-4" />{document?.source_file_available ? 'Tải PDF gốc' : 'Tải PDF trích xuất'}</Button>
+
+            {/* Controls Toolbar */}
+            <div className="flex items-center gap-3">
+              {/* Zoom Buttons */}
+              <div className="flex items-center gap-1 rounded-md border bg-muted/30 px-2 py-1 text-xs">
+                <button
+                  type="button"
+                  title="Thu nhỏ chữ"
+                  onClick={() => setFontSizePercent((prev) => Math.max(80, prev - 10))}
+                  className="hover:text-primary p-0.5"
+                >
+                  <ZoomOut className="h-3.5 w-3.5" />
+                </button>
+                <span className="font-mono text-xs px-1.5">{fontSizePercent}%</span>
+                <button
+                  type="button"
+                  title="Phóng to chữ"
+                  onClick={() => setFontSizePercent((prev) => Math.min(150, prev + 10))}
+                  className="hover:text-primary p-0.5"
+                >
+                  <ZoomIn className="h-3.5 w-3.5" />
+                </button>
+              </div>
+
+              {/* TOC Toggle */}
+              <Button
+                variant={rightTocOpen ? 'secondary' : 'outline'}
+                size="sm"
+                onClick={() => setRightTocOpen((prev) => !prev)}
+              >
+                <BookOpen className="mr-2 h-4 w-4" /> Mục lục
+              </Button>
+
+              {/* Download PDF */}
+              <Button size="sm" onClick={() => void downloadPdf()} disabled={downloadingPdf || !document}>
+                <Download className={`mr-2 h-4 w-4 ${downloadingPdf ? 'animate-spin' : ''}`} />
+                {downloadingPdf ? 'Đang tải...' : 'Tải PDF'}
+              </Button>
+            </div>
           </div>
+        </header>
 
-          {loading && <Card aria-busy="true"><CardContent className="space-y-4 p-8"><div className="h-5 w-1/3 animate-pulse rounded bg-muted" /><div className="h-4 w-full animate-pulse rounded bg-muted" /><div className="h-4 w-4/5 animate-pulse rounded bg-muted" /><p className="pt-2 text-sm text-muted-foreground">Đang tải văn bản pháp lý...</p></CardContent></Card>}
-          {error && <Card><CardContent className="space-y-2 p-8"><p className="font-medium text-destructive">Không mở được văn bản</p><p className="text-sm text-muted-foreground">{error}</p></CardContent></Card>}
-          {document && !loading && !error && <>
-            <Card>
-              <CardHeader className="space-y-3">
-                <div className="flex flex-wrap gap-2">
-                  {document.law_number && <Badge variant="outline">{document.law_number}</Badge>}
-                  {document.effective_status && <Badge>{document.effective_status}</Badge>}
-                  <Badge variant="outline" className={document.source_file_available ? 'border-green-200 bg-green-50 text-green-700' : 'border-amber-200 bg-amber-50 text-amber-700'}>{document.source_file_available ? 'Có file PDF gốc' : 'Bản trích xuất hệ thống'}</Badge>
-                  {article && <Badge className="bg-primary/10 text-primary">Điều {article}{clause ? `, Khoản ${clause}` : ''}{point ? `, Điểm ${point}` : ''}</Badge>}
+        {/* Main Workspace Body */}
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          <div className="mx-auto flex max-w-7xl items-start justify-between gap-6 p-6">
+            {/* Document Content Canvas */}
+            <main className="flex-1 min-w-0 rounded-xl border bg-card p-6 md:p-10 shadow-sm">
+              <DocumentLifecyclePanel documentId={docId} isAdmin={role === 'admin'} />
+              {loading && (
+                <div className="space-y-4 py-16 text-center" aria-busy="true">
+                  <RefreshCw className="mx-auto h-8 w-8 animate-spin text-primary" />
+                  <p className="text-sm text-muted-foreground">Đang tải nội dung văn bản pháp lý...</p>
                 </div>
-                <CardTitle className="text-2xl leading-snug">{document.document_title || document.law_number || `Văn bản ${docId}`}</CardTitle>
-                <div className="grid gap-1 text-sm text-muted-foreground">
-                  {viewLatencyMs !== null && <div>Thời gian mở: {viewLatencyMs} ms</div>}
-                  {downloadLatencyMs !== null && <div>Thời gian chuẩn bị PDF: {downloadLatencyMs} ms</div>}
-                  {document.issuing_agency && <div>Cơ quan ban hành: {document.issuing_agency}</div>}
-                  {document.document_type && <div>Loại văn bản: {document.document_type}</div>}
-                  {document.effective_date && <div>Hiệu lực: {document.effective_date}</div>}
-                  {document.scope && <div>Phạm vi: {document.scope}</div>}
-                </div>
-              </CardHeader>
-            </Card>
+              )}
 
-            <section className="space-y-4" aria-label="Nội dung văn bản">
-              {hasLoadedArticle ? document.articles?.map((item) => {
-                const itemArticle = String(item.article_number || '').trim()
-                const articleHighlighted = isTargetArticle(itemArticle, article)
-                return <Card key={String(item.article_id || itemArticle)} id={buildArticleAnchor(itemArticle)} className={articleHighlighted ? 'border-primary ring-2 ring-primary/30' : ''}>
-                  <CardHeader className="pb-2"><CardTitle className={articleHighlighted ? 'text-lg text-primary' : 'text-lg'}>Điều {itemArticle}{item.article_title ? `. ${item.article_title}` : ''}</CardTitle></CardHeader>
-                  <CardContent className="space-y-3 text-sm leading-7">
-                    {(item.chunks || []).map((chunk, index) => {
-                      const state = getChunkHighlightState(String(chunk.content || ''), articleHighlighted, clause, point)
-                      return <p key={String(chunk.chunk_id || index)} className={`whitespace-pre-wrap rounded-md p-2 ${state.highlight ? 'border border-primary/25 bg-primary/5 outline outline-1 outline-primary/15' : ''}`}>{chunk.content}</p>
-                    })}
-                  </CardContent>
-                </Card>
-              }) : <Card><CardHeader><CardTitle className="flex items-center gap-2 text-lg"><FileText className="h-5 w-5" />Chọn điều để xem nội dung</CardTitle></CardHeader><CardContent className="text-sm text-muted-foreground">Mục lục đang hiển thị ở bên trái. Chọn một điều để tải riêng nội dung của điều đó, giúp mở văn bản nhanh hơn.</CardContent></Card>}
-            </section>
-          </>}
+              {error && (
+                <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-6 text-center text-destructive">
+                  <p className="font-semibold text-base">Không tải được văn bản</p>
+                  <p className="mt-1 text-sm opacity-90">{error}</p>
+                </div>
+              )}
+
+              {document && !loading && !error && (
+                <article style={{ fontSize: `${fontSizePercent}%` }} className="space-y-6 leading-relaxed">
+                  {/* Document Title Header */}
+                  <div className="border-b pb-6 space-y-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      {document.law_number && <Badge variant="default">{document.law_number}</Badge>}
+                      {(document.validity_sync?.display_label || document.effective_status) && (
+                        <Badge
+                          variant={document.current_answer_eligible === false ? 'destructive' : 'outline'}
+                          className={document.current_answer_eligible === false ? undefined : 'border-emerald-500/30 text-emerald-600 dark:text-emerald-400 bg-emerald-500/5'}
+                        >
+                          {document.validity_sync?.display_label || document.effective_status}
+                        </Badge>
+                      )}
+                      {document.issuing_agency && <Badge variant="secondary">{document.issuing_agency}</Badge>}
+                      {document.effective_date && (
+                        <span className="text-xs text-muted-foreground ml-auto">
+                          Hiệu lực từ: {document.effective_date}
+                        </span>
+                      )}
+                    </div>
+
+                    <h1 className="text-xl md:text-2xl font-bold leading-snug pt-2">
+                      {document.document_title || document.law_number || `Văn bản ${docId}`}
+                    </h1>
+
+                    <div className="grid gap-1 text-xs text-muted-foreground pt-1 sm:grid-cols-2">
+                      {document.document_type && <span>Loại văn bản: {document.document_type}</span>}
+                      {document.issued_date && <span>Ngày ban hành: {document.issued_date}</span>}
+                      {document.scope && <span>Phạm vi: {document.scope}</span>}
+                      {viewLatencyMs !== null && <span>Thời gian nạp: {viewLatencyMs} ms</span>}
+                    </div>
+                  </div>
+
+                  {document.current_answer_eligible === false && (
+                    <div className="flex gap-3 rounded-lg border border-destructive/40 bg-destructive/5 p-4 text-destructive" role="status">
+                      <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" />
+                      <div>
+                        <p className="font-semibold">{document.validity_sync?.display_label}</p>
+                        <p className="mt-1 text-sm">
+                          Chỉ dùng để tra cứu lịch sử. Văn bản này không được dùng để trả lời pháp luật hiện hành.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Render Articles & Chunks continuously */}
+                  <div className="space-y-8 pt-4">
+                    {document.articles && document.articles.length > 0 ? (
+                      document.articles.map((art) => {
+                        const artNum = String(art.article_number || '').trim()
+                        const isHighlighted = isTargetArticle(artNum, articleParam)
+
+                        return (
+                          <div
+                            key={String(art.article_id || artNum)}
+                            id={buildArticleAnchor(artNum)}
+                            className={`rounded-xl p-5 md:p-6 transition-colors scroll-mt-24 border ${
+                              isHighlighted
+                                ? 'border-primary bg-primary/5 ring-2 ring-primary/20'
+                                : 'border-border/60 hover:border-border'
+                            }`}
+                          >
+                            <h2 className={`text-base md:text-lg font-bold mb-4 ${isHighlighted ? 'text-primary' : ''}`}>
+                              Điều {artNum}{art.article_title ? `. ${art.article_title}` : ''}
+                            </h2>
+
+                            <div className="space-y-3 text-sm md:text-base leading-relaxed">
+                              {(art.chunks || []).map((chunk, idx) => {
+                                const content = chunk.content || ''
+                                // Detect Clause (Khoản) or Point (Điểm) for exact scroll anchor target
+                                const clauseMatch = content.match(/^\s*(\d+)\.\s+/)
+                                const cNum = clauseMatch ? clauseMatch[1] : ''
+                                const pointMatch = content.match(/^\s*([a-đa-z])\)\s+/i)
+                                const pLetter = pointMatch ? pointMatch[1].toLowerCase() : ''
+
+                                const anchorId = cNum
+                                  ? buildSectionAnchor(artNum, cNum)
+                                  : (pLetter ? buildSectionAnchor(artNum, undefined, pLetter) : `chunk-${artNum}-${idx}`)
+
+                                const highlightState = getChunkHighlightState(
+                                  content,
+                                  isHighlighted,
+                                  clauseParam,
+                                  pointParam,
+                                )
+
+                                return (
+                                  <div
+                                    key={String(chunk.chunk_id || idx)}
+                                    id={anchorId}
+                                    className={`scroll-mt-24 whitespace-pre-wrap rounded-lg p-3 transition-colors ${
+                                      highlightState.highlight
+                                        ? 'bg-amber-500/10 border-l-4 border-amber-500 font-medium dark:bg-amber-950/40 text-foreground'
+                                        : 'hover:bg-muted/30'
+                                    }`}
+                                  >
+                                    {chunk.content}
+                                  </div>
+                                )
+                              })}
+                            </div>
+                          </div>
+                        )
+                      })
+                    ) : (
+                      <div className="py-12 text-center text-muted-foreground">
+                        Không có chi tiết các điều khoản trích xuất cho văn bản này.
+                      </div>
+                    )}
+                  </div>
+                </article>
+              )}
+            </main>
+
+            {/* Right Collapsible TOC Sidebar */}
+            {rightTocOpen && (
+              <aside className="w-80 shrink-0 sticky top-6 rounded-xl border bg-card shadow-sm overflow-hidden transition-all">
+                <div className="flex items-center justify-between border-b bg-muted/40 px-4 py-3 font-semibold text-sm">
+                  <div className="flex items-center gap-2">
+                    <BookOpen className="h-4 w-4 text-primary" />
+                    <span>Mục lục văn bản</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setRightTocOpen(false)}
+                    className="text-muted-foreground hover:text-foreground text-xs"
+                    title="Đóng mục lục"
+                  >
+                    ✕
+                  </button>
+                </div>
+
+                <div className="max-h-[calc(100vh-12rem)] overflow-y-auto p-3">
+                  {tocTree.length > 0 ? (
+                    renderTocNodes(tocTree)
+                  ) : (
+                    <p className="p-4 text-center text-xs text-muted-foreground">Đang tạo mục lục...</p>
+                  )}
+                </div>
+              </aside>
+            )}
+          </div>
         </div>
-      </main>
-    </div>
+      </div>
+    </AppShell>
   )
 }

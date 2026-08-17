@@ -1,0 +1,2 @@
+REMOVE INDEX idx_admin_config_revision_type_created ON TABLE admin_config_revision;
+REMOVE TABLE admin_config_revision;

@@ -66,7 +66,10 @@ class TestAsyncSourceAssetPersistence:
             self_source.id = "source:fake"
             self_source.command = None
 
-        with patch.object(Source, "save", autospec=True, side_effect=capture_save):
+        with (
+            patch.object(Source, "save", autospec=True, side_effect=capture_save),
+            patch("api.routers.sources.repo_query", new_callable=AsyncMock),
+        ):
             response = client.post(
                 "/api/sources",
                 data={
@@ -106,7 +109,10 @@ class TestAsyncSourceAssetPersistence:
             self_source.id = "source:fake"
             self_source.command = None
 
-        with patch.object(Source, "save", autospec=True, side_effect=capture_save):
+        with (
+            patch.object(Source, "save", autospec=True, side_effect=capture_save),
+            patch("api.routers.sources.repo_query", new_callable=AsyncMock),
+        ):
             response = client.post(
                 "/api/sources",
                 data={
@@ -144,7 +150,10 @@ class TestAsyncSourceAssetPersistence:
             self_source.id = "source:fake"
             self_source.command = None
 
-        with patch.object(Source, "save", autospec=True, side_effect=capture_save):
+        with (
+            patch.object(Source, "save", autospec=True, side_effect=capture_save),
+            patch("api.routers.sources.repo_query", new_callable=AsyncMock),
+        ):
             response = client.post(
                 "/api/sources",
                 data={

@@ -4,9 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import Any, Iterable
+from datetime import date
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import httpx
+
+from api.legal_validity_registry import (
+    apply_validity_overlay,
+    current_answer_validity_readiness,
+    default_snapshot_cache,
+)
 
 
 class LegalSearchClient:
@@ -14,13 +21,33 @@ class LegalSearchClient:
         self,
         *,
         base_url: str | None = None,
+        base_urls: Sequence[str] | None = None,
         timeout_seconds: float | None = None,
         max_concurrency: int | None = None,
         client: httpx.AsyncClient | None = None,
+        validity_snapshot_loader: Callable[[], Mapping[str, Any] | None] | None = None,
+        strict_current_answers: bool | None = None,
     ) -> None:
-        self.base_url = (base_url or os.getenv(
-            "LEGAL_SEARCH_URL", "http://host.docker.internal:8765"
-        )).rstrip("/")
+        if base_url:
+            configured_urls = (base_url,)
+        elif base_urls is not None:
+            configured_urls = tuple(base_urls)
+        else:
+            replica_urls = str(os.getenv("LEGAL_SEARCH_URLS") or "").strip()
+            configured_urls = tuple(replica_urls.split(",")) if replica_urls else (
+                os.getenv("LEGAL_SEARCH_URL", "http://127.0.0.1:8765"),
+            )
+        normalized_urls = tuple(
+            str(value or "").strip().rstrip("/")
+            for value in configured_urls
+            if str(value or "").strip()
+        )
+        if not normalized_urls:
+            raise ValueError("legal_search_base_url_required")
+        self.base_urls = tuple(dict.fromkeys(normalized_urls))
+        # Compatibility for callers and diagnostics that expect one endpoint.
+        self.base_url = self.base_urls[0]
+        self._next_endpoint = 0
         self.timeout_seconds = timeout_seconds or float(
             os.getenv("LEGAL_RETRIEVAL_HTTP_TIMEOUT_SECONDS", "120")
         )
@@ -32,6 +59,52 @@ class LegalSearchClient:
         self._client = client
         self._owns_client = client is None
         self._client_lock = asyncio.Lock()
+        self._validity_snapshot_loader = (
+            validity_snapshot_loader or default_snapshot_cache.load
+        )
+        self._strict_current_answers = (
+            strict_current_answers
+            if strict_current_answers is not None
+            else str(
+                os.getenv("LEGAL_CURRENT_ANSWER_STRICT_VALIDITY", "false")
+            ).strip().casefold()
+            in {"1", "true", "yes", "on"}
+        )
+
+    @staticmethod
+    def _as_of(payload: Mapping[str, Any]) -> date:
+        try:
+            return date.fromisoformat(str(payload.get("as_of") or "")[:10])
+        except ValueError:
+            return date.today()
+
+    def _apply_validity(
+        self, data: dict[str, Any], payload: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        has_results = bool(data.get("results")) or bool(data.get("context_results"))
+        if not has_results and isinstance(data.get("issues"), list):
+            has_results = any(
+                isinstance(issue, Mapping) and bool(issue.get("results"))
+                for issue in data["issues"]
+            )
+        # Preserve the legacy empty-response contract while still guarding all
+        # model-facing non-empty result paths.
+        if not has_results:
+            return data
+        snapshot = self._validity_snapshot_loader()
+        overlaid = apply_validity_overlay(
+            data,
+            snapshot=snapshot,
+            as_of=self._as_of(payload),
+            mode="strict" if self._strict_current_answers else None,
+        )
+        overlaid["current_answer_validity_readiness"] = (
+            current_answer_validity_readiness(snapshot)
+        )
+        overlaid["current_answer_validity_readiness"]["strict_gate_enabled"] = bool(
+            self._strict_current_answers
+        )
+        return overlaid
 
     async def _http(self) -> httpx.AsyncClient:
         if self._client is not None and not self._client.is_closed:
@@ -48,6 +121,36 @@ class LegalSearchClient:
                 )
         return self._client
 
+    def _ordered_base_urls(self) -> tuple[str, ...]:
+        start = self._next_endpoint % len(self.base_urls)
+        self._next_endpoint = (self._next_endpoint + 1) % len(self.base_urls)
+        return self.base_urls[start:] + self.base_urls[:start]
+
+    async def _post_read(
+        self,
+        path: str,
+        payload: Mapping[str, Any],
+    ) -> tuple[httpx.Response, str]:
+        """Round-robin reads and fail over only on transport/5xx failures."""
+
+        client = await self._http()
+        endpoints = self._ordered_base_urls()
+        last_transport_error: httpx.TransportError | None = None
+        for index, base_url in enumerate(endpoints):
+            try:
+                response = await client.post(f"{base_url}{path}", json=payload)
+            except httpx.TransportError as exc:
+                last_transport_error = exc
+                if index + 1 < len(endpoints):
+                    continue
+                raise
+            if response.status_code >= 500 and index + 1 < len(endpoints):
+                continue
+            return response, base_url
+        if last_transport_error is not None:
+            raise last_transport_error
+        raise RuntimeError("legal_retrieval_no_endpoint_available")
+
     async def search(
         self,
         payload: dict[str, Any],
@@ -56,22 +159,33 @@ class LegalSearchClient:
     ) -> dict[str, Any]:
         """Post one search, retrying once without optional legacy fields."""
         async with self._semaphore:
-            client = await self._http()
-            response = await client.post(f"{self.base_url}/search", json=payload)
+            response, selected_url = await self._post_read("/search", payload)
             if response.status_code == 422:
                 retry_payload = dict(payload)
                 removed = False
                 for field in compatibility_fields:
                     removed = retry_payload.pop(field, None) is not None or removed
                 if removed:
+                    client = await self._http()
                     response = await client.post(
-                        f"{self.base_url}/search", json=retry_payload
+                        f"{selected_url}/search", json=retry_payload
                     )
             response.raise_for_status()
             data = response.json()
             if not isinstance(data, dict):
                 raise httpx.DecodingError("Legal retrieval returned a non-object")
-            return data
+            return self._apply_validity(data, payload)
+
+    async def search_batch(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Post one bounded multi-issue retrieval request."""
+
+        async with self._semaphore:
+            response, _ = await self._post_read("/search/batch", payload)
+            response.raise_for_status()
+            data = response.json()
+            if not isinstance(data, dict) or not isinstance(data.get("issues"), list):
+                raise httpx.DecodingError("Legal batch retrieval returned an invalid object")
+            return self._apply_validity(data, payload)
 
     async def close(self) -> None:
         if self._owns_client and self._client is not None:

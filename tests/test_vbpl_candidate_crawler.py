@@ -1,8 +1,13 @@
+import json
 from unittest.mock import AsyncMock
 
 import pytest
 
 from api.legal_crawl_service import LEGAL_DOMAINS, LegalCrawlService, WEEKLY_CRAWL_INTERVAL_MINUTES
+from open_notebook.utils.vbpl_crawler import (
+    _build_vbpl_listing_html,
+    _extract_vbpl_document_page,
+)
 
 
 SOURCE = {
@@ -27,6 +32,85 @@ LISTING_HTML = """
   <article><a href="/van-ban/trung-uong/Nghi-dinh-ve-chung-khoan-124">Nghị định về chứng khoán 124/2026/NĐ-CP</a></article>
 </body></html>
 """
+
+
+def test_dynamic_vbpl_rsc_payload_becomes_parseable_official_detail_links():
+    title = (
+        "Nghị quyết số 11/2026/NQ-HĐND Quy định mức tối đa, mức tối thiểu "
+        "của hệ số điều chỉnh mức biến động thị trường về giá đất"
+    )
+    # The current VBPL server-action response can carry UTF-8 text decoded as
+    # Latin-1. The adapter must repair it before candidate metadata is stored.
+    mojibake_title = title.encode("utf-8").decode("latin-1")
+    payload = {
+        "total": 3507,
+        "pageNumber": 1,
+        "pageSize": 10,
+        "items": [
+            {
+                "id": "0e79dc00-8cc1-11f1-b75a-c56b84d4263f",
+                "title": mojibake_title,
+                "docNum": "11/2026/NQ-HĐND".encode("utf-8").decode("latin-1"),
+                "docType": {"name": "Nghị quyết".encode("utf-8").decode("latin-1")},
+                "agencyName": "HĐND Thành phố Hải Phòng".encode("utf-8").decode("latin-1"),
+                "issueDate": "2026-07-28T00:00:00",
+                "effFrom": "2026-08-08T00:00:00",
+                "effTo": None,
+            }
+        ],
+    }
+    rsc = f'0:["$@1",[]]\n1:{json.dumps(payload, ensure_ascii=False)}\n'
+
+    page = _extract_vbpl_document_page(rsc)
+    assert page is not None
+    html = _build_vbpl_listing_html(
+        page,
+        "https://vbpl.vn/van-ban/dia-phuong?province=thanh-pho-hai-phong",
+        page_number=1,
+    )
+    items = LegalCrawlService._parse_listing(
+        html,
+        "https://vbpl.vn/van-ban/dia-phuong?province=thanh-pho-hai-phong",
+    )
+
+    assert len(items) == 1
+    assert items[0]["title"] == title
+    assert items[0]["law_number"] == "11/2026/NQ-HĐND"
+    assert items[0]["issued_date"] == "2026-07-28"
+    assert items[0]["effective_date"] == "2026-08-08"
+    assert items[0]["document_type"] == "Nghị quyết"
+    assert items[0]["issuing_agency"] == "HĐND Thành phố Hải Phòng"
+    assert items[0]["url"] == (
+        "https://vbpl.vn/van-ban/chi-tiet/"
+        "0e79dc00-8cc1-11f1-b75a-c56b84d4263f"
+    )
+    assert "_crawler_page=2" in html
+
+    terminal_html = _build_vbpl_listing_html(
+        {**page, "total": 3507},
+        "https://vbpl.vn/van-ban/dia-phuong?province=thanh-pho-hai-phong",
+        page_number=7,
+        has_next=False,
+    )
+    assert "_crawler_page=8" not in terminal_html
+
+
+def test_listing_parser_never_treats_a_date_as_the_law_number():
+    html = """
+    <article>
+      <a href="/van-ban/chi-tiet/example">Quyết định về giáo dục</a>
+      <p>Số hiệu: 1654/QĐ-UBND</p>
+      <p>Ngày ban hành: 28/04/2026</p>
+      <p>Ngày hiệu lực: 10/05/2026</p>
+      <p>Cơ quan: UBND Thành phố Hải Phòng</p>
+    </article>
+    """
+
+    items = LegalCrawlService._parse_listing(html, "https://vbpl.vn/van-ban/dia-phuong")
+
+    assert items[0]["law_number"] == "1654/QĐ-UBND"
+    assert items[0]["issued_date"] == "2026-04-28"
+    assert items[0]["effective_date"] == "2026-05-10"
 
 
 @pytest.mark.asyncio
@@ -84,6 +168,53 @@ async def test_listing_scan_creates_pending_candidates_without_import(monkeypatc
     assert all(candidate["domain"] == "ho_tich_chung_thuc" for candidate in candidates)
     assert not any(table == "source" for table, _ in created)
     assert any(table == "legal_crawl_run" for table, _, _ in updates)
+
+
+@pytest.mark.asyncio
+async def test_dynamic_vbpl_listing_always_uses_exact_rendered_records(monkeypatch):
+    """Navigation links in the loading shell must not bypass the RSC adapter."""
+
+    shell_html = """
+        <html><body>
+          <a href="/van-ban/trung-uong">Văn bản Trung ương</a>
+          <a href="/van-ban/dia-phuong">Văn bản địa phương</a>
+        </body></html>
+    """
+
+    class FakeResponse:
+        status_code = 200
+        text = shell_html
+
+        def raise_for_status(self):
+            return None
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, _url):
+            return FakeResponse()
+
+    rendered = AsyncMock(
+        side_effect=[ValueError("transient pagination state"), {"html": LISTING_HTML}]
+    )
+    monkeypatch.setattr("api.legal_crawl_service.httpx.AsyncClient", FakeClient)
+    monkeypatch.setattr("open_notebook.utils.vbpl_crawler.crawl_vbpl_listing", rendered)
+
+    html = await LegalCrawlService._fetch_with_backoff(
+        "https://vbpl.vn/van-ban/trung-uong",
+        0.2,
+    )
+
+    assert html == LISTING_HTML
+    assert rendered.await_count == 2
+    rendered.assert_awaited_with("https://vbpl.vn/van-ban/trung-uong")
 
 
 @pytest.mark.asyncio
@@ -186,3 +317,21 @@ async def test_legacy_builtin_sitemap_sources_are_migrated_to_weekly(monkeypatch
     assert len(updates) == 2
     assert all(item[2]["interval_minutes"] == WEEKLY_CRAWL_INTERVAL_MINUTES for item in updates)
     assert all(item[2]["enabled"] is False for item in updates)
+
+
+@pytest.mark.asyncio
+async def test_listing_deduplication_skips_law_number_already_in_runtime(monkeypatch):
+    query = AsyncMock(return_value=[])
+    runtime_lookup = AsyncMock(return_value={"id": 127439, "law_number": "24/2026/QĐ-UBND"})
+    monkeypatch.setattr("api.legal_crawl_service.repo_query", query)
+    monkeypatch.setattr(LegalCrawlService, "find_runtime_document_conflict", runtime_lookup)
+
+    known = await LegalCrawlService._already_known(
+        "https://vbpl.vn/van-ban/chi-tiet/187919",
+        "24/2026/QĐ-UBND",
+        "2026-04-13",
+        "fingerprint",
+    )
+
+    assert known is True
+    runtime_lookup.assert_awaited_once_with({"law_number": "24/2026/QĐ-UBND"})

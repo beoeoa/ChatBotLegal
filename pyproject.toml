@@ -36,11 +36,15 @@ dependencies = [
     "ai-prompter>=0.4,<1",
     "esperanto>=2.20.0,<3",
     "surrealdb>=1.0.4",
-    "podcast-creator>=0.12.0,<1",
     "surreal-commands>=1.3.1,<2",
     "numpy>=2.4.1",
     "pycountry>=26.2.16",
     "babel>=2.18.0",
+    "pypdf>=6.0,<7",
+    "lxml-html-clean>=0.4.5",
+    "openpyxl>=3.1.5,<4",
+    "reportlab>=4.2,<5",
+    "playwright>=1.62.0,<2",
 ]
 
 [tool.setuptools]
@@ -51,6 +55,11 @@ open_notebook = ["ai/assets/*"]
 
 
 [project.optional-dependencies]
+ocr = [
+    "pillow>=12.3.0,<13.0",
+    "pymupdf>=1.25.0",
+    "pytesseract>=0.3.13",
+]
 dev = [
     "ipykernel>=6.29.5",
     "ruff>=0.5.5",
@@ -64,6 +73,13 @@ dev = [
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.uv]
+# MoviePy 2.2.1 contains the Pillow API compatibility fixes used by the
+# project, but its published dependency metadata still caps Pillow below 12.
+# Docker/local release setup applies the reviewed exact metadata patch and
+# runs video round-trip plus pip integrity checks.
+override-dependencies = ["pillow>=12.3.0,<13.0"]
 
 [dependency-groups]
 dev = [
@@ -89,6 +105,17 @@ ignore = [
     "F401",  # imported but unused (may be used in type hints or re-exports)
     "F541",  # f-string without placeholders
     "F841",  # local variable assigned but never used
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = [
+    ".git",
+    ".venv*",
+    "external",
+    "agent-skills-temp",
+    "release-data",
+    "node_modules",
 ]
 
 [tool.ruff.lint.per-file-ignores]

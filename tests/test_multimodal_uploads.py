@@ -98,4 +98,6 @@ def test_extract_text_endpoint_rejects_too_large_file():
     )
 
     assert response.status_code == 413
-    assert "Giới hạn" in response.json()["detail"]
+    detail = response.json()["detail"]
+    assert detail["code"] == "file_too_large"
+    assert "dung lượng" in detail["message"]

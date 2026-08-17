@@ -1,4 +1,4 @@
-﻿"""Centralized access policy for role-scoped legal profiles (notebooks, notes, sources, chats).
+"""Centralized access policy for role-scoped legal profiles (notebooks, notes, sources, chats).
 
 Policy is fail-closed for citizens and legacy officer sessions without a real account ID.
 Admin may list metadata, but opening content/download/export requires a business reason
@@ -18,6 +18,7 @@ from api.auth import get_request_role, get_request_user_id, get_request_username
 from open_notebook.database.repository import ensure_record_id, repo_create, repo_query
 
 Action = Literal["list", "view", "download", "export", "write"]
+LEGAL_PROFILE_ROLES = frozenset({"officer", "admin"})
 
 SUPPORT_TICKETS_DIR = os.path.join(
     os.path.dirname(__file__), "..", "data", "support_tickets"
@@ -134,7 +135,7 @@ async def _officer_has_shared_notebook(user_id: str, notebook_id: str) -> bool:
 
 async def _get_record(table: str, resource_id: str) -> dict[str, Any]:
     rows = await repo_query(
-        f"SELECT id, owner_user, ownership_status FROM $resource_id;",
+        f"SELECT id, owner_user, ownership_status, source_scope FROM $resource_id;",
         {"resource_id": _record_id(table.lower(), resource_id)},
     )
     if not rows:
@@ -150,35 +151,37 @@ async def assert_notebook_access(
 ) -> dict[str, Any]:
     record = await _get_record("Notebook", notebook_id)
     role, user_id = _actor(request)
-    if role == "citizen":
+    if role not in LEGAL_PROFILE_ROLES:
         raise HTTPException(status_code=403, detail=CITIZEN_DENIAL)
     if not user_id:
         raise HTTPException(status_code=403, detail=OFFICER_DENIAL)
     if record.get("ownership_status") == "needs_admin_review":
         raise HTTPException(status_code=403, detail="Hồ sơ chưa xác định chủ sở hữu, chờ quản trị viên xử lý.")
-    if not _same_user(record.get("owner_user"), user_id):
-        raise HTTPException(status_code=403, detail=OFFICER_DENIAL)
-    return record
+    if _same_user(record.get("owner_user"), user_id) or role == "admin":
+        return record
+    raise HTTPException(status_code=403, detail=OFFICER_DENIAL)
 
 
 async def assert_source_access(source_id: str, request: Request, *, action: Action = "view") -> dict[str, Any]:
     record = await _get_record("Source", source_id)
     role, user_id = _actor(request)
-    if role == "citizen":
+    if role not in LEGAL_PROFILE_ROLES:
         raise HTTPException(status_code=403, detail=CITIZEN_DENIAL)
     if not user_id:
         raise HTTPException(status_code=403, detail=OFFICER_DENIAL)
     if record.get("ownership_status") == "needs_admin_review":
         raise HTTPException(status_code=403, detail="Tài liệu chưa xác định chủ sở hữu, chờ quản trị viên xử lý.")
-    if not _same_user(record.get("owner_user"), user_id):
-        raise HTTPException(status_code=403, detail=OFFICER_DENIAL)
-    return record
+    if _same_user(record.get("owner_user"), user_id) or role == "admin":
+        return record
+    if record.get("source_scope") == "shared-admin-reviewed" and action in ("view", "download", "export"):
+        return record
+    raise HTTPException(status_code=403, detail=OFFICER_DENIAL)
 
 
 async def assert_note_access(note_id: str, request: Request, *, action: Action = "view") -> dict[str, Any]:
     record = await _get_record("Note", note_id)
     role, user_id = _actor(request)
-    if role == "citizen":
+    if role not in LEGAL_PROFILE_ROLES:
         raise HTTPException(status_code=403, detail=CITIZEN_DENIAL)
     if not user_id or record.get("ownership_status") == "needs_admin_review":
         raise HTTPException(status_code=403, detail=OFFICER_DENIAL)
@@ -196,13 +199,31 @@ async def assert_chat_session_access(session_id: str, request: Request, *, actio
     if not rows:
         raise HTTPException(status_code=404, detail="Session not found")
     role, user_id = _actor(request)
-    if role == "citizen":
+    if role not in LEGAL_PROFILE_ROLES:
         raise HTTPException(status_code=403, detail=CITIZEN_DENIAL)
     if not user_id or rows[0].get("ownership_status") == "needs_admin_review":
         raise HTTPException(status_code=403, detail=OFFICER_DENIAL)
-    if not _same_user(rows[0].get("owner_user"), user_id):
-        raise HTTPException(status_code=403, detail=OFFICER_DENIAL)
-    return rows[0]
+    record = rows[0]
+    if _same_user(record.get("owner_user"), user_id):
+        return record
+
+    # Sessions created by the former admin path have no owner_user. Recover
+    # access only through an owned, resolved notebook relationship; never grant
+    # access to an ownerless or unrelated session.
+    if record.get("owner_user") is None:
+        notebook_ids = await repo_query(
+            "SELECT VALUE out FROM refers_to WHERE in = $session_id LIMIT 1;",
+            {"session_id": ensure_record_id(full_session_id)},
+        )
+        if notebook_ids:
+            notebook = await _get_record("Notebook", str(notebook_ids[0]))
+            if (
+                notebook.get("ownership_status") != "needs_admin_review"
+                and _same_user(notebook.get("owner_user"), user_id)
+            ):
+                return record
+
+    raise HTTPException(status_code=403, detail=OFFICER_DENIAL)
 
 
 async def assert_legal_case_access(
@@ -249,8 +270,8 @@ async def assert_legal_case_access(
 
 async def assert_legal_profile_list_access(request: Request) -> tuple[str, str | None]:
     role, user_id = _actor(request)
-    if role == "citizen":
+    if role not in LEGAL_PROFILE_ROLES:
         raise HTTPException(status_code=403, detail=CITIZEN_DENIAL)
-    if role in {"officer", "admin"} and not user_id:
+    if not user_id:
         raise HTTPException(status_code=403, detail=OFFICER_DENIAL)
     return role, user_id

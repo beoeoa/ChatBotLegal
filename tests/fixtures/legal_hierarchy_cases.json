@@ -1,0 +1,128 @@
+[
+  {
+    "name": "constitution",
+    "document_type": "Hiến pháp",
+    "issuing_agency": "Quốc hội",
+    "law_number": "Hiến pháp 2013",
+    "scope": "central",
+    "expected_level": "constitution",
+    "expected_rank": 140
+  },
+  {
+    "name": "national_assembly_law",
+    "document_type": "Luật",
+    "issuing_agency": "Quốc hội",
+    "law_number": "64/2025/QH15",
+    "scope": "central",
+    "expected_level": "national_assembly",
+    "expected_rank": 130
+  },
+  {
+    "name": "national_assembly_resolution",
+    "document_type": "Nghị quyết",
+    "issuing_agency": "Quốc hội",
+    "law_number": "254/2025/QH15",
+    "scope": "central",
+    "expected_level": "national_assembly",
+    "expected_rank": 130
+  },
+  {
+    "name": "standing_committee_ordinance",
+    "document_type": "Pháp lệnh",
+    "issuing_agency": "Ủy ban Thường vụ Quốc hội",
+    "law_number": "02/2022/UBTVQH15",
+    "scope": "central",
+    "expected_level": "standing_committee",
+    "expected_rank": 120
+  },
+  {
+    "name": "president_order",
+    "document_type": "Lệnh",
+    "issuing_agency": "Chủ tịch nước",
+    "law_number": "01/2025/L-CTN",
+    "scope": "central",
+    "expected_level": "president",
+    "expected_rank": 110
+  },
+  {
+    "name": "government_decree",
+    "document_type": "Nghị định",
+    "issuing_agency": "Chính phủ",
+    "law_number": "78/2025/NĐ-CP",
+    "scope": "central",
+    "expected_level": "government",
+    "expected_rank": 100
+  },
+  {
+    "name": "prime_minister_decision",
+    "document_type": "Quyết định",
+    "issuing_agency": "Thủ tướng Chính phủ",
+    "law_number": "12/2025/QĐ-TTg",
+    "scope": "central",
+    "expected_level": "prime_minister",
+    "expected_rank": 90
+  },
+  {
+    "name": "ministerial_circular",
+    "document_type": "Thông tư",
+    "issuing_agency": "Bộ Tư pháp",
+    "law_number": "26/2025/TT-BTP",
+    "scope": "central",
+    "expected_level": "ministerial",
+    "expected_rank": 80
+  },
+  {
+    "name": "provincial_council_resolution",
+    "document_type": "Nghị quyết",
+    "issuing_agency": "Hội đồng nhân dân thành phố Hải Phòng",
+    "law_number": "12/2026/NQ-HĐND",
+    "scope": "haiphong",
+    "expected_level": "provincial_people_council",
+    "expected_rank": 70
+  },
+  {
+    "name": "provincial_committee_decision",
+    "document_type": "Quyết định",
+    "issuing_agency": "Ủy ban nhân dân thành phố Hải Phòng",
+    "law_number": "12/2026/QĐ-UBND",
+    "scope": "haiphong",
+    "expected_level": "provincial_people_committee",
+    "expected_rank": 60
+  },
+  {
+    "name": "legacy_district_decision",
+    "document_type": "Quyết định",
+    "issuing_agency": "UBND quận Lê Chân",
+    "law_number": "05/2024/QĐ-UBND",
+    "scope": "local",
+    "expected_level": "legacy_district_people_committee",
+    "expected_rank": 50
+  },
+  {
+    "name": "commune_committee_decision",
+    "document_type": "Quyết định",
+    "issuing_agency": "UBND phường An Biên",
+    "law_number": "03/2026/QĐ-UBND",
+    "scope": "local",
+    "expected_level": "commune_people_committee",
+    "expected_rank": 40
+  },
+  {
+    "name": "consolidated_reference",
+    "document_type": "Văn bản hợp nhất",
+    "issuing_agency": "Bộ Tư pháp",
+    "law_number": "01/VBHN-BTP",
+    "scope": "central",
+    "expected_level": "reference_document",
+    "expected_rank": -10
+  },
+  {
+    "name": "ambiguous_decision",
+    "document_type": "Quyết định",
+    "issuing_agency": "",
+    "law_number": "12/2026/QĐ",
+    "scope": "haiphong",
+    "expected_level": "authority_unverified",
+    "expected_rank": -20
+  }
+]

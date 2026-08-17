@@ -1,0 +1,16 @@
+services:
+  legal_retrieval: &legal_retrieval_cuda
+    build:
+      target: retrieval-cuda
+    image: chatbotlegal-retrieval:release-cuda126
+    environment:
+      LEGAL_EMBED_DEVICE: cuda
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+  legal_retrieval_replica:
+    <<: *legal_retrieval_cuda

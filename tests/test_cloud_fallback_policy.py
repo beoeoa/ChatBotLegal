@@ -79,6 +79,10 @@ def _request() -> Request:
 
 
 def _stub_online_dependencies(monkeypatch: pytest.MonkeyPatch, graph) -> None:
+    # These tests exercise the legacy provider-to-local generator fallback.
+    # The structured legal-answer path intentionally fails closed instead and
+    # is covered by its own grounding/fallback tests.
+    monkeypatch.setenv("LEGAL_SECTION_GROUNDING_ENABLED", "false")
     monkeypatch.setattr(
         search,
         "_resolve_ask_model_ids",

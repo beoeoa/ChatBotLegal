@@ -9,7 +9,9 @@ from pydantic import BaseModel, Field
 
 from api.auth import get_request_role, get_request_user_id, get_request_username
 from api import conversation_service as svc
+from api.models import AskRequest, AskResponse
 from api.observability import telemetry
+from api.unified_chat_service import run_unified_chat
 from time import perf_counter
 
 router = APIRouter(prefix="/conversations", tags=["Conversations"])
@@ -25,8 +27,26 @@ class ConversationMessageOut(BaseModel):
     faq_refs: Optional[List[str]] = None
     faqs: Optional[List[dict]] = None
     procedure_detail: Optional[dict] = None
+    answer_sections: Optional[List[dict]] = None
+    forms_unavailable: Optional[bool] = None
     rag_trace: Optional[dict] = None
     grounding_status: Optional[str] = None
+    answer_mode: Optional[str] = None
+    answer_status: Optional[str] = None
+    fallback_tier: Optional[str] = None
+    canonical_domain: Optional[str] = None
+    evidence_count: Optional[int] = None
+    coverage_warning: Optional[str] = None
+    blocked_reason: Optional[str] = None
+    presentation_version: Optional[str] = None
+    answer_route: Optional[str] = None
+    pipeline_version: Optional[str] = None
+    data_release_id: Optional[str] = None
+    index_fingerprint: Optional[str] = None
+    validity_snapshot: Optional[str] = None
+    verification_label: Optional[str] = None
+    historical_label: Optional[str] = None
+    sections: Optional[dict] = None
     attachments: Optional[List[dict]] = None
     created_at: str
 
@@ -46,6 +66,15 @@ class ConversationSummary(BaseModel):
 
 class ConversationDetail(ConversationSummary):
     messages: List[ConversationMessageOut] = Field(default_factory=list)
+    next_cursor: Optional[str] = None
+    has_older_messages: bool = False
+
+
+class ConversationMessagePage(BaseModel):
+    messages: List[ConversationMessageOut] = Field(default_factory=list)
+    next_cursor: Optional[str] = None
+    has_more: bool = False
+    limit: int = 30
 
 
 class CreateConversationRequest(BaseModel):
@@ -66,6 +95,8 @@ class SendMessageRequest(BaseModel):
     faq_refs: Optional[List[str]] = None
     faqs: Optional[List[dict]] = None
     procedure_detail: Optional[dict] = None
+    answer_sections: Optional[List[dict]] = None
+    forms_unavailable: Optional[bool] = None
     rag_trace: Optional[dict] = None
     grounding_status: Optional[str] = None
     attachments: Optional[List[dict]] = None
@@ -76,6 +107,22 @@ class ContextMessageOut(BaseModel):
     content: str
     citations: Optional[List[dict]] = None
     grounding_status: Optional[str] = None
+
+
+class UnifiedChatRequest(BaseModel):
+    question: str = Field(..., min_length=1, max_length=12000)
+    engine: str = Field("legal", pattern="^(legal|general)$")
+    domain: Optional[str] = None
+    strategy_model: str = ""
+    answer_model: str = ""
+    final_answer_model: str = ""
+    offline_mode: bool = False
+    offline_model: str = "qwen2.5:3b"
+    event_date: Optional[str] = None
+    legal_as_of: Optional[str] = None
+    idempotency_key: Optional[str] = Field(None, min_length=8, max_length=128)
+    general_context: Optional[dict[str, Any]] = None
+    model_override: Optional[str] = None
 
 
 def _owner_state(request: Request) -> tuple[str, str, str, bool]:
@@ -122,15 +169,38 @@ def _detail(data: dict[str, Any]) -> ConversationDetail:
             faq_refs=msg.get("faq_refs"),
             faqs=msg.get("faqs"),
             procedure_detail=msg.get("procedure_detail"),
+            answer_sections=msg.get("answer_sections"),
+            forms_unavailable=msg.get("forms_unavailable"),
             rag_trace=msg.get("rag_trace"),
             grounding_status=msg.get("grounding_status"),
+            answer_mode=msg.get("answer_mode"),
+            answer_status=msg.get("answer_status"),
+            fallback_tier=msg.get("fallback_tier"),
+            canonical_domain=msg.get("canonical_domain"),
+            evidence_count=msg.get("evidence_count"),
+            coverage_warning=msg.get("coverage_warning"),
+            blocked_reason=msg.get("blocked_reason"),
+            presentation_version=msg.get("presentation_version"),
+            answer_route=msg.get("answer_route"),
+            pipeline_version=msg.get("pipeline_version"),
+            data_release_id=msg.get("data_release_id"),
+            index_fingerprint=msg.get("index_fingerprint"),
+            validity_snapshot=msg.get("validity_snapshot"),
+            verification_label=msg.get("verification_label"),
+            historical_label=msg.get("historical_label"),
+            sections=msg.get("sections"),
             attachments=msg.get("attachments"),
             created_at=str(msg.get("created_at") or ""),
         )
         for msg in (data.get("messages") or [])
     ]
     base = _summary(data)
-    return ConversationDetail(**base.model_dump(), messages=messages)
+    return ConversationDetail(
+        **base.model_dump(),
+        messages=messages,
+        next_cursor=data.get("next_cursor"),
+        has_older_messages=bool(data.get("has_older_messages")),
+    )
 
 
 @router.get("", response_model=List[ConversationSummary])
@@ -189,10 +259,21 @@ async def get_conversation(conversation_id: str, request: Request):
         real_user_id=user_id,
         role_context=role,
         is_admin=is_admin,
-        include_messages=True,
+        include_messages=False,
     )
     if not data:
         raise HTTPException(status_code=404, detail="Conversation not found")
+    page = await svc.get_conversation_message_page(
+        conversation_id,
+        owner_key=owner_key,
+        real_user_id=user_id,
+        role_context=role,
+        is_admin=is_admin,
+        limit=svc.DEFAULT_MESSAGE_PAGE_SIZE,
+    )
+    data["messages"] = (page or {}).get("messages") or []
+    data["next_cursor"] = (page or {}).get("next_cursor")
+    data["has_older_messages"] = bool((page or {}).get("has_more"))
     telemetry.record_operation(
         category="conversation_load", route="/api/conversations/{conversation_id}",
         duration_ms=(perf_counter() - started) * 1000,
@@ -263,6 +344,8 @@ async def send_message(
         faq_refs=body.faq_refs,
         faqs=body.faqs,
         procedure_detail=body.procedure_detail,
+        answer_sections=body.answer_sections,
+        forms_unavailable=body.forms_unavailable,
         rag_trace=body.rag_trace if role == "admin" else None,
         grounding_status=body.grounding_status,
         attachments=body.attachments,
@@ -279,10 +362,46 @@ async def send_message(
         faq_refs=msg.get("faq_refs"),
         faqs=msg.get("faqs"),
         procedure_detail=msg.get("procedure_detail"),
+        answer_sections=msg.get("answer_sections"),
+        forms_unavailable=msg.get("forms_unavailable"),
         rag_trace=msg.get("rag_trace"),
         grounding_status=msg.get("grounding_status"),
+        answer_mode=msg.get("answer_mode"),
         attachments=msg.get("attachments"),
         created_at=str(msg.get("created_at") or ""),
+    )
+
+
+@router.get(
+    "/{conversation_id}/messages",
+    response_model=ConversationMessagePage,
+)
+async def list_messages(
+    conversation_id: str,
+    request: Request,
+    before: Optional[str] = Query(None),
+    limit: int = Query(30, ge=1, le=100),
+):
+    owner_key, user_id, role, is_admin = _owner_state(request)
+    try:
+        page = await svc.get_conversation_message_page(
+            conversation_id,
+            owner_key=owner_key,
+            real_user_id=user_id,
+            role_context=role,
+            is_admin=is_admin,
+            limit=limit,
+            before=before,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if page is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return ConversationMessagePage(
+        messages=[ConversationMessageOut(**message) for message in page["messages"]],
+        next_cursor=page["next_cursor"],
+        has_more=page["has_more"],
+        limit=page["limit"],
     )
 
 

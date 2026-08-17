@@ -38,9 +38,9 @@ export function EmbeddingModelChangeDialog({
   const handleConfirmAndRebuild = () => {
     setIsConfirming(true)
     onConfirm()
-    // Give a moment for the model to update, then redirect
+    // Give the model setting a moment to update, then open the legal-import maintenance area.
     setTimeout(() => {
-      router.push('/advanced')
+      router.push('/legal-import')
       onOpenChange(false)
       setIsConfirming(false)
     }, 500)

@@ -126,6 +126,49 @@ async def test_candidate_listing_filter_uses_exact_domain_and_source_type(monkey
 
 
 @pytest.mark.asyncio
+async def test_candidate_listing_needs_attention_groups_retry_and_review_states(monkeypatch):
+    calls: list[tuple[str, dict]] = []
+
+    async def fake_query(query, params=None):
+        calls.append((query, params or {}))
+        return []
+
+    monkeypatch.setattr("api.legal_crawl_service.repo_query", fake_query)
+
+    result = await LegalCrawlService.list_candidates(status="needs_attention", limit=50)
+
+    assert result == []
+    query, params = calls[-1]
+    assert "status IN ['import_failed', 'changes_requested']" in query
+    assert "import_status = 'validation_failed'" in query
+    assert "status" not in params
+    assert params == {"limit": 50}
+
+
+@pytest.mark.asyncio
+async def test_candidate_listing_omits_full_content_and_bounds_ocr_preview(monkeypatch):
+    full_text = "Nội dung kiểm chứng. " * 300
+    preview = "Bản xem trước OCR. " * 300
+
+    async def fake_query(_query, _params=None):
+        return [{
+            "id": "legal_crawl_candidate:large",
+            "content": full_text,
+            "extraction_result": {"preview": preview, "characters": 0},
+        }]
+
+    monkeypatch.setattr("api.legal_crawl_service.repo_query", fake_query)
+
+    result = await LegalCrawlService.list_candidates(status="import_failed")
+
+    assert len(result) == 1
+    assert "content" not in result[0]
+    assert result[0]["content_characters"] == len(full_text)
+    assert len(result[0]["extraction_result"]["preview"]) <= 2001
+    assert result[0]["extraction_result"]["preview"].endswith("…")
+
+
+@pytest.mark.asyncio
 async def test_summary_exposes_candidate_counts_by_domain_and_source(monkeypatch):
     """summary() returns by_domain and by_source breakdowns."""
     async def fake_query(query, _params=None):
@@ -137,10 +180,26 @@ async def test_summary_exposes_candidate_counts_by_domain_and_source(monkeypatch
             return [{"count": 2}]
         if "status = 'approved'" in query:
             return [{"count": 1}]
+        if "SELECT status, import_status, imported_document" in query:
+            return [{
+                "status": "imported",
+                "import_status": "completed",
+                "imported_document": {
+                    "document_id": "document:1",
+                    "activation_status": "active",
+                    "chunk_count": 4,
+                },
+            }]
         if "status = 'imported'" in query:
             return [{"count": 1}]
         if "status = 'rejected'" in query:
             return [{"count": 0}]
+        if "legal_import_job" in query:
+            return [
+                {"status": "queued", "count": 2},
+                {"status": "running", "count": 1},
+                {"status": "failed", "count": 3},
+            ]
         return [{"count": 4}]
 
     monkeypatch.setattr("api.legal_crawl_service.repo_query", fake_query)
@@ -150,6 +209,69 @@ async def test_summary_exposes_candidate_counts_by_domain_and_source(monkeypatch
     assert summary["by_domain"] == {"ho_tich_chung_thuc": 4}
     assert summary["by_source"] == {"legal_crawl_source:vbpl_central": 4}
     assert summary["pending_candidates"] == 2
+    assert summary["activated_candidates"] == 1
+    assert summary["unverified_imported_candidates"] == 0
+    assert summary["import_metrics"]["activated_candidates"] == 1
+    assert summary["import_queue"] == {
+        "queued": 2,
+        "running": 1,
+        "failed": 3,
+        "completed": 0,
+    }
+
+
+def test_active_import_confirmation_rejects_legacy_status_without_vector_evidence():
+    assert LegalCrawlService._has_active_import_confirmation({
+        "status": "imported",
+        "import_status": "completed",
+        "imported_document": {
+            "document_id": "legal_document:1",
+            "activation_status": "active",
+            "chunk_count": 1,
+        },
+    })
+    assert not LegalCrawlService._has_active_import_confirmation({
+        "status": "imported",
+        "import_status": "completed",
+        "imported_document": {
+            "document_id": "legal_document:legacy",
+            "chunk_count": 0,
+        },
+    })
+
+
+def test_import_queue_metrics_are_timestamp_based_and_do_not_guess_missing_values():
+    metrics = LegalCrawlService._build_import_queue_metrics(
+        [
+            {
+                "status": "completed",
+                "created_at": "2026-08-07T00:00:00+00:00",
+                "started_at": "2026-08-07T00:01:00+00:00",
+                "completed_at": "2026-08-07T00:03:00+00:00",
+            },
+            {
+                "status": "failed",
+                "created_at": "2026-08-07T00:10:00+00:00",
+                "started_at": "2026-08-07T00:10:00+00:00",
+                "completed_at": "2026-08-07T00:11:00+00:00",
+            },
+            {"status": "completed", "created_at": None, "started_at": None, "completed_at": None},
+        ],
+        import_queue={"queued": 0, "running": 0, "failed": 1, "completed": 1},
+        activated_candidates=1,
+        validation_failed_candidates=2,
+        duplicate_conflict_candidates=3,
+    )
+
+    assert metrics == {
+        "observed_job_count": 3,
+        "success_rate_percent": 50.0,
+        "average_queue_seconds": 30.0,
+        "average_processing_seconds": 90.0,
+        "validation_failed_candidates": 2,
+        "duplicate_conflict_candidates": 3,
+        "activated_candidates": 1,
+    }
 
 
 @pytest.mark.asyncio

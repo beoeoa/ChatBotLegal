@@ -24,6 +24,226 @@ def test_explicit_form_intent_is_strict():
     assert not _question_requests_forms("N\u1ebfu khi\u1ebfu n\u1ea1i th\u00ec n\u1ed9p \u1edf \u0111\u00e2u, trong bao l\u00e2u?")
 
 
+def test_verified_form_answer_uses_only_catalog_metadata():
+    from api.routers.search import _append_verified_form_answer
+
+    answer = _append_verified_form_answer(
+        "## Kết luận\nSai: thủ tục dùng Mẫu 09/ĐK.",
+        question="Thủ tục này cần biểu mẫu nào?",
+        recommended_forms=[
+            {
+                "form_id": "form-19",
+                "name": "Đơn đề nghị cấp lại",
+                "form_code": "19",
+                "review_status": "approved",
+                "official_level": "official",
+                "effective_from": "2024-12-15",
+                "legal_basis": ["141/2024/NĐ-CP"],
+                    "source_url": "https://vbpl.vn/example",
+                    "download_url": "/api/forms/form-19/download",
+                    "procedure_identity_confirmed": True,
+            }
+        ],
+    )
+
+    assert "## Biểu mẫu chính thức" in answer
+    assert "Đơn đề nghị cấp lại (19)" in answer
+    assert "141/2024/NĐ-CP" in answer
+    assert "[Nguồn biểu mẫu chính thức](https://vbpl.vn/example)" in answer
+    assert "[Tải biểu mẫu](/api/forms/form-19/download)" in answer
+    assert "09/ĐK" not in answer
+
+
+def test_verified_form_answer_replaces_contradictory_generic_source_gap():
+    from api.routers.search import _append_verified_form_answer
+
+    answer = _append_verified_form_answer(
+        "Ch\u01b0a c\u00f3 ngu\u1ed3n hi\u1ec7n h\u00e0nh \u0111\u1ee7 \u0111\u1ec3 x\u00e1c minh n\u1ed9i dung n\u00e0y.",
+        question="H\u1ed3 s\u01a1 v\u00e0 bi\u1ec3u m\u1eabu g\u1ed3m nh\u1eefng g\u00ec?",
+        recommended_forms=[
+            {
+                "form_id": "f1",
+                "name": "Phi\u1ebfu khai b\u00e1o",
+                "review_status": "approved",
+                "official_level": "official",
+                    "source_url": "https://vbpl.vn/f1",
+                    "download_url": "/api/procedures/forms-catalog/assets/f1/download",
+                    "procedure_identity_confirmed": True,
+            }
+        ],
+    )
+    assert "Ch\u01b0a c\u00f3 ngu\u1ed3n hi\u1ec7n h\u00e0nh \u0111\u1ee7" not in answer
+    assert "Ph\u1ea7n bi\u1ec3u m\u1eabu \u0111\u00e3 \u0111\u01b0\u1ee3c x\u00e1c minh" in answer
+    assert "Phi\u1ebfu khai b\u00e1o" in answer
+
+
+def test_exact_procedure_form_lookup_does_not_require_procedure_steps():
+    from api.legal_question_policy import classify_question
+
+    policy = classify_question(
+        "Thủ tục có mã 1.013873 cần biểu mẫu nào? Chỉ cung cấp biểu mẫu chính thức."
+    )
+
+    assert policy["question_type"] == "form_request"
+    assert policy["required_sections"] == ["conclusion", "official_forms"]
+
+
+def test_form_catalog_citation_is_explicitly_attested():
+    from api.routers.search import _merge_form_catalog_citations
+
+    citations = _merge_form_catalog_citations(
+        [],
+        [
+            {
+                "review_status": "approved",
+                "official_level": "official",
+                "source_url": "https://vbpl.vn/example",
+                "legal_basis": ["141/2024/NĐ-CP"],
+                "procedure_identity_confirmed": True,
+            }
+        ],
+    )
+
+    assert citations == [
+        {
+            "document_title": "Nguồn biểu mẫu chính thức",
+            "law_number": "141/2024/NĐ-CP",
+            "article_number": None,
+            "effective_status": "active",
+            "source_url": "https://vbpl.vn/example",
+            "verification_source": "approved_form_catalog",
+        }
+    ]
+
+
+def test_forms_unavailable_uses_explicit_form_detector_not_broad_classifier():
+    from api.routers.search import _forms_unavailable_for_question
+
+    assert _forms_unavailable_for_question(
+        "Cho t\u00f4i M\u1eabu 09/\u0110K \u0111\u1ec3 sang t\u00ean nh\u00e0 \u0111\u1ea5t",
+        None,
+    )
+    assert not _forms_unavailable_for_question(
+        "Nh\u00e0 \u1edf \u0111ang x\u00e2y kh\u00f4ng ph\u00e9p b\u1ecb x\u1eed l\u00fd th\u1ebf n\u00e0o?",
+        None,
+    )
+
+
+def test_verified_catalog_form_removes_duplicate_missing_form_section():
+    from api.models import AnswerSection
+    from api.routers.search import _reconcile_verified_form_sections
+
+    sections = [
+        AnswerSection(
+            issue_id="issue-documents",
+            title="Hồ sơ",
+            status="insufficiently_evidenced",
+            limitation="Chưa có đủ căn cứ hiện hành.",
+        ),
+        AnswerSection(
+            issue_id="issue-form",
+            title="Biểu mẫu",
+            status="insufficiently_evidenced",
+            limitation="Chưa có biểu mẫu trong nguồn truy xuất.",
+        ),
+    ]
+    trace = {
+        "claim_validation": {
+            "issues": [
+                {"issue_id": "issue-documents", "requested_facets": ["documents"]},
+                {"issue_id": "issue-form", "requested_facets": ["form"]},
+            ]
+        }
+    }
+    verified_form = {
+        "review_status": "approved",
+        "official_level": "official",
+        "source_url": "https://dichvucong.example/form",
+        "legal_basis": ["60/2014/QH13"],
+        "download_url": "/api/forms/form-birth/download",
+        "procedure_identity_confirmed": True,
+    }
+
+    reconciled, aggregate = _reconcile_verified_form_sections(
+        sections,
+        section_trace=trace,
+        recommended_forms=[verified_form],
+    )
+
+    assert [section.issue_id for section in reconciled] == ["issue-documents"]
+    assert "Chưa có biểu mẫu" not in aggregate["answer"]
+
+
+def test_verified_catalog_form_removes_titled_form_gap_for_mixed_issue():
+    from api.models import AnswerSection
+    from api.routers.search import _reconcile_verified_form_sections
+
+    sections = [
+        AnswerSection(
+            issue_id="issue-mixed",
+            title="Bi\u1ec3u m\u1eabu",
+            status="insufficiently_evidenced",
+            limitation="Ch\u01b0a c\u00f3 bi\u1ec3u m\u1eabu trong ngu\u1ed3n truy xu\u1ea5t.",
+        )
+    ]
+    trace = {
+        "claim_validation": {
+            "issues": [
+                {
+                    "issue_id": "issue-mixed",
+                    "requested_facets": ["documents", "form"],
+                }
+            ]
+        }
+    }
+    reconciled, aggregate = _reconcile_verified_form_sections(
+        sections,
+        section_trace=trace,
+        recommended_forms=[
+            {
+                "review_status": "approved",
+                "official_level": "official",
+                "source_url": "https://vbpl.vn/form",
+                "download_url": "/api/procedures/forms-catalog/assets/f1/download",
+                "procedure_identity_confirmed": True,
+            }
+        ],
+    )
+    assert reconciled == []
+    assert "Ch\u01b0a c\u00f3 bi\u1ec3u m\u1eabu" not in aggregate["answer"]
+
+
+def test_structured_source_gap_omits_form_when_catalog_has_verified_form():
+    from api.routers.search import _structured_source_gap
+
+    gaps = _structured_source_gap(
+        {
+            "claim_validation": {
+                "issues": [
+                    {
+                        "missing_facets": ["documents"],
+                        "unavailable_facets": ["form", "deadline"],
+                    }
+                ]
+            }
+        },
+        has_verified_form=True,
+    )
+
+    assert gaps == ["documents", "deadline"]
+
+
+def test_structured_source_gap_keeps_form_gap_without_confirmed_procedure_identity():
+    from api.routers.search import _structured_source_gap
+
+    trace = {
+        "claim_validation": {
+            "issues": [{"missing_facets": ["form"], "unavailable_facets": []}]
+        }
+    }
+    assert _structured_source_gap(trace, has_verified_form=False) == ["form"]
+
+
 def test_to_hieu_legal_question_never_recommends_a_form():
     from api.routers.search import _procedure_response_fields
 
@@ -107,6 +327,65 @@ def test_complaint_request_only_returns_official_complaint_form():
     assert [item["form_id"] for item in recommended] == ["complaint"]
 
 
+def test_residency_question_does_not_treat_contextual_birth_data_as_a_procedure():
+    from api.routers.search import _match_procedure_detail
+
+    question = (
+        "Gia đình tôi gồm vợ chồng và một con 6 tuổi đang thường trú ở tỉnh khác, "
+        "hiện thuê một căn hộ tại Hải Phòng trong thời hạn 12 tháng. Chủ nhà đồng "
+        "ý xác nhận trên VNeID; dữ liệu khai sinh của cháu đã có trong Cơ sở dữ "
+        "liệu quốc gia về dân cư. Hãy xác định có đủ điều kiện đăng ký thường trú "
+        "hay chỉ đăng ký tạm trú, nêu biểu mẫu chính xác và liên kết tải. Không "
+        "được mặc định sử dụng CT01 nếu chưa xác minh."
+    )
+
+    detail = _match_procedure_detail(question, role="citizen")
+
+    assert detail is not None
+    residency_ids = {
+        "dang_ky_tam_tru",
+        "dang_ky_thuong_tru",
+        "dieu_chinh_thong_tin_cu_tru",
+        # Canonical three-tier records preserve their official DVC codes.
+        "1.004194",
+        "1.004222",
+    }
+    assert detail["id"] in residency_ids
+    assert set(detail["matched_procedure_ids"]) <= residency_ids
+    assert all(
+        form.get("procedure_id") in residency_ids
+        for form in detail.get("recommended_forms") or []
+    )
+
+
+def test_shared_form_code_does_not_expand_api_to_unrelated_procedures():
+    from api.routers.search import _detect_matched_procedure_ids
+
+    pension = _detect_matched_procedure_ids(
+        "Toi muon huong tro cap huu tri xa hoi va can Mau so 01 chinh thuc."
+    )
+    residence = _detect_matched_procedure_ids(
+        "Toi can dang ky tam tru bang Mau CT01 chinh thuc."
+    )
+
+    assert [item[0] for item in pension] == ["1.014027"]
+    assert [item[0] for item in residence] == ["1.004194"]
+
+
+def test_explicit_two_procedures_remain_multi_intent_after_code_filtering():
+    from api.routers.search import _detect_matched_procedure_ids
+
+    matches = _detect_matched_procedure_ids(
+        "Toi can dang ky tam tru va xin Giay xac nhan tinh trang hon nhan; "
+        "hay cho bieu mau cua tung thu tuc."
+    )
+
+    assert {item[0] for item in matches} == {
+        "1.004194",
+        "xac_nhan_tinh_trang_hon_nhan",
+    }
+
+
 def test_citations_prefer_active_direct_results_and_internal_viewer_links():
     from api.routers.search import _build_citations_from_retrieval
 
@@ -137,3 +416,33 @@ def test_citations_prefer_active_direct_results_and_internal_viewer_links():
     assert all(item["doc_id"] != "9" for item in citations)
     assert citations[0]["internal_url"] == "/legal-documents/10?article=8&clause=2&point=a"
     assert citations[0]["pdf_url"] == "/api/legal/docs/10/download.pdf?article=8"
+
+
+def test_verified_form_lookup_requires_confirmed_procedure_identity():
+    from api.routers.search import _is_verified_form_lookup_only
+
+    policy = {
+        "requests_form": True,
+        "required_sections": ["conclusion", "official_forms"],
+    }
+    base = {
+        "form_id": "form-na17",
+        "procedure_id": "foreign_guest_stay",
+        "review_status": "approved",
+        "official_level": "official",
+        "source_url": "https://vbpl.vn/na17",
+        "download_url": "/api/procedures/forms-catalog/assets/form-na17/download",
+    }
+
+    assert _is_verified_form_lookup_only(policy, [base]) is False
+    assert _is_verified_form_lookup_only(
+        policy,
+        [{**base, "procedure_identity_confirmed": True}],
+    ) is True
+
+
+def test_verified_form_lookup_is_not_provider_fallback():
+    """A catalog-only answer remains a normal deterministic answer mode."""
+    from api.routers import search
+
+    assert search.NORMAL == "normal"

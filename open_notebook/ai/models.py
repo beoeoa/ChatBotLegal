@@ -72,7 +72,6 @@ class Model(ObjectModel):
 class DefaultModels(RecordModel):
     record_id: ClassVar[str] = "open_notebook:default_models"
     default_chat_model: Optional[str] = None
-    default_transformation_model: Optional[str] = None
     large_context_model: Optional[str] = None
     default_text_to_speech_model: Optional[str] = None
     default_speech_to_text_model: Optional[str] = None
@@ -255,10 +254,6 @@ class ModelManager:
 
         if model_type == "chat":
             model_id = defaults.default_chat_model
-        elif model_type == "transformation":
-            model_id = (
-                defaults.default_transformation_model or defaults.default_chat_model
-            )
         elif model_type == "tools":
             model_id = defaults.default_tools_model or defaults.default_chat_model
         elif model_type == "embedding":

@@ -34,8 +34,7 @@ async def get_insight(insight_id: str):
         raise HTTPException(status_code=500, detail="Error fetching insight")
 
 
-@router.delete("/insights/{insight_id}")
-async def delete_insight(insight_id: str):
+async def _retired_delete_insight(insight_id: str):
     """Delete a specific insight."""
     try:
         insight = await SourceInsight.get(insight_id)

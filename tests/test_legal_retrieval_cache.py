@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import numpy as np
 
-from scripts.legal_retrieval_cache import QueryVectorCache, query_vector_cache_key
+from scripts.legal_retrieval_cache import (
+    ExactRowsCache,
+    QueryVectorCache,
+    exact_rows_cache_key,
+    query_vector_cache_key,
+)
 
 
 class _Clock:
@@ -72,3 +77,27 @@ def test_query_vector_cache_is_lru_bounded_and_reports_sanitized_stats() -> None
     }
     assert not any("question" in str(value) for value in stats.values())
 
+
+def test_exact_rows_cache_is_opaque_bounded_and_returns_defensive_copies() -> None:
+    clock = _Clock()
+    cache = ExactRowsCache(max_entries=1, ttl_seconds=5, clock=clock)
+    key = exact_rows_cache_key(
+        law_numbers=["60/2014/QH13"],
+        article_numbers=["52"],
+        clause_number=None,
+        domain="ho_tich_chung_thuc",
+        legal_as_of="2026-08-11",
+        retrieval_tier="core",
+    )
+    assert len(key) == 64
+    assert "60/2014" not in key
+
+    cache.set(key, [{"chunk_id": 1, "content": "source"}])
+    rows = cache.get(key)
+    assert rows is not None
+    rows[0]["content"] = "changed"
+    assert cache.get(key)[0]["content"] == "source"
+
+    clock.value += 6
+    assert cache.get(key) is None
+    assert cache.stats()["expired"] == 1

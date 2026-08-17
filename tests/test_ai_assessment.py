@@ -122,10 +122,15 @@ async def test_assess_candidate_api_endpoint(mock_provision, mock_update, mock_q
         "X-User-Role": "admin"
     }
     
-    response = client.post(
-        "/api/legal/crawl/candidates/legal_crawl_candidate:test_assess_2/assess",
-        headers=headers
-    )
+    # Router tests exercise assessment behavior only; audit persistence belongs
+    # to the isolated SurrealDB integration suite.
+    with patch(
+        "api.routers.legal_search.write_audit_log", new_callable=AsyncMock
+    ):
+        response = client.post(
+            "/api/legal/crawl/candidates/legal_crawl_candidate:test_assess_2/assess",
+            headers=headers,
+        )
     
     assert response.status_code == 200
     data = response.json()

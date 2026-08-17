@@ -34,7 +34,9 @@ def record_query(monkeypatch):
     records = {
         "nb-1": {"id": "notebook:nb-1", "owner_user": "user_account:user-1", "ownership_status": "resolved"},
         "nb-2": {"id": "notebook:nb-2", "owner_user": "user_account:user-2", "ownership_status": "resolved"},
+        "nb-ownerless": {"id": "notebook:nb-ownerless", "owner_user": None, "ownership_status": "resolved"},
         "src-1": {"id": "source:src-1", "owner_user": "user_account:user-1", "ownership_status": "resolved"},
+        "src-ownerless": {"id": "source:src-ownerless", "owner_user": None, "ownership_status": "resolved"},
     }
 
     async def fake_query(query, params=None):
@@ -58,6 +60,23 @@ async def test_citizen_is_denied_notebook_api(record_query):
         await access.assert_notebook_access("nb-1", request_for("citizen"))
     assert exc.value.status_code == 403
     assert "Hồ sơ pháp lý" in exc.value.detail
+
+
+@pytest.mark.asyncio
+async def test_notebook_list_is_allowed_only_for_named_staff_roles():
+    assert await access.assert_legal_profile_list_access(
+        request_for("officer", "user-1")
+    ) == ("officer", "user-1")
+    assert await access.assert_legal_profile_list_access(
+        request_for("admin", "user-1")
+    ) == ("admin", "user-1")
+
+    for denied_role in ("citizen", "anonymous", "auditor"):
+        with pytest.raises(HTTPException) as exc:
+            await access.assert_legal_profile_list_access(
+                request_for(denied_role, "user-1")
+            )
+        assert exc.value.status_code == 403
 
 
 @pytest.mark.asyncio
@@ -95,6 +114,21 @@ async def test_admin_can_only_open_own_notebook(record_query, monkeypatch):
         await access.assert_notebook_access("nb-2", request_for("admin", "user-1"), action="view")
     assert exc.value.status_code == 403
     assert created == []
+
+
+@pytest.mark.asyncio
+async def test_ownerless_legacy_profile_is_never_claimed_by_direct_url(record_query):
+    with pytest.raises(HTTPException) as notebook_exc:
+        await access.assert_notebook_access(
+            "nb-ownerless", request_for("admin", "user-1")
+        )
+    with pytest.raises(HTTPException) as source_exc:
+        await access.assert_source_access(
+            "src-ownerless", request_for("admin", "user-1")
+        )
+
+    assert notebook_exc.value.status_code == 403
+    assert source_exc.value.status_code == 403
 
 
 @pytest.mark.asyncio

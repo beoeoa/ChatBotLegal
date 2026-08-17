@@ -1,0 +1,7 @@
+-- Rehearsal-only rollback. Production rollback restores the pre-migration backup
+-- so nested review evidence cannot be silently discarded by SCHEMAFULL writes.
+DEFINE FIELD OVERWRITE raw_metadata ON TABLE legal_crawl_candidate TYPE option<object>;
+DEFINE FIELD OVERWRITE uploaded_file ON TABLE legal_crawl_candidate TYPE option<object>;
+DEFINE FIELD OVERWRITE extraction_result ON TABLE legal_crawl_candidate TYPE option<object>;
+DEFINE FIELD OVERWRITE legal_validity_flags ON TABLE legal_crawl_candidate TYPE option<object>;
+DEFINE FIELD OVERWRITE review_recommendation ON TABLE legal_crawl_candidate TYPE option<object>;

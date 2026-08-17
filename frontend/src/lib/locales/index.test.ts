@@ -34,6 +34,21 @@ describe('Locale Parity', () => {
   )
 })
 
+describe('Vietnamese legal-profile workflow', () => {
+  it('does not fall back to English on notebook actions and context status', async () => {
+    const locale = await loadLocale('vi-VN')
+
+    expect(locale.common.writeNote).toBe('Viết ghi chú')
+    expect(locale.common.human).toBe('Cán bộ ghi')
+    expect(locale.notebooks.archive).toBe('Lưu trữ')
+    expect(locale.notebooks.deleteNotebook).toBe('Xóa hồ sơ pháp lý')
+    expect(locale.notebooks.noNotesYet).toBe('Chưa có ghi chú')
+    expect(locale.sources.addSource).toBe('Thêm văn bản')
+    expect(locale.chat.contextLabel).toBe('Căn cứ đã chọn:')
+    expect(locale.chat.contextEmpty).not.toMatch(/No sources|Toggle icons/i)
+  })
+})
+
 describe('Unused Key Detection', () => {
   it(
     'all en-US leaf keys should be referenced in source files',
@@ -42,6 +57,37 @@ describe('Unused Key Detection', () => {
       // connection diagnostics panel. Keep them for locale parity while the
       // public login uses the current account-only flow.
       const legacyUnusedKeys = new Set([
+        'common.podcast',
+        'common.admin',
+        'common.auditLog',
+        'common.email',
+        'common.new',
+        'common.newSource',
+        'common.newNotebook',
+        'common.newPodcast',
+        'common.unknown',
+        'common.deleteForever',
+        'common.nameRequired',
+        'common.notebookLabel',
+        // Model setup was consolidated into the Admin model/API-key screen;
+        // these compatibility labels remain for older saved locale bundles.
+        'common.modelLocal',
+        'common.accessibility.transformationViews',
+        'common.accessibility.podcastViews',
+        'common.editTransformation',
+        'apiErrors.transformationNotFound',
+        'navigation.collect',
+        'navigation.podcasts',
+        'navigation.transformations',
+        'navigation.transformation',
+        'navigation.advanced',
+        'sources.generateNewInsight',
+        'sources.selectTransformation',
+        'sources.deleteInsight',
+        'sources.deleteInsightConfirm',
+        'sources.insightGenerationStarted',
+        'models.transformationModelLabel',
+        'models.transformationModelDesc',
         'common.connectionError',
         'common.unableToConnect',
         'common.retryConnection',
@@ -61,7 +107,14 @@ describe('Unused Key Detection', () => {
         'auth.signingIn',
         'auth.signIn',
         'auth.connectErrorHint',
+        'searchPage.usingCustomModels',
+        'searchPage.usingDefaultModels',
+        'searchPage.notSet',
       ])
+      // Podcast/Transformation code and routes were intentionally retired.
+      // Keep their translations temporarily for locale parity and rollback of
+      // historical records, but do not count them as active UI references.
+      const retiredFeaturePrefixes = ['podcasts.', 'transformations.', 'advanced.']
       const srcDir = path.resolve(__dirname, '../../..')
       const localesDir = path.resolve(__dirname)
       const ignoredSegments = new Set([
@@ -94,7 +147,12 @@ describe('Unused Key Detection', () => {
       for (const key of leafKeys) {
         if (corpus.includes(key)) referenced.add(key)
       }
-      const unused = leafKeys.filter(key => !referenced.has(key) && !legacyUnusedKeys.has(key))
+      const unused = leafKeys.filter(
+        key =>
+          !referenced.has(key) &&
+          !legacyUnusedKeys.has(key) &&
+          !retiredFeaturePrefixes.some(prefix => key.startsWith(prefix)),
+      )
 
       expect(
         unused,

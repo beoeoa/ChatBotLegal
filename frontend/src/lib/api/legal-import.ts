@@ -1,4 +1,5 @@
 import apiClient from './client'
+import { getApiUrl } from '@/lib/config'
 
 export interface LegalField {
   id: number
@@ -50,6 +51,122 @@ export interface LegalCrawlSource {
   last_run_stats?: Record<string, number> | null
   source_freshness?: string | null
   last_status?: string | null
+  source_kind?: 'web_crawler' | 'internal_queue'
+  is_default?: boolean
+  can_delete?: boolean
+  can_scan?: boolean
+  purpose?: string | null
+}
+
+export interface LegalImportReadiness {
+  status: 'ready' | 'not_ready'
+  components: Record<string, {
+    healthy: boolean
+    code: string
+    required?: boolean
+    heartbeat_age_seconds?: number
+    max_heartbeat_age_seconds?: number
+  }>
+  embedding_device: {
+    requested: string
+    active: string
+  }
+}
+
+export type FormWorkflowStatus =
+  | 'draft' | 'submitted' | 'needs_supplement' | 'resubmitted'
+  | 'source_approved' | 'legal_enrichment' | 'ready_for_attestation'
+  | 'attested' | 'release_candidate' | 'released'
+  | 'rejected' | 'withdrawn' | 'superseded' | 'expired' | 'quarantined'
+
+export interface FormReviewCaseV17 {
+  case_id: string
+  officer_id: string
+  domain: string
+  procedure_id: string
+  title: string
+  status: FormWorkflowStatus
+  revision: number
+  version: number
+  current_submission: { source_url: string; source_checksum?: string | null; note?: string }
+}
+
+export interface FormCoverageV17 {
+  procedure_total: number
+  procedure_decided: number
+  identity_total: number
+  identity_decided: number
+  binding_total: number
+  binding_decided: number
+  complete: boolean
+  workflow_statuses: Record<string, number>
+}
+
+export interface FormProcedureCandidateV18 {
+  procedure_id: string
+  procedure_code: string
+  name: string
+  domain: string
+  official_source_url?: string | null
+  coverage_status?: string | null
+}
+
+export interface FormSourceProposalMetadataV18 {
+  steps: Array<{
+    id: string
+    label: string
+    action: string
+    public_after_step: boolean
+  }>
+  source_inputs: Array<'official_url' | 'pdf' | 'docx' | 'eform'>
+  file_contract: {
+    accepted_extensions: string[]
+    accepted_mime_types: string[]
+    checksum: 'sha256'
+    transport: string
+  }
+  source_approval_changes_public_release: boolean
+}
+
+export interface FormAttestationPreviewV17 {
+  case_id: string
+  revision: number
+  fingerprint: string
+  procedure: Record<string, unknown>
+  asset: Record<string, unknown>
+  bindings: Array<Record<string, unknown>>
+  aliases: string[]
+}
+
+export interface FormReleaseV17 {
+  release_id: string
+  version: number
+  legal_as_of: string
+  manifest_sha256: string
+  status: 'candidate' | 'validated' | 'active' | 'retired' | 'blocked'
+  gate_report?: {
+    passed: boolean
+    errors: string[]
+    source_checks?: { required: number; passed: number; mode: string }
+  }
+  manifest?: {
+    build?: { case_ids?: string[] }
+    procedures?: Array<Record<string, unknown>>
+    assets?: Array<Record<string, unknown>>
+    bindings?: Array<Record<string, unknown>>
+  }
+}
+
+export interface CrawlSourceCreatePayload {
+  name: string
+  base_url: string
+  sitemap_scope: 'central' | 'haiphong' | 'local'
+  interval_minutes?: number
+  lookback_days?: number
+  max_documents_per_run?: number
+  max_listing_pages_per_run?: number
+  rate_limit_seconds?: number
+  filter_keyword?: string | null
 }
 
 export interface AiAssessment {
@@ -81,6 +198,8 @@ export interface CandidateReviewRecommendation {
   action?: string
   scores?: Record<string, number>
   evidence?: string[]
+  hard_gate_failures?: string[]
+  passed_hard_gates?: boolean
   evidence_snippets?: Array<{ kind: string; text: string }>
   generated_at?: string
 }
@@ -121,9 +240,32 @@ export interface LegalCrawlCandidate {
   needs_ocr?: boolean
   raw_metadata?: Record<string, unknown> | null
   review_status?: string | null
+  import_status?: string | null
+  import_job?: string | null
+  pipeline_stage?: 'fetching_source' | 'validating' | 'blocked' | 'queued' | 'chunking_embedding' | 'active' | 'failed' | string | null
+  preparation_status?: 'pending' | 'ready' | 'blocked' | string | null
+  blockers?: string[] | null
+  document_id?: string | null
+  chunk_count?: number | null
+  indexed_at?: string | null
   requested_changes_note?: string | null
   proposal_reason?: string | null
   source_type?: string | null
+  content_characters?: number | null
+}
+
+export interface LegalCandidateMetadataUpdate {
+  title?: string
+  law_number?: string
+  document_type?: string
+  issuing_agency?: string
+  scope?: 'central' | 'haiphong' | 'local'
+  sector?: string
+  issued_date?: string
+  effective_date?: string
+  expired_date?: string
+  source_url?: string
+  confirmed_official_source?: boolean
 }
 
 export interface LegalCrawlNotification {
@@ -142,53 +284,22 @@ export interface LegalCrawlSummary {
   source_count: number
   last_checked_at?: string | null
   schedule_interval_minutes?: number
-}
-
-export interface RuntimeTelemetryEvent {
-  at: string
-  category: string
-  duration_ms: number
-  outcome?: string
-  status_code?: number
-  route?: string
-}
-
-export interface LegalQualitySummary {
-  generated_at: string
-  runtime?: {
-    event_count?: number
-    by_category?: Record<string, { count: number; avg_ms: number; max_ms: number; error_count: number; cancelled_count?: number }>
-    slow_requests?: RuntimeTelemetryEvent[]
-    issue_counts?: Record<string, number>
-    privacy?: string
+  activated_candidates?: number
+  unverified_imported_candidates?: number
+  import_queue?: {
+    queued: number
+    running: number
+    failed: number
+    completed: number
   }
-  quality_issues?: {
-    citation_dead?: number
-    pdf_export_failed?: number
-    broken_form_url?: number
-    slow_request?: number
-    ocr_failed?: number
-    import_failed?: number
-    unanswered_question?: number
-  }
-  role_evaluation: {
-    available: boolean
-    generated_at?: string
-    total?: number
-    completed?: number
-    hallucination_flags?: number
-    fallback_count?: number
-    by_role?: Record<string, { count: number; grounded: number; role_style: number }>
-    sample?: Array<Record<string, unknown>>
-  }
-  retrieval_evaluation: {
-    available: boolean
-    generated_at?: string
-    total?: number
-    with_sources?: number
-    avg_sources?: number
-    top_status_distribution?: Record<string, number>
-    sample?: Array<Record<string, unknown>>
+  import_metrics?: {
+    observed_job_count: number
+    success_rate_percent: number | null
+    average_queue_seconds: number | null
+    average_processing_seconds: number | null
+    validation_failed_candidates: number
+    duplicate_conflict_candidates: number
+    activated_candidates: number
   }
 }
 
@@ -278,6 +389,17 @@ export interface LegalFormCandidate {
   download_url?: string | null
 }
 
+export interface LegalFormCandidatePage {
+  summary: {
+    filtered_total: number
+    returned: number
+    offset: number
+    limit: number
+  }
+  generated_at?: string | null
+  records: LegalFormCandidate[]
+}
+
 export interface LegalFormReviewPayload {
   decision: 'approved' | 'rejected'
   review_note?: string
@@ -285,6 +407,158 @@ export interface LegalFormReviewPayload {
   form_name?: string
   procedure_id?: string
   domain?: string
+}
+
+export interface FormLegalReviewPreviewItem {
+  candidate_id?: string | null
+  canonical_form_id: string
+  procedure_id: string
+  form_code?: string | null
+  canonical_name?: string | null
+  source_page_url?: string | null
+  source_download_url?: string | null
+  local_path?: string | null
+  sha256?: string | null
+  legal_basis: string[]
+  effective_from?: string | null
+  effective_to?: string | null
+  jurisdiction?: string | null
+  administrative_level?: string | null
+  review_status?: string | null
+  legal_review_status?: string | null
+  reason_codes: string[]
+  requirement_identity_id?: string | null
+  issuing_instrument?: string | null
+  source_domain?: string | null
+  effectivity_reason_code?: string | null
+  effectivity_source_url?: string | null
+  exclusion_reason_codes?: string[]
+  approved?: false
+  runtime_eligible?: false
+}
+
+export interface FormLegalReviewPreview {
+  legal_as_of: string
+  preview_fingerprint: string
+  attestation_id: string
+  reviewer_id?: string
+  automated_approval?: boolean
+  summary: {
+    total_forms: number
+    active_catalog_forms?: number
+    eligible_forms: number
+    excluded_forms: number
+    already_approved_forms: number
+    excluded_no_official_forms?: number
+  }
+  reason_counts: Record<string, number>
+  catalog_exclusion_reason_counts?: Record<string, number>
+  eligible_items: FormLegalReviewPreviewItem[]
+  excluded_items: FormLegalReviewPreviewItem[]
+  catalog_excluded_items?: FormLegalReviewPreviewItem[]
+}
+
+export interface FormLegalReviewAttestationResult {
+  status: 'applied' | 'already_applied'
+  attestation_id: string
+  reviewer_id: string
+  decision: 'approved' | 'rejected'
+  item_count: number
+  automated_approval: false
+  campaign_status?: string
+  release_gate?: {
+    status: string
+    stage?: string | null
+    launch_status?: string | null
+    feature_flag_enabled: false
+  }
+}
+
+export interface FormCompletionCampaignStatus {
+  schema_version: 'form-completion-campaign-v1'
+  run_id: string
+  generated_at: string
+  legal_as_of: string
+  status:
+    | 'not_started'
+    | 'queued'
+    | 'running'
+    | 'waiting_for_human_attestation'
+    | 'completed_fail_closed'
+    | 'failed_fail_closed'
+  stage: string
+  counts: Record<string, number>
+  reason_counts: Record<string, number>
+  automated_approval: false
+  human_attestation_required: true
+  launch_status?: 'started' | 'already_running'
+}
+
+export interface FormResolutionCampaignStatus {
+  schema_version: 'form-resolution-campaign-v1'
+  run_id: string
+  generated_at?: string
+  legal_as_of?: string
+  status:
+    | 'not_started'
+    | 'queued'
+    | 'running'
+    | 'READY_FOR_HUMAN_ATTESTATION'
+    | 'VERIFIED_DATA_GAP'
+    | 'BLOCKED_EXTERNAL'
+    | 'BLOCKED_RELEASE'
+    | 'failed_fail_closed'
+  stage: string
+  counts: Record<string, number>
+  reason_counts: Record<string, number>
+  automated_approval: false
+  human_attestation_required: true
+  feature_flag_enabled: false
+  launch_status?: 'started' | 'resumed' | 'already_running' | 'already_available'
+  manifest_sha256?: string
+  source_snapshot_sha256?: string
+  current_manifest_sha256?: string | null
+  current_source_snapshot_sha256?: string | null
+  manifest_drift?: boolean
+  source_snapshot_drift?: boolean
+}
+
+export interface FormResolutionCampaignShortlist {
+  run_id: string
+  legal_as_of: string
+  preview_fingerprint: string
+  attestation_id: string
+  batch_id: string
+  batch_count: number
+  identity_count: number
+  canonical_form_count: number
+  procedure_binding_count: number
+  invalid_record_count: number
+  records: FormLegalReviewPreviewItem[]
+  feature_flag_enabled: false
+  automated_approval: false
+  human_attestation_required: true
+  manifest_sha256: string
+  source_snapshot_sha256: string
+}
+
+export interface FormPostAttestationGateStatus {
+  schema_version: 'form-post-attestation-gate-v1'
+  status: 'not_started' | 'queued' | 'running' | 'PASS' | 'BLOCKED_RELEASE'
+  stage: string
+  legal_as_of?: string
+  attestation_ref?: string
+  passed: number
+  failed: number
+  blocked: number
+  checks: Array<{
+    name: string
+    status: 'PASS' | 'FAIL' | 'BLOCKED'
+    reason_code?: string
+    duration_seconds: number
+  }>
+  feature_flag_enabled: false
+  launch_status?: 'started' | 'already_running'
 }
 
 export interface ImportPreview {
@@ -303,7 +577,314 @@ export interface ImportPreview {
 
 export type LegalImportExtractor = 'auto' | 'basic' | 'rag_anything'
 
+export type LegalValidityHealth = 'healthy' | 'degraded' | 'stale' | 'missing'
+export type LegalValidityDecisionAction = 'confirm_mapping' | 'reject_match' | 'request_recheck'
+
+export interface LegalValiditySyncStatus {
+  mode: 'observe' | 'protect' | 'strict'
+  status: LegalValidityHealth
+  generated_at: string | null
+  last_success_at: string | null
+  next_run_at: string | null
+  coverage: { eligible: number; observed: number; fresh: number }
+  counts: { active: number; blocked: number; warning: number; open_events: number }
+  sources: Array<{
+    source_kind: string
+    status: 'healthy' | 'degraded'
+    last_success_at?: string | null
+    reason_code?: string | null
+  }>
+  reason_code?: string | null
+  age_seconds?: number | null
+}
+
+export interface LegalValidityEvent {
+  id: string
+  document_id?: string | null
+  document_title?: string | null
+  law_number: string
+  issuing_agency?: string | null
+  issued_date?: string | null
+  scope?: string | null
+  event_type?: string | null
+  severity: 'low' | 'medium' | 'high' | 'critical'
+  review_status: string
+  serving_action?: string | null
+  source_url?: string | null
+  raw_status?: string | null
+  normalized_status?: string | null
+  effective_from?: string | null
+  effective_to?: string | null
+  affected_provisions?: Array<{ article: string; clause?: string | null; point?: string | null }>
+  created_at?: string | null
+  updated_at?: string | null
+}
+
+export interface LegalValidityEventPage {
+  items: LegalValidityEvent[]
+  next_cursor: string | null
+}
+
+export interface LegalReplacementCandidate {
+  law_number: string
+  confidence: 'verified' | 'high' | 'possible' | 'unclear' | 'conflict'
+  evidence_level: string
+  relation_status: 'pending_admin_review'
+  source_url: string
+  source_kind: string
+  observed_at: string
+  basis: string
+}
+
+export interface LegalReplacementDiscovery {
+  status: 'candidates_found' | 'no_explicit_candidate'
+  requires_admin_review: boolean
+  candidates: LegalReplacementCandidate[]
+  reason_codes: string[]
+}
+
+export interface LegalVectorCleanupManifest {
+  job_id: string
+  state: 'blocking_applied' | 'vector_cleanup_running' | 'vector_cleanup_completed' | 'vector_cleanup_partial' | 'vector_cleanup_failed'
+  blocking_applied: boolean
+  document_id: string
+  law_number: string
+  document_title?: string
+  expected_vector_count: number
+  dry_run?: boolean
+  already_absent?: boolean
+  collections?: Record<string, { before: number; after: number; deleted: number; error_code?: string }>
+}
+
+export interface LegalValidityDocumentTimeline {
+  document_id: string
+  law_number?: string | null
+  document_title?: string | null
+  observations: Array<Record<string, unknown>>
+  events: LegalValidityEvent[]
+  decisions: Array<Record<string, unknown>>
+  replacement_discovery: LegalReplacementDiscovery
+}
+
+export interface LegalValiditySyncClient {
+  validityStatus(): Promise<LegalValiditySyncStatus>
+  validityEvents(params?: {
+    review_status?: string
+    severity?: string
+    scope?: string
+    limit?: number
+    cursor?: string
+  }): Promise<LegalValidityEventPage>
+  runValiditySync(payload: {
+    reason: string
+    scope: Array<'central' | 'haiphong' | 'local'>
+    limit: number
+  }): Promise<Record<string, unknown>>
+  decideValidityEvent(
+    eventId: string,
+    payload: { action: LegalValidityDecisionAction; reason: string },
+  ): Promise<{ event: Partial<LegalValidityEvent> | null; decision: Record<string, unknown> }>
+  validityDocument(documentId: string): Promise<LegalValidityDocumentTimeline>
+  previewValidityVectorCleanup(documentId: string): Promise<LegalVectorCleanupManifest>
+  cleanupValidityVectors(documentId: string, payload: { reason: string }): Promise<LegalVectorCleanupManifest>
+}
+
 export const legalImportApi = {
+  async formProcedureCandidates(params: {
+    q?: string
+    domain?: string
+    limit?: number
+  } = {}): Promise<{
+    items: FormProcedureCandidateV18[]
+    total: number
+    source: 'active_release' | 'read_only_compatibility'
+    read_only: boolean
+  }> {
+    const response = await apiClient.get('/procedures/forms-catalog/procedure-candidates', { params })
+    return response.data
+  },
+
+  async formSourceProposalMetadata(): Promise<FormSourceProposalMetadataV18> {
+    const response = await apiClient.get<FormSourceProposalMetadataV18>('/procedures/forms-catalog/source-proposal-metadata')
+    return response.data
+  },
+
+  async submitFormGovernanceCase(payload: {
+    procedure_id: string
+    domain: string
+    title: string
+    source_url: string
+    source_checksum?: string | null
+    asset_kind?: 'file' | 'eform'
+    note?: string
+  }): Promise<FormReviewCaseV17> {
+    const response = await apiClient.post<FormReviewCaseV17>('/procedures/forms-catalog/review-cases', payload)
+    return response.data
+  },
+
+  async myFormGovernanceCases(status?: FormWorkflowStatus): Promise<FormReviewCaseV17[]> {
+    const response = await apiClient.get<FormReviewCaseV17[]>('/procedures/forms-catalog/review-cases/mine', { params: { status } })
+    return response.data
+  },
+
+  async supplementFormGovernanceCase(caseId: string, payload: {
+    procedure_id: string
+    domain: string
+    title: string
+    source_url: string
+    source_checksum?: string | null
+    asset_kind?: 'file' | 'eform'
+    note?: string
+  }): Promise<FormReviewCaseV17> {
+    const response = await apiClient.post<FormReviewCaseV17>(`/procedures/forms-catalog/review-cases/${encodeURIComponent(caseId)}/supplement`, payload)
+    return response.data
+  },
+
+  async formGovernanceCases(status?: FormWorkflowStatus): Promise<FormReviewCaseV17[]> {
+    const response = await apiClient.get<FormReviewCaseV17[]>('/procedures/forms-catalog/review-cases', { params: { status } })
+    return response.data
+  },
+
+  async formGovernanceCoverage(): Promise<FormCoverageV17> {
+    const response = await apiClient.get<FormCoverageV17>('/procedures/forms-catalog/coverage')
+    return response.data
+  },
+
+  async requestFormSupplement(caseId: string, reason: string): Promise<FormReviewCaseV17> {
+    const response = await apiClient.post<FormReviewCaseV17>(`/procedures/forms-catalog/review-cases/${encodeURIComponent(caseId)}/request-supplement`, { reason })
+    return response.data
+  },
+
+  async approveFormSource(caseId: string): Promise<FormReviewCaseV17> {
+    const response = await apiClient.post<FormReviewCaseV17>(`/procedures/forms-catalog/review-cases/${encodeURIComponent(caseId)}/approve-source`)
+    return response.data
+  },
+
+  async rejectFormSource(caseId: string, reason: string): Promise<FormReviewCaseV17> {
+    const response = await apiClient.post<FormReviewCaseV17>(`/procedures/forms-catalog/review-cases/${encodeURIComponent(caseId)}/reject-source`, { reason })
+    return response.data
+  },
+
+  async updateFormLegalMetadata(caseId: string, payload: Record<string, unknown>): Promise<FormReviewCaseV17> {
+    const response = await apiClient.put<FormReviewCaseV17>(`/procedures/forms-catalog/review-cases/${encodeURIComponent(caseId)}/legal-metadata`, payload)
+    return response.data
+  },
+
+  async readyFormForAttestation(caseId: string): Promise<FormReviewCaseV17> {
+    const response = await apiClient.post<FormReviewCaseV17>(`/procedures/forms-catalog/review-cases/${encodeURIComponent(caseId)}/ready-for-attestation`)
+    return response.data
+  },
+
+  async formAttestationPreview(caseId: string): Promise<FormAttestationPreviewV17> {
+    const response = await apiClient.get<FormAttestationPreviewV17>(`/procedures/forms-catalog/review-cases/${encodeURIComponent(caseId)}/attestation-preview`)
+    return response.data
+  },
+
+  async attestFormCase(caseId: string, fingerprint: string): Promise<FormReviewCaseV17> {
+    const response = await apiClient.post<FormReviewCaseV17>(`/procedures/forms-catalog/review-cases/${encodeURIComponent(caseId)}/attest`, { fingerprint })
+    return response.data
+  },
+
+  async previewFormRelease(caseIds: string[], legalAsOf: string): Promise<FormReleaseV17> {
+    const response = await apiClient.post<FormReleaseV17>('/procedures/forms-catalog/releases/preview', {
+      case_ids: caseIds,
+      legal_as_of: legalAsOf,
+    })
+    return response.data
+  },
+
+  async validateFormRelease(releaseId: string): Promise<FormReleaseV17> {
+    const response = await apiClient.post<FormReleaseV17>(`/procedures/forms-catalog/releases/${encodeURIComponent(releaseId)}/validate`)
+    return response.data
+  },
+
+  async activateFormRelease(releaseId: string): Promise<Record<string, unknown>> {
+    const response = await apiClient.post<Record<string, unknown>>(`/procedures/forms-catalog/releases/${encodeURIComponent(releaseId)}/activate`)
+    return response.data
+  },
+
+  async activeFormRelease(): Promise<Pick<FormReleaseV17, 'release_id' | 'version' | 'legal_as_of' | 'manifest_sha256' | 'status'>> {
+    const response = await apiClient.get<Pick<FormReleaseV17, 'release_id' | 'version' | 'legal_as_of' | 'manifest_sha256' | 'status'>>('/procedures/forms-catalog/releases/active')
+    return response.data
+  },
+  async validityStatus(): Promise<LegalValiditySyncStatus> {
+    const response = await apiClient.get<LegalValiditySyncStatus>('/legal/validity/status')
+    return response.data
+  },
+
+  async validityEvents(params: {
+    review_status?: string
+    severity?: string
+    scope?: string
+    limit?: number
+    cursor?: string
+  } = {}): Promise<LegalValidityEventPage> {
+    const response = await apiClient.get<LegalValidityEventPage>('/legal/validity/events', { params })
+    return response.data
+  },
+
+  async runValiditySync(payload: {
+    reason: string
+    scope: Array<'central' | 'haiphong' | 'local'>
+    limit: number
+  }): Promise<Record<string, unknown>> {
+    const response = await apiClient.post<Record<string, unknown>>('/legal/validity/run', payload)
+    return response.data
+  },
+
+  async decideValidityEvent(
+    eventId: string,
+    payload: { action: LegalValidityDecisionAction; reason: string },
+  ): Promise<{ event: Partial<LegalValidityEvent> | null; decision: Record<string, unknown> }> {
+    const response = await apiClient.post<{
+      event: Partial<LegalValidityEvent> | null
+      decision: Record<string, unknown>
+    }>(`/legal/validity/events/${encodeURIComponent(eventId)}/decision`, payload)
+    return response.data
+  },
+
+  async validityDocument(documentId: string): Promise<LegalValidityDocumentTimeline> {
+    const response = await apiClient.get<LegalValidityDocumentTimeline>(
+      `/legal/validity/documents/${encodeURIComponent(documentId)}`,
+    )
+    return response.data
+  },
+
+  async previewValidityVectorCleanup(documentId: string): Promise<LegalVectorCleanupManifest> {
+    const response = await apiClient.get<LegalVectorCleanupManifest>(
+      `/legal/validity/documents/${encodeURIComponent(documentId)}/vector-cleanup/preview`,
+    )
+    return response.data
+  },
+
+  async cleanupValidityVectors(
+    documentId: string,
+    payload: { reason: string },
+  ): Promise<LegalVectorCleanupManifest> {
+    const response = await apiClient.post<LegalVectorCleanupManifest>(
+      `/legal/validity/documents/${encodeURIComponent(documentId)}/vector-cleanup`,
+      payload,
+    )
+    return response.data
+  },
+
+  async importReadiness(): Promise<LegalImportReadiness> {
+    const baseUrl = (await getApiUrl()).replace(/\/$/, '')
+    // The normal local deployment uses the Next.js `/api` rewrite. Readiness
+    // is mounted at the FastAPI root, so keep that root route when an explicit
+    // API origin exists and tunnel it through the rewrite for a relative URL.
+    const readinessUrl = baseUrl ? `${baseUrl}/ready/import` : '/api/ready/import'
+    const response = await fetch(readinessUrl, {
+      cache: 'no-store',
+      credentials: 'include',
+    })
+    const payload = await response.json().catch(() => null)
+    if (!payload || typeof payload !== 'object' || !('status' in payload)) {
+      throw new Error('Không nhận được trạng thái pipeline nhập kho.')
+    }
+    return payload as LegalImportReadiness
+  },
+
   async fields(): Promise<LegalField[]> {
     const response = await apiClient.get<{ fields: LegalField[] }>('/legal/import/fields')
     return response.data.fields
@@ -353,6 +934,14 @@ export const legalImportApi = {
     content: string
     crawler: string
     requires_manual_review: boolean
+    law_number?: string | null
+    document_type?: string | null
+    issuing_agency?: string | null
+    issued_date?: string | null
+    effective_date?: string | null
+    expired_date?: string | null
+    scope?: 'central' | 'haiphong' | 'local'
+    matched_domains?: string[]
   }> {
     const response = await apiClient.post('/legal/crawl/preview', { url }, { timeout: 120_000 })
     return response.data
@@ -368,9 +957,19 @@ export const legalImportApi = {
     return response.data.sources
   },
 
-  async updateCrawlSource(sourceId: string, payload: Partial<Pick<LegalCrawlSource, 'enabled' | 'interval_minutes' | 'lookback_days' | 'max_documents_per_run' | 'max_listing_pages_per_run' | 'rate_limit_seconds' | 'filter_keyword'>>) {
+  async updateCrawlSource(sourceId: string, payload: Partial<Pick<LegalCrawlSource, 'name' | 'base_url' | 'sitemap_scope' | 'enabled' | 'interval_minutes' | 'lookback_days' | 'max_documents_per_run' | 'max_listing_pages_per_run' | 'rate_limit_seconds' | 'filter_keyword'>>) {
     const response = await apiClient.patch<{ source: LegalCrawlSource }>(`/legal/crawl/sources/${sourceId}`, payload)
     return response.data.source
+  },
+
+  async createCrawlSource(payload: CrawlSourceCreatePayload) {
+    const response = await apiClient.post<{ source: LegalCrawlSource }>('/legal/crawl/sources', payload)
+    return response.data.source
+  },
+
+  async deleteCrawlSource(sourceId: string) {
+    const response = await apiClient.delete<{ id: string; deleted: boolean; name?: string }>(`/legal/crawl/sources/${sourceId}`)
+    return response.data
   },
 
   async scanNow(sourceId?: string) {
@@ -396,6 +995,25 @@ export const legalImportApi = {
     return response.data.candidate
   },
 
+  async updateCandidateMetadata(candidateId: string, payload: LegalCandidateMetadataUpdate) {
+    const response = await apiClient.patch<{
+      candidate: LegalCrawlCandidate
+      validation_errors: string[]
+    }>(`/legal/crawl/candidates/${candidateId}/metadata`, payload)
+    return response.data
+  },
+
+  async importCandidate(candidateId: string) {
+    const response = await apiClient.post<{
+      job?: Record<string, unknown>
+      candidate?: LegalCrawlCandidate
+      status: 'queued' | 'duplicate_conflict'
+    }>(
+      `/legal/crawl/candidates/${candidateId}/import`,
+    )
+    return response.data
+  },
+
   async assessCandidate(candidateId: string): Promise<{ candidate: LegalCrawlCandidate; ai_assessment: AiAssessment | null; warning?: string }> {
     const response = await apiClient.post<{ candidate: LegalCrawlCandidate; ai_assessment: AiAssessment | null; warning?: string }>(
       `/legal/crawl/candidates/${candidateId}/assess`,
@@ -417,13 +1035,158 @@ export const legalImportApi = {
     return response.data.notification
   },
 
-  async qualitySummary(): Promise<LegalQualitySummary> {
-    const response = await apiClient.get<LegalQualitySummary>('/legal/quality/summary')
+  async formsCatalogStatus(): Promise<LegalFormsCatalogStatus> {
+    const response = await apiClient.get<LegalFormsCatalogStatus>('/procedures/forms-catalog/status')
     return response.data
   },
 
-  async formsCatalogStatus(): Promise<LegalFormsCatalogStatus> {
-    const response = await apiClient.get<LegalFormsCatalogStatus>('/procedures/forms-catalog/status')
+  async formLegalReviewPreview(legalAsOf: string): Promise<FormLegalReviewPreview> {
+    const response = await apiClient.get<FormLegalReviewPreview>(
+      '/procedures/forms-catalog/legal-review-attestations/preview',
+      { params: { legal_as_of: legalAsOf } },
+    )
+    return response.data
+  },
+
+  async formCompletionCampaignStatus(): Promise<FormCompletionCampaignStatus> {
+    const response = await apiClient.get<FormCompletionCampaignStatus>(
+      '/procedures/forms-catalog/completion-campaign',
+    )
+    return response.data
+  },
+
+  async formResolutionCampaignStatus(): Promise<FormResolutionCampaignStatus> {
+    const response = await apiClient.get<FormResolutionCampaignStatus>(
+      '/procedures/forms-catalog/form-resolution/current',
+    )
+    return response.data
+  },
+
+  async runFormResolutionCampaign(
+    legalAsOf: string,
+    manifestSha256: string,
+    sourceSnapshotSha256: string,
+  ): Promise<FormResolutionCampaignStatus> {
+    const response = await apiClient.post<FormResolutionCampaignStatus>(
+      '/procedures/forms-catalog/form-resolution/run',
+      null,
+      {
+        params: {
+          legal_as_of: legalAsOf,
+          manifest_sha256: manifestSha256,
+          source_snapshot_sha256: sourceSnapshotSha256,
+        },
+      },
+    )
+    return response.data
+  },
+
+  async formResolutionCampaignGaps(runId: string) {
+    const response = await apiClient.get<{
+      run_id: string
+      records: Array<{
+        occurrence_id: string
+        procedure_id: string | null
+        reason_code: string
+        source_attempt_count: number
+      }>
+      feature_flag_enabled: false
+      automated_approval: false
+    }>(`/procedures/forms-catalog/form-resolution/${encodeURIComponent(runId)}/gaps`)
+    return response.data
+  },
+
+  async formResolutionCampaignShortlist(
+    runId: string,
+  ): Promise<FormResolutionCampaignShortlist> {
+    const response = await apiClient.get<FormResolutionCampaignShortlist>(
+      `/procedures/forms-catalog/form-resolution/${encodeURIComponent(runId)}/review-shortlist`,
+    )
+    return response.data
+  },
+
+  async attestFormResolutionCampaign(
+    shortlist: FormResolutionCampaignShortlist,
+    reviewNote: string,
+    reviewedAt: string,
+  ): Promise<FormLegalReviewAttestationResult> {
+    const response = await apiClient.post<FormLegalReviewAttestationResult>(
+      `/procedures/forms-catalog/form-resolution/${encodeURIComponent(shortlist.run_id)}/attest`,
+      {
+        attestation_id: shortlist.attestation_id,
+        reviewed_at: reviewedAt,
+        legal_as_of: shortlist.legal_as_of || reviewedAt.slice(0, 10),
+        preview_fingerprint: shortlist.preview_fingerprint,
+        batch_id: shortlist.batch_id,
+        manifest_sha256: shortlist.manifest_sha256,
+        source_snapshot_sha256: shortlist.source_snapshot_sha256,
+        decision: 'approved',
+        review_note: reviewNote,
+        items: shortlist.records.map((item) => ({
+          candidate_id: item.candidate_id,
+          canonical_form_id: item.canonical_form_id,
+          procedure_id: item.procedure_id,
+          effective_from: item.effective_from,
+          effective_to: item.effective_to,
+          jurisdiction: item.jurisdiction || 'Hai Phong',
+          administrative_level: item.administrative_level || 'commune',
+        })),
+      },
+    )
+    return response.data
+  },
+
+  async runFormCompletionCampaign(legalAsOf: string): Promise<FormCompletionCampaignStatus> {
+    const response = await apiClient.post<FormCompletionCampaignStatus>(
+      '/procedures/forms-catalog/completion-campaign/run',
+      null,
+      { params: { legal_as_of: legalAsOf } },
+    )
+    return response.data
+  },
+
+  async runPostAttestationReleaseGates(
+    legalAsOf: string,
+    attestationId: string,
+  ): Promise<FormPostAttestationGateStatus> {
+    const response = await apiClient.post<FormPostAttestationGateStatus>(
+      '/procedures/forms-catalog/post-attestation-release-gates/run',
+      null,
+      {
+        params: {
+          legal_as_of: legalAsOf,
+          attestation_id: attestationId,
+        },
+      },
+    )
+    return response.data
+  },
+
+  async attestLegalForms(
+    preview: FormLegalReviewPreview,
+    reviewNote: string,
+    reviewedAt: string,
+  ): Promise<FormLegalReviewAttestationResult> {
+    const response = await apiClient.post<FormLegalReviewAttestationResult>(
+      '/procedures/forms-catalog/legal-review-attestations',
+      {
+        attestation_id: preview.attestation_id,
+        reviewed_at: reviewedAt,
+        legal_as_of: preview.legal_as_of,
+        preview_fingerprint: preview.preview_fingerprint,
+        decision: 'approved',
+        review_note: reviewNote,
+        items: preview.eligible_items.map((item) => ({
+          candidate_id: item.candidate_id,
+          canonical_form_id: item.canonical_form_id,
+          procedure_id: item.procedure_id,
+          effective_from: item.effective_from,
+          effective_to: item.effective_to,
+          jurisdiction: item.jurisdiction || 'Hai Phong',
+          administrative_level: item.administrative_level || 'commune',
+        })),
+      },
+    )
     return response.data
   },
 
@@ -433,7 +1196,8 @@ export const legalImportApi = {
     reviewNote = '',
     extras: Partial<Omit<LegalFormReviewPayload, 'decision' | 'review_note'>> = {},
   ) {
-    // Prefer full classified candidate pipeline (copy file + update index).
+    // This endpoint records queue triage only. Canonical legal attestation is
+    // the sole path that may publish a form to the runtime catalog.
     const response = await apiClient.post(`/procedures/forms-catalog/candidates-full/${formId}/review`, {
       decision,
       review_note: reviewNote,
@@ -445,19 +1209,28 @@ export const legalImportApi = {
     return response.data
   },
 
-  async formsCatalogCandidates(domain?: string, reviewStatus = 'candidate_pending_review'): Promise<LegalFormCandidate[]> {
-    // Admin queue from crawl+classify pipeline. Pending candidates never go to citizen/officer surfaces.
-    const response = await apiClient.get<{ records: LegalFormCandidate[] }>('/procedures/forms-catalog/candidates-full', {
-      params: { domain, review_status: reviewStatus, limit: 200 },
+  async formsCatalogCandidates(
+    domain?: string,
+    reviewStatus = 'candidate_pending_review',
+    offset = 0,
+    limit = 50,
+  ): Promise<LegalFormCandidatePage> {
+    // Admin triage queue. Candidates never go to citizen/officer surfaces.
+    const response = await apiClient.get<LegalFormCandidatePage>('/procedures/forms-catalog/candidates-full', {
+      params: { domain, review_status: reviewStatus, offset, limit },
     })
-    return (response.data.records || []).map((item) => ({
-      ...item,
-      title: item.title || item.form_title || item.detected_form_name || item.file_name || item.id,
-      domain: item.domain || item.suggested_domain || null,
-      procedure_id: item.procedure_id || item.suggested_procedure_id || null,
-      source_url: item.source_url || item.page_url || null,
-      review_note: item.review_note || item.reason || null,
-    }))
+    return {
+      ...response.data,
+      summary: response.data.summary || { filtered_total: 0, returned: 0, offset, limit },
+      records: (response.data.records || []).map((item) => ({
+        ...item,
+        title: item.title || item.form_title || item.detected_form_name || item.file_name || item.id,
+        domain: item.domain || item.suggested_domain || null,
+        procedure_id: item.procedure_id || item.suggested_procedure_id || null,
+        source_url: item.source_url || item.page_url || null,
+        review_note: item.review_note || item.reason || null,
+      })),
+    }
   },
 
   async listOfficialForms(domain?: string, query?: string): Promise<LegalFormCandidate[]> {
@@ -479,13 +1252,4 @@ export const legalImportApi = {
     return response.data.job
   },
 
-  async runtimeQuality() {
-    const response = await apiClient.get<Record<string, unknown>>('/legal/quality/runtime')
-    return response.data
-  },
-
-  async runQualityEvaluation(type: 'retrieval' | 'role') {
-    const response = await apiClient.post<{ started: boolean; evaluation_type: string }>(`/legal/quality/run/${type}`)
-    return response.data
-  },
 }

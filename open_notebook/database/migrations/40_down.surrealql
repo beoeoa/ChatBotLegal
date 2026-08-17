@@ -1,0 +1,4 @@
+REMOVE INDEX idx_ward_procedure_domain_slug ON TABLE ward_procedure;
+REMOVE INDEX idx_ward_procedure_department ON TABLE ward_procedure;
+REMOVE INDEX idx_user_account_username ON TABLE user_account;
+REMOVE INDEX idx_user_account_email ON TABLE user_account;

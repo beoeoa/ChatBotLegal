@@ -17,7 +17,7 @@ import uuid
 from collections import Counter
 from pathlib import Path
 from runpy import run_path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 import httpx
 
@@ -37,10 +37,19 @@ ALLOWED_ARTIFACT_KEYS = {
     "status_counts",
     "section_status_counts",
     "error_category_counts",
+    "quality_gate_counts",
+    "fallback_count",
     "repair_count",
     "stage_latency_ms",
     "latency_ms",
 }
+ALLOWED_STAGE_NAMES = (
+    "retrieval",
+    "provisioning",
+    "generation",
+    "validation",
+    "end_to_end",
+)
 
 
 def _percentile(values: Iterable[float], percentile: float) -> int | None:
@@ -54,6 +63,71 @@ def _percentile(values: Iterable[float], percentile: float) -> int | None:
 def _summary(values: Iterable[float]) -> dict[str, int | None]:
     rows = [float(value) for value in values]
     return {"p50": _percentile(rows, 0.50), "p95": _percentile(rows, 0.95)}
+
+
+def _extract_stage_timings(payload: Mapping[str, Any]) -> dict[str, float]:
+    """Read only aggregate stage timings from the optional admin trace."""
+
+    trace = payload.get("rag_trace")
+    section = trace.get("section_orchestration") if isinstance(trace, Mapping) else None
+    metric = section.get("metric") if isinstance(section, Mapping) else None
+    timings = metric.get("stage_timings_ms") if isinstance(metric, Mapping) else None
+    if not isinstance(timings, Mapping):
+        return {}
+    return {
+        stage: float(timings[stage])
+        for stage in ALLOWED_STAGE_NAMES
+        if isinstance(timings.get(stage), (int, float)) and timings[stage] >= 0
+    }
+
+
+def _extract_runtime_signals(payload: Mapping[str, Any]) -> dict[str, Any]:
+    trace = payload.get("rag_trace")
+    section = trace.get("section_orchestration") if isinstance(trace, Mapping) else None
+    metric = section.get("metric") if isinstance(section, Mapping) else None
+    claim_validation = (
+        section.get("claim_validation") if isinstance(section, Mapping) else None
+    )
+    quality_gate = (
+        claim_validation.get("quality_gate")
+        if isinstance(claim_validation, Mapping)
+        else None
+    )
+    quality_pass = (
+        quality_gate.get("pass") if isinstance(quality_gate, Mapping) else None
+    )
+    return {
+        "repair_count": (
+            int(metric.get("repair_count") or 0)
+            if isinstance(metric, Mapping)
+            else 0
+        ),
+        "error_category": (
+            str(metric.get("error_category") or "unknown")
+            if isinstance(metric, Mapping)
+            else "unknown"
+        ),
+        "quality_gate_status": (
+            "passed"
+            if quality_pass is True
+            else "failed"
+            if quality_pass is False
+            else "unavailable"
+        ),
+    }
+
+
+def _stage_summaries(rows: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, int | None]]:
+    values: dict[str, list[float]] = {stage: [] for stage in ALLOWED_STAGE_NAMES}
+    for row in rows:
+        timings = row.get("stage_timings_ms")
+        if not isinstance(timings, Mapping):
+            continue
+        for stage in ALLOWED_STAGE_NAMES:
+            value = timings.get(stage)
+            if isinstance(value, (int, float)) and value >= 0:
+                values[stage].append(float(value))
+    return {stage: _summary(values[stage]) for stage in ALLOWED_STAGE_NAMES if values[stage]}
 
 
 def _error_category(response: httpx.Response | None, exc: Exception | None) -> str:
@@ -80,6 +154,7 @@ async def _one_request(
     endpoint: str,
     case_id: str,
     case: dict[str, Any],
+    role_override: str | None = None,
 ) -> dict[str, Any]:
     """Return only opaque ID, status and timing; discard response content."""
 
@@ -90,13 +165,16 @@ async def _one_request(
             endpoint,
             json={
                 "question": case["question"],
-                "role": case.get("role", "citizen"),
+                "role": role_override or case.get("role", "citizen"),
+                "show_rag_trace": True,
                 "idempotency_key": f"feature005-{uuid.uuid4().hex}",
             },
         )
         elapsed = round((time.perf_counter() - started) * 1000)
         payload = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
         sections = payload.get("answer_sections") if isinstance(payload, dict) else []
+        runtime = _extract_runtime_signals(payload)
+        transport_error = _error_category(response, None)
         return {
             "case_id": case_id,
             "status": "completed" if response.is_success else "failed",
@@ -107,8 +185,15 @@ async def _one_request(
                 for section in (sections or [])
                 if isinstance(section, dict) and section.get("status")
             ],
-            "repair_count": 0,
-            "error_category": _error_category(response, None),
+            "repair_count": runtime["repair_count"],
+            "error_category": (
+                runtime["error_category"]
+                if transport_error == "none"
+                and runtime["error_category"] != "unknown"
+                else transport_error
+            ),
+            "quality_gate_status": runtime["quality_gate_status"],
+            "stage_timings_ms": _extract_stage_timings(payload),
         }
     except Exception as exc:  # never persist exception text
         return {
@@ -119,6 +204,8 @@ async def _one_request(
             "section_statuses": [],
             "repair_count": 0,
             "error_category": _error_category(response, exc),
+            "quality_gate_status": "unavailable",
+            "stage_timings_ms": {},
         }
 
 
@@ -129,6 +216,7 @@ async def run_benchmark(
     concurrency: int,
     mode: str,
     case_ids: list[str],
+    role_override: str | None = None,
 ) -> dict[str, Any]:
     selected = [(case_id, QUALITY_CASES[case_id]) for case_id in case_ids]
     headers = {"Authorization": f"Bearer {token}"} if token else {}
@@ -138,19 +226,26 @@ async def run_benchmark(
     async with httpx.AsyncClient(headers=headers, timeout=timeout) as client:
         async def bounded(case_id: str, case: dict[str, Any]) -> dict[str, Any]:
             async with semaphore:
-                return await _one_request(
-                    client,
-                    endpoint=f"{base_url.rstrip('/')}/api/search/ask/simple",
-                    case_id=case_id,
-                    case=case,
-                )
+                request_kwargs = {
+                    "endpoint": f"{base_url.rstrip('/')}/api/search/ask/simple",
+                    "case_id": case_id,
+                    "case": case,
+                }
+                if role_override:
+                    request_kwargs["role_override"] = role_override
+                return await _one_request(client, **request_kwargs)
 
+        if mode == "warm":
+            unique_cases = dict(selected)
+            for case_id, case in unique_cases.items():
+                await bounded(case_id, case)
         rows = await asyncio.gather(*(bounded(case_id, case) for case_id, case in selected))
 
     durations = [row["duration_ms"] for row in rows]
     status_counts = Counter(row["status"] for row in rows)
     section_statuses = Counter(status for row in rows for status in row["section_statuses"])
     errors = Counter(row["error_category"] for row in rows)
+    quality_gates = Counter(row["quality_gate_status"] for row in rows)
     return {
         "schema_version": 1,
         "mode": mode,
@@ -161,9 +256,16 @@ async def run_benchmark(
         "status_counts": dict(status_counts),
         "section_status_counts": dict(section_statuses),
         "error_category_counts": dict(errors),
+        "quality_gate_counts": dict(quality_gates),
+        "fallback_count": sum(
+            1
+            for row in rows
+            if row["error_category"]
+            in {"timeout", "validation_failed", "retrieval_unavailable"}
+        ),
         "repair_count": sum(row["repair_count"] for row in rows),
         "latency_ms": _summary(durations),
-        "stage_latency_ms": {},
+        "stage_latency_ms": _stage_summaries(rows),
     }
 
 
@@ -174,6 +276,7 @@ def main() -> int:
     parser.add_argument("--concurrency", type=int, choices=(1, 5, 10, 20), required=True)
     parser.add_argument("--mode", choices=("cold", "warm"), required=True)
     parser.add_argument("--case", dest="cases", action="append", choices=BENCHMARK_CASE_IDS, required=True)
+    parser.add_argument("--role-override", choices=("citizen", "officer", "admin"))
     parser.add_argument("--artifact", type=Path, required=True)
     args = parser.parse_args()
     if args.concurrency < 1:
@@ -186,6 +289,7 @@ def main() -> int:
             concurrency=args.concurrency,
             mode=args.mode,
             case_ids=list(args.cases),
+            role_override=args.role_override,
         )
     )
     if set(artifact) != ALLOWED_ARTIFACT_KEYS:

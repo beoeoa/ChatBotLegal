@@ -1,0 +1,16 @@
+-- Feature 017: retryable officer/admin notification projection only.
+-- PostgreSQL remains the canonical legal workflow and release source.
+DEFINE TABLE IF NOT EXISTS form_workflow_notification SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS outbox_id ON TABLE form_workflow_notification TYPE string;
+DEFINE FIELD IF NOT EXISTS recipient_id ON TABLE form_workflow_notification TYPE string;
+DEFINE FIELD IF NOT EXISTS recipient_role ON TABLE form_workflow_notification TYPE string;
+DEFINE FIELD IF NOT EXISTS notification_type ON TABLE form_workflow_notification TYPE string;
+DEFINE FIELD IF NOT EXISTS case_id ON TABLE form_workflow_notification TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS release_id ON TABLE form_workflow_notification TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS status ON TABLE form_workflow_notification TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS message ON TABLE form_workflow_notification TYPE string;
+DEFINE FIELD IF NOT EXISTS read_at ON TABLE form_workflow_notification TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS created ON TABLE form_workflow_notification TYPE datetime;
+DEFINE FIELD IF NOT EXISTS updated ON TABLE form_workflow_notification TYPE datetime;
+DEFINE INDEX IF NOT EXISTS form_workflow_notification_outbox_idx ON TABLE form_workflow_notification COLUMNS outbox_id UNIQUE;
+DEFINE INDEX IF NOT EXISTS form_workflow_notification_recipient_idx ON TABLE form_workflow_notification COLUMNS recipient_id, read_at, created;

@@ -9,11 +9,12 @@ from __future__ import annotations
 import hashlib
 import re
 import unicodedata
+from copy import deepcopy
 from collections import OrderedDict
 from dataclasses import dataclass
 from threading import Lock
 from time import monotonic
-from typing import Callable
+from typing import Any, Callable, Iterable
 
 import numpy as np
 
@@ -33,6 +34,31 @@ def query_vector_cache_key(query: str, model_fingerprint: str) -> str:
 
     payload = f"v1\0{model_fingerprint}\0{_normalized_query(query)}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def exact_rows_cache_key(
+    *,
+    law_numbers: Iterable[str],
+    article_numbers: Iterable[str],
+    clause_number: str | None,
+    domain: str | None,
+    legal_as_of: str,
+    retrieval_tier: str,
+) -> str:
+    """Return an opaque key for one deterministic metadata lookup."""
+
+    identity = "\0".join(
+        (
+            "exact-rows-v1",
+            ",".join(sorted(str(value).strip().casefold() for value in law_numbers)),
+            ",".join(sorted(str(value).strip().casefold() for value in article_numbers)),
+            str(clause_number or "").strip().casefold(),
+            str(domain or "").strip().casefold(),
+            str(legal_as_of),
+            str(retrieval_tier),
+        )
+    )
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -109,3 +135,77 @@ class QueryVectorCache:
                 "evictions": self._evictions,
             }
 
+
+@dataclass(frozen=True)
+class _RowsEntry:
+    value: list[dict[str, Any]]
+    expires_at: float
+
+
+class ExactRowsCache:
+    """Thread-safe bounded TTL/LRU cache for exact Article DB rows."""
+
+    def __init__(
+        self,
+        *,
+        max_entries: int = 256,
+        ttl_seconds: float = 300,
+        clock: Callable[[], float] = monotonic,
+    ) -> None:
+        if int(max_entries) < 1:
+            raise ValueError("max_entries must be at least 1")
+        if float(ttl_seconds) <= 0:
+            raise ValueError("ttl_seconds must be greater than zero")
+        self._max_entries = int(max_entries)
+        self._ttl_seconds = float(ttl_seconds)
+        self._clock = clock
+        self._entries: OrderedDict[str, _RowsEntry] = OrderedDict()
+        self._lock = Lock()
+        self._hits = 0
+        self._misses = 0
+        self._expired = 0
+        self._evictions = 0
+
+    def get(self, key: str) -> list[dict[str, Any]] | None:
+        now = self._clock()
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                self._misses += 1
+                return None
+            if entry.expires_at <= now:
+                self._entries.pop(key, None)
+                self._expired += 1
+                self._misses += 1
+                return None
+            self._entries.move_to_end(key)
+            self._hits += 1
+            return deepcopy(entry.value)
+
+    def set(self, key: str, value: list[dict[str, Any]]) -> None:
+        rows = deepcopy(value)
+        with self._lock:
+            self._entries[key] = _RowsEntry(
+                value=rows,
+                expires_at=self._clock() + self._ttl_seconds,
+            )
+            self._entries.move_to_end(key)
+            while len(self._entries) > self._max_entries:
+                self._entries.popitem(last=False)
+                self._evictions += 1
+
+    def clear(self) -> None:
+        with self._lock:
+            self._entries.clear()
+
+    def stats(self) -> dict[str, int | float]:
+        with self._lock:
+            return {
+                "size": len(self._entries),
+                "max_entries": self._max_entries,
+                "ttl_seconds": self._ttl_seconds,
+                "hits": self._hits,
+                "misses": self._misses,
+                "expired": self._expired,
+                "evictions": self._evictions,
+            }

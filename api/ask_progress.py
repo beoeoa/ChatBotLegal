@@ -17,7 +17,8 @@ from typing import Any
 import httpx
 from fastapi import HTTPException
 
-from api.models import AskResponse
+from api.models import AskResponse, CitationDisplayItem
+from api.legal_section_grounding import format_public_citation
 from open_notebook.exceptions import (
     ExternalServiceError,
     LegalRetrievalUnavailableError,
@@ -35,8 +36,6 @@ _ALLOWED_STATUS_STAGES = frozenset(
 )
 _SOURCE_FIELDS = frozenset(
     {
-        "chunk_id",
-        "document_id",
         "law_number",
         "document_title",
         "article_number",
@@ -50,6 +49,9 @@ _SOURCE_FIELDS = frozenset(
         "title",
         "score",
     }
+)
+_INTERNAL_RESPONSE_KEYS = frozenset(
+    {"chunk_id", "source_id", "packet_id", "evidence_id", "request_id", "issue_id"}
 )
 
 
@@ -188,6 +190,94 @@ def _safe_sources(payload: dict[str, Any]) -> dict[str, Any]:
     if isinstance(payload.get("retrieval_timing_ms"), (int, float)):
         result["retrieval_timing_ms"] = max(0, round(float(payload["retrieval_timing_ms"]), 1))
     return result
+
+
+def _strip_internal_response_fields(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): _strip_internal_response_fields(nested)
+            for key, nested in value.items()
+            if str(key).casefold() not in _INTERNAL_RESPONSE_KEYS
+        }
+    if isinstance(value, list):
+        return [_strip_internal_response_fields(item) for item in value]
+    return value
+
+
+def _project_public_citation(value: dict[str, Any]) -> dict[str, Any]:
+    """Keep proof already verified by the claim pipeline exactly once.
+
+    Structured answer sections contain ``CitationDisplayItem`` values created
+    only after request/issue/quote validation. Re-running the provenance
+    verifier here loses its source text (intentionally absent from the public
+    object) and incorrectly downgrades valid proof to ``metadata_only``.
+    Raw retrieval citations still go through the normal formatter.
+    """
+
+    if (
+        value.get("verification_status") == "verified"
+        and value.get("verification_level") in {"content_quote", "physical_span"}
+        and isinstance(value.get("proof"), dict)
+    ):
+        try:
+            return CitationDisplayItem.model_validate(value).model_dump(
+                mode="json", exclude_none=True
+            )
+        except (TypeError, ValueError):
+            # An invalid pre-projected object must never inherit a verified
+            # label merely because it supplied those strings.
+            pass
+    return format_public_citation(value)
+
+
+def safe_public_response_payload(
+    payload: dict[str, Any],
+    *,
+    include_admin_trace: bool,
+) -> dict[str, Any]:
+    """Allow-list public citations and remove retrieval/provenance IDs."""
+
+    safe = dict(payload)
+    safe["citations"] = [
+        _project_public_citation(item)
+        for item in (payload.get("citations") or [])
+        if isinstance(item, dict)
+    ]
+    sections: list[dict[str, Any]] = []
+    for raw in payload.get("answer_sections") or []:
+        if hasattr(raw, "model_dump"):
+            raw = raw.model_dump(mode="json")
+        if not isinstance(raw, dict):
+            continue
+        section = {
+            key: value
+            for key, value in raw.items()
+            if key in {
+                "issue_id",
+                "title",
+                "status",
+                "answer",
+                "guidance",
+                "limitation",
+                "clarifying_question",
+                "facet",
+                "priority",
+                "claim_types",
+            }
+        }
+        section["citations"] = [
+            _project_public_citation(item)
+            for item in (raw.get("citations") or [])
+            if isinstance(item, dict)
+        ]
+        sections.append(section)
+    safe["answer_sections"] = sections if payload.get("answer_sections") is not None else None
+    safe["rag_trace"] = (
+        _strip_internal_response_fields(payload.get("rag_trace"))
+        if include_admin_trace
+        else None
+    )
+    return safe
 
 
 def _safe_error(exc: BaseException, *, trace_id: str) -> dict[str, Any]:
@@ -349,7 +439,10 @@ async def stream_ask_progress(
             if effective_role != "admin":
                 updates["rag_trace"] = None
             response = response.model_copy(update=updates)
-            response_payload = response.model_dump(mode="json")
+            response_payload = safe_public_response_payload(
+                response.model_dump(mode="json"),
+                include_admin_trace=effective_role == "admin",
+            )
             yield _encode_progress_event(
                 "final",
                 {"response": response_payload},

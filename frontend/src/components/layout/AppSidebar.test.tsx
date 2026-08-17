@@ -28,7 +28,7 @@ describe('AppSidebar', () => {
 
   it('shows Hồ sơ pháp lý for admin', () => {
     render(<AppSidebar />)
-    expect(screen.getByText('navigation.notebooks')).toBeDefined()
+    expect(screen.getByText('Hồ sơ pháp lý')).toBeDefined()
   })
 
   it('hides Hồ sơ pháp lý from citizen navigation', () => {
@@ -47,7 +47,14 @@ describe('AppSidebar', () => {
   it('shows Hồ sơ pháp lý for officer navigation', () => {
     useAuthStore.setState({ role: 'officer', username: 'officer' } as any)
     render(<AppSidebar />)
-    expect(screen.getByText('navigation.notebooks')).toBeDefined()
+    expect(screen.getByText('Hồ sơ pháp lý')).toBeDefined()
+    expect(screen.getByText('common.create')).toBeDefined()
+  })
+
+  it('does not show the create menu to citizens', () => {
+    useAuthStore.setState({ role: 'citizen', username: 'citizen' } as any)
+    render(<AppSidebar />)
+    expect(screen.queryByText('common.create')).toBeNull()
   })
 
   it('toggles collapse state when clicking handle', () => {

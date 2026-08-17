@@ -5,20 +5,30 @@ import { useToast } from '@/lib/hooks/use-toast'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import { getApiErrorKey } from '@/lib/utils/error-handler'
 import { CreateNotebookRequest, UpdateNotebookRequest } from '@/lib/types/api'
+import { useAuthStore } from '@/lib/stores/auth-store'
+
+function shouldRetryNotebookRequest(failureCount: number, error: unknown) {
+  const status = (error as { response?: { status?: number } })?.response?.status
+  return ![401, 403, 404].includes(status ?? 0) && failureCount < 2
+}
 
 export function useNotebooks(archived?: boolean, enabled: boolean = true) {
+  const userId = useAuthStore((state) => state.userId)
   return useQuery({
-    queryKey: [...QUERY_KEYS.notebooks, { archived }],
+    queryKey: [...QUERY_KEYS.notebooks, { archived, owner: userId }],
     queryFn: () => notebooksApi.list({ archived, order_by: 'updated desc' }),
-    enabled,
+    enabled: enabled && !!userId,
+    retry: shouldRetryNotebookRequest,
   })
 }
 
 export function useNotebook(id: string) {
+  const userId = useAuthStore((state) => state.userId)
   return useQuery({
-    queryKey: QUERY_KEYS.notebook(id),
+    queryKey: [...QUERY_KEYS.notebook(id), { owner: userId }],
     queryFn: () => notebooksApi.get(id),
-    enabled: !!id,
+    enabled: !!id && !!userId,
+    retry: shouldRetryNotebookRequest,
   })
 }
 

@@ -1,0 +1,3 @@
+-- Roll back only the Feature 017 notification projection.
+-- Never modify PostgreSQL legal workflow or release data here.
+REMOVE TABLE IF EXISTS form_workflow_notification;

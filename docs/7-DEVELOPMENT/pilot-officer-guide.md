@@ -23,15 +23,15 @@
 ## Đề xuất văn bản và biểu mẫu
 
 - Cán bộ có thể submit candidate bằng `/api/legal/proposals` hoặc UI tương ứng, kèm URL nguồn chính thức, lý do phù hợp domain và metadata mình biết chắc.
-- Nút **Quét URL** dùng endpoint riêng `/api/legal/proposals/preview`. Endpoint này chỉ chấp nhận HTTPS từ `vbpl.vn` hoặc website cơ quan nhà nước `.gov.vn`, chỉ trả nội dung xem trước và không nhập dữ liệu vào kho.
+- Màn hình cán bộ không tự quét URL. Cán bộ gửi URL, file hoặc nội dung mình có; Admin chịu trách nhiệm kiểm tra nguồn và quyết định nhập.
 - Các endpoint `/api/legal/crawl/*` vẫn dành riêng cho admin. Cán bộ không được chạy crawler hệ thống, duyệt candidate hoặc tự kích hoạt embedding.
 - Candidate chỉ là đề xuất. Không được hứa với người dân rằng văn bản/form đã được dùng cho trả lời trước khi admin duyệt.
 - Form chỉ đề xuất khi có file/link thật hoặc nêu rõ thiếu file. Không đánh dấu synthetic/reference là official.
 
-## Quét tự động hàng tuần
+## Crawler dùng chung của Admin
 
 - Scheduler backend kiểm tra nguồn đến hạn mỗi giờ; từng nguồn chính thức có chu kỳ mặc định `10080` phút (7 ngày).
 - Nguồn mặc định gồm VBPL Trung ương, VBPL Hải Phòng, Cổng Dịch vụ công Quốc gia, Cổng Hải Phòng (văn bản và thủ tục hành chính) và Sở Tư pháp Hải Phòng.
-- Trang `/officer-proposals` gọi `/api/legal/proposals/weekly-monitor` để chỉ hiện nguồn phù hợp và candidate khớp `allowed_domains` của tài khoản cán bộ.
-- Cán bộ chỉ theo dõi và gửi đề xuất bổ sung. Candidate do lịch quét tạo vẫn ở trạng thái chờ; admin duyệt cuối trước khi import, embedding và dùng cho RAG.
+- Crawler chạy một lần ở phạm vi hệ thống và chỉ Admin theo dõi, vận hành, duyệt kết quả. Trang `/officer-proposals` không hiển thị trạng thái crawler hoặc candidate do crawler tạo.
+- Cán bộ chỉ gửi đề xuất bổ sung thuộc lĩnh vực được phân công và theo dõi lịch sử đề xuất của chính mình. Candidate do crawler hoặc cán bộ tạo đều chờ Admin duyệt trước khi import, embedding và dùng cho RAG.
 - Lỗi robots.txt, timeout hoặc lỗi nguồn phải được hiển thị theo từng nguồn; không coi một lần quét lỗi là thành công.

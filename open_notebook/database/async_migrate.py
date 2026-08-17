@@ -3,6 +3,7 @@ Async migration system for SurrealDB using the official Python client.
 Based on patterns from sblpy migration system.
 """
 
+from pathlib import Path
 from typing import List
 
 from loguru import logger
@@ -49,6 +50,60 @@ class AsyncMigration:
 
         except Exception as e:
             logger.error(f"Migration failed: {str(e)}")
+            raise
+
+
+class OptionalFeatureRemovalMigration(AsyncMigration):
+    """Remove retired Podcast/Transformation data only after a strict baseline check."""
+
+    _expected_transformations = {
+        "Simple Summary", "Reflections", "Dense Summary", "Key Insights",
+        "Table of Contents", "Analyze Paper",
+    }
+    _expected_episode_profiles = {"solo_expert", "tech_discussion", "business_analysis"}
+    _expected_speaker_profiles = {"business_panel", "solo_expert", "tech_experts"}
+
+    async def run(self, bump: bool = True) -> None:
+        try:
+            transformations = await repo_query("SELECT VALUE name FROM transformation;")
+            episode_profiles = await repo_query("SELECT VALUE name FROM episode_profile;")
+            speaker_profiles = await repo_query("SELECT VALUE name FROM speaker_profile;")
+            episodes = await repo_query("SELECT id FROM episode LIMIT 1;")
+            podcast_config = await repo_query("SELECT id FROM podcast_config LIMIT 1;")
+            media_roots = [Path("data/podcasts"), Path("data/podcast"), Path("data/episodes")]
+            has_media = any(path.exists() and any(path.rglob("*")) for path in media_roots)
+
+            observed = {
+                "transformations": {str(item) for item in transformations or []},
+                "episode_profiles": {str(item) for item in episode_profiles or []},
+                "speaker_profiles": {str(item) for item in speaker_profiles or []},
+            }
+            empty = not any(observed.values()) and not episodes and not podcast_config and not has_media
+            baseline_matches = (
+                observed["transformations"] == self._expected_transformations
+                and observed["episode_profiles"] == self._expected_episode_profiles
+                and observed["speaker_profiles"] == self._expected_speaker_profiles
+                and not episodes and not podcast_config and not has_media
+            )
+            if not (empty or baseline_matches):
+                raise RuntimeError(
+                    "Retired feature migration stopped: Podcast/Transformation data differs from the approved baseline. "
+                    "No records or files were deleted."
+                )
+            if baseline_matches:
+                async with db_connection() as connection:
+                    await connection.query(
+                        "DELETE transformation; DELETE episode_profile; DELETE speaker_profile; "
+                        "REMOVE TABLE IF EXISTS transformation; REMOVE TABLE IF EXISTS episode; "
+                        "REMOVE TABLE IF EXISTS episode_profile; REMOVE TABLE IF EXISTS speaker_profile; "
+                        "REMOVE TABLE IF EXISTS podcast_config;"
+                    )
+            if bump:
+                await bump_version()
+            else:
+                await lower_version()
+        except Exception as exc:
+            logger.error(f"Retired feature migration failed safely: {exc}")
             raise
 
 
@@ -190,6 +245,25 @@ class AsyncMigrationManager:
             AsyncMigration.from_file(
                 "open_notebook/database/migrations/37.surrealql"
             ),
+            AsyncMigration.from_file(
+                "open_notebook/database/migrations/38.surrealql"
+            ),
+            AsyncMigration.from_file(
+                "open_notebook/database/migrations/39.surrealql"
+            ),
+            AsyncMigration.from_file(
+                "open_notebook/database/migrations/40.surrealql"
+            ),
+            AsyncMigration.from_file(
+                "open_notebook/database/migrations/41.surrealql"
+            ),
+            OptionalFeatureRemovalMigration(""),
+            AsyncMigration.from_file(
+                "open_notebook/database/migrations/43.surrealql"
+            ),
+            AsyncMigration.from_file(
+                "open_notebook/database/migrations/44.surrealql"
+            ),
         ]
         self.down_migrations = [
             AsyncMigration.from_file(
@@ -302,6 +376,25 @@ class AsyncMigrationManager:
             ),
             AsyncMigration.from_file(
                 "open_notebook/database/migrations/37_down.surrealql"
+            ),
+            AsyncMigration.from_file(
+                "open_notebook/database/migrations/38_down.surrealql"
+            ),
+            AsyncMigration.from_file(
+                "open_notebook/database/migrations/39_down.surrealql"
+            ),
+            AsyncMigration.from_file(
+                "open_notebook/database/migrations/40_down.surrealql"
+            ),
+            AsyncMigration.from_file(
+                "open_notebook/database/migrations/41_down.surrealql"
+            ),
+            AsyncMigration(""),
+            AsyncMigration.from_file(
+                "open_notebook/database/migrations/43_down.surrealql"
+            ),
+            AsyncMigration.from_file(
+                "open_notebook/database/migrations/44_down.surrealql"
             ),
         ]
         self.runner = AsyncMigrationRunner(

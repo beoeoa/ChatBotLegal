@@ -280,11 +280,11 @@ async def test_individual_model(model) -> Tuple[bool, str]:
             return True, f"Response: {text}"
 
         elif model.type == "embedding":
+            from api.model_modality import validate_embedding_output
+
             result = await esp_model.aembed(["This is a test."])
-            if result and len(result) > 0:
-                dims = len(result[0])
-                return True, f"Embedding dimensions: {dims}"
-            return True, "Embedding successful"
+            vectors = validate_embedding_output(result, expected_count=1)
+            return True, f"Embedding dimensions: {len(vectors[0])}"
 
         elif model.type == "text_to_speech":
             # For ElevenLabs, look up first available voice (API uses voice_id, not name)

@@ -1,0 +1,13 @@
+-- Feature 016 additive proof/audit sidecars. Isolated rehearsal only.
+DEFINE TABLE IF NOT EXISTS legal_chunk_provenance SCHEMALESS;
+DEFINE INDEX IF NOT EXISTS idx_legal_chunk_provenance_span ON TABLE legal_chunk_provenance COLUMNS chunk_id, span_index UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_legal_chunk_provenance_asset ON TABLE legal_chunk_provenance COLUMNS source_asset_sha256;
+
+DEFINE TABLE IF NOT EXISTS legal_audit_chain SCHEMALESS;
+DEFINE INDEX IF NOT EXISTS idx_legal_audit_chain_sequence ON TABLE legal_audit_chain COLUMNS chain_id, sequence UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_legal_audit_chain_entry_hash ON TABLE legal_audit_chain COLUMNS entry_hash UNIQUE;
+
+DEFINE TABLE IF NOT EXISTS legal_audit_checkpoint SCHEMALESS;
+DEFINE INDEX IF NOT EXISTS idx_legal_audit_checkpoint_id ON TABLE legal_audit_checkpoint COLUMNS checkpoint_id UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_legal_audit_checkpoint_chain ON TABLE legal_audit_checkpoint COLUMNS chain_id, sequence;
+

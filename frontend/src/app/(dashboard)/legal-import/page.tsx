@@ -2,10 +2,27 @@
 
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
 import { AxiosError } from 'axios'
-import { ArrowLeft, CheckCircle2, DatabaseZap, FileUp, RefreshCcw, ShieldCheck, TriangleAlert } from 'lucide-react'
+import {
+  Activity,
+  ArrowLeft,
+  CheckCircle2,
+  ClipboardPaste,
+  DatabaseZap,
+  FileCode,
+  FilePlus2,
+  FileUp,
+  Inbox,
+  Link2,
+  RefreshCcw,
+  ShieldCheck,
+  TriangleAlert,
+  Upload,
+} from 'lucide-react'
 import Link from 'next/link'
+import { useSearchParams } from 'next/navigation'
 import { toast } from 'sonner'
 
+import { AppShell } from '@/components/layout/AppShell'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -14,15 +31,20 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { CrawlerSourceManager } from '@/components/legal-import/CrawlerSourceManager'
+import { CandidateLifecycleActions } from '@/components/legal-import/CandidateLifecycleActions'
+import { FormGovernancePanel } from '@/components/legal-import/FormGovernancePanel'
 import {
   ImportPreview,
   LegalCrawlCandidate,
+  LegalCandidateMetadataUpdate,
+  CandidateExtractionResult,
   LegalCrawlSource,
   LegalCrawlSummary,
   LegalField,
-  LegalFormsCatalogStatus,
-  LegalFormCandidate,
   LegalImportExtractor,
+  LegalImportReadiness,
   LegalImportPayload,
   legalImportApi,
 } from '@/lib/api/legal-import'
@@ -51,14 +73,17 @@ function errorMessage(error: unknown): string {
       message?: string
       suggestion?: string
       trace_id?: string
+      validation_errors?: string[]
+      blockers?: string[]
+      fields?: Record<string, string>
     }
   }>
   const detail = axiosError.response?.data?.detail
   if (!axiosError.response) {
     if (axiosError.code === 'ECONNABORTED') {
-      return 'Yêu cầu quá thời gian chờ. Backend hoặc dịch vụ AI/crawler đang xử lý quá lâu, hãy thử lại hoặc kiểm tra log backend.'
+      return 'Hệ thống đang xử lý lâu hơn bình thường. Dữ liệu bạn đã nhập vẫn được giữ; vui lòng thử lại sau ít phút.'
     }
-    return 'Không kết nối được backend. Hãy kiểm tra backend local đang chạy, API URL đúng và mạng nội bộ không bị chặn.'
+    return 'Không kết nối được máy chủ dữ liệu. Vui lòng thử lại; nếu lỗi tiếp diễn, liên hệ người phụ trách hệ thống.'
   }
   if (Array.isArray(detail)) {
     const labels: Record<string, string> = {
@@ -80,11 +105,17 @@ function errorMessage(error: unknown): string {
     }).join(' ')
   }
   if (detail && typeof detail === 'object') {
-    return [detail.message, detail.suggestion, detail.trace_id ? `Mã lỗi: ${detail.trace_id}` : '']
+    return [
+      detail.message,
+      ...(detail.validation_errors || detail.blockers || []),
+      ...Object.values(detail.fields || {}),
+      detail.suggestion,
+      detail.trace_id ? `Mã lỗi: ${detail.trace_id}` : '',
+    ]
       .filter(Boolean)
       .join(' ')
   }
-  return detail || axiosError.message || 'Không thể xử lý yêu cầu.'
+  return detail || 'Không thể hoàn tất thao tác. Vui lòng kiểm tra thông tin và thử lại.'
 }
 
 function candidateNeedsOcr(candidate: LegalCrawlCandidate): boolean {
@@ -92,7 +123,57 @@ function candidateNeedsOcr(candidate: LegalCrawlCandidate): boolean {
   return Boolean(candidate.needs_ocr || raw?.needs_ocr)
 }
 
+function extractionCharacterSummary(
+  extraction: CandidateExtractionResult,
+  contentCharacters?: number | null,
+): string {
+  const reportedCharacters = Number(extraction.characters || 0)
+  if (Number.isFinite(reportedCharacters) && reportedCharacters > 0) {
+    return `${reportedCharacters} ký tự`
+  }
+  if (Number.isFinite(contentCharacters) && (contentCharacters || 0) > 0) {
+    return `${contentCharacters} ký tự (toàn văn)`
+  }
+  const previewCharacters = extraction.preview?.trim().length || 0
+  return previewCharacters > 0
+    ? `chưa ghi toàn văn · xem trước ${previewCharacters} ký tự`
+    : 'chưa ghi nhận ký tự'
+}
+
+function comparisonStatusLabel(value: string | null | undefined): string {
+  const labels: Record<string, string> = {
+    new: 'Chưa có trong kho',
+    updated: 'Khác bản đang có',
+    unchanged: 'Không thay đổi',
+    duplicate: 'Có thể trùng',
+  }
+  return labels[value || ''] || 'Chưa đối chiếu'
+}
+
+function vietnameseDateToInput(value: string | undefined): string | undefined {
+  const match = value?.trim().match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/)
+  if (!match) return undefined
+  return `${match[3]}-${match[2].padStart(2, '0')}-${match[1].padStart(2, '0')}`
+}
+
+function extractOfficialPageMetadata(content: string): Partial<LegalImportPayload> {
+  const clean = content.replace(/\s+/g, ' ').trim()
+  const capture = (pattern: RegExp) => clean.match(pattern)?.[1]?.trim()
+  const issuedDate = vietnameseDateToInput(capture(/Số\s*ký\s*hiệu\s*:?[\s\S]*?Ngày\s*ban\s*hành\s*:?\s*(\d{1,2}[-/.]\d{1,2}[-/.]\d{4})/i))
+  const effectiveDate = vietnameseDateToInput(capture(/Ngày\s*có\s*hiệu\s*lực\s*:?\s*(\d{1,2}[-/.]\d{1,2}[-/.]\d{4})/i))
+  return {
+    law_number: capture(/Số\s*ký\s*hiệu\s*:?\s*(.+?)\s+Ngày\s*ban\s*hành/i),
+    issued_date: issuedDate,
+    effective_date: effectiveDate,
+    document_type: capture(/Loại\s*văn\s*bản\s*:?\s*(.+?)\s+Cơ\s*quan\s*ban\s*hành/i),
+    issuing_agency: capture(/Cơ\s*quan\s*ban\s*hành\s*:?\s*(.+?)\s+(?:Người\s*ký|Trích\s*yếu|Tài\s*liệu\s*đính\s*kèm)/i),
+  }
+}
+
 export default function LegalImportPage() {
+  const searchParams = useSearchParams()
+  const tabParam = searchParams.get('tab')
+  const [activeTab, setActiveTab] = useState(tabParam || 'proposals')
   const [form, setForm] = useState<LegalImportPayload>(initialForm)
   const [fields, setFields] = useState<LegalField[]>([])
   const [preview, setPreview] = useState<ImportPreview | null>(null)
@@ -103,24 +184,31 @@ export default function LegalImportPage() {
   const [crawlUrl, setCrawlUrl] = useState('')
   const [crawling, setCrawling] = useState(false)
   const [crawlSummary, setCrawlSummary] = useState<LegalCrawlSummary | null>(null)
+  const [crawlerLoading, setCrawlerLoading] = useState(true)
+  const [crawlerLoadError, setCrawlerLoadError] = useState<string | null>(null)
+  const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null)
   const [pendingCandidates, setPendingCandidates] = useState<LegalCrawlCandidate[]>([])
   const [crawlerSources, setCrawlerSources] = useState<LegalCrawlSource[]>([])
   const [candidateOrigin, setCandidateOrigin] = useState('all')
   const [scanningSourceId, setScanningSourceId] = useState<string | null>(null)
-  const [assessingCandidateId, setAssessingCandidateId] = useState<string | null>(null)
   const [reviewingCandidateId, setReviewingCandidateId] = useState<string | null>(null)
+  const [importingCandidateId, setImportingCandidateId] = useState<string | null>(null)
   const [candidateStatus, setCandidateStatus] = useState('pending')
-  const [reviewNotes, setReviewNotes] = useState<Record<string, string>>({})
-  const [formsCatalog, setFormsCatalog] = useState<LegalFormsCatalogStatus | null>(null)
-  const [loadingFormsCatalog, setLoadingFormsCatalog] = useState(false)
+  const [candidateMetadataDrafts, setCandidateMetadataDrafts] = useState<Record<string, LegalCandidateMetadataUpdate>>({})
+  const [savingCandidateMetadataId, setSavingCandidateMetadataId] = useState<string | null>(null)
+  const [importReadiness, setImportReadiness] = useState<LegalImportReadiness | null>(null)
 
-  const [pendingForms, setPendingForms] = useState<LegalFormCandidate[]>([])
-  const [reviewingFormId, setReviewingFormId] = useState<string | null>(null)
-  const [formReviewStatus, setFormReviewStatus] = useState('candidate_pending_review')
-  const [formReviewNotes, setFormReviewNotes] = useState<Record<string, string>>({})
-  const [formEditNames, setFormEditNames] = useState<Record<string, string>>({})
-  const [formEditDomains, setFormEditDomains] = useState<Record<string, string>>({})
-  const [formEditProcedures, setFormEditProcedures] = useState<Record<string, string>>({})
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const requestedTab = params.get('tab')
+    if (requestedTab && ['proposals', 'forms', 'import'].includes(requestedTab)) {
+      setActiveTab(requestedTab)
+    }
+    const requestedStatus = params.get('status')
+    if (requestedStatus && ['all', 'pending', 'needs_attention', 'import_queued', 'rejected', 'imported'].includes(requestedStatus)) {
+      setCandidateStatus(requestedStatus)
+    }
+  }, [])
 
   useEffect(() => {
     legalImportApi.fields()
@@ -129,6 +217,8 @@ export default function LegalImportPage() {
   }, [])
 
   const loadCrawlerData = useCallback(async () => {
+    setCrawlerLoading(true)
+    setCrawlerLoadError(null)
     try {
       const [summary, candidates, sources] = await Promise.all([
         legalImportApi.crawlSummary(),
@@ -138,8 +228,13 @@ export default function LegalImportPage() {
       setCrawlSummary(summary)
       setPendingCandidates(candidates)
       setCrawlerSources(sources)
+      setLastRefreshedAt(new Date())
     } catch (error) {
-      toast.error(errorMessage(error))
+      const message = errorMessage(error)
+      setCrawlerLoadError(message)
+      toast.error(message)
+    } finally {
+      setCrawlerLoading(false)
     }
   }, [candidateStatus])
 
@@ -147,45 +242,112 @@ export default function LegalImportPage() {
     void loadCrawlerData()
   }, [loadCrawlerData])
 
-  const loadFormsCatalog = useCallback(async () => {
-    setLoadingFormsCatalog(true)
-    try {
-      setFormsCatalog(await legalImportApi.formsCatalogStatus())
-    } catch (error) {
-      toast.error(errorMessage(error))
-    } finally {
-      setLoadingFormsCatalog(false)
+  useEffect(() => {
+    if (candidateStatus !== 'import_queued') return
+    const intervalId = window.setInterval(() => void loadCrawlerData(), 5000)
+    return () => window.clearInterval(intervalId)
+  }, [candidateStatus, loadCrawlerData])
+
+  useEffect(() => {
+    let mounted = true
+    const loadImportReadiness = async () => {
+      try {
+        const report = await legalImportApi.importReadiness()
+        if (mounted) setImportReadiness(report)
+      } catch {
+        if (mounted) setImportReadiness(null)
+      }
+    }
+    void loadImportReadiness()
+    const intervalId = window.setInterval(() => void loadImportReadiness(), 15_000)
+    return () => {
+      mounted = false
+      window.clearInterval(intervalId)
     }
   }, [])
-
-  useEffect(() => {
-    void loadFormsCatalog()
-  }, [loadFormsCatalog])
-
-  const loadFormsCandidates = useCallback(async () => {
-    try {
-      const candidates = await legalImportApi.formsCatalogCandidates(undefined, formReviewStatus)
-      setPendingForms(candidates)
-    } catch (error) {
-      toast.error(errorMessage(error))
-    }
-  }, [formReviewStatus])
-
-  useEffect(() => {
-    void loadFormsCandidates()
-  }, [loadFormsCandidates])
 
   const canImport = useMemo(
     () => Boolean(preview?.valid && !checking && !importing),
     [preview, checking, importing]
   )
+  const importPipelineReady = importReadiness?.status === 'ready'
+  const unhealthyCrawlerSources = useMemo(
+    () => crawlerSources.filter((source) => source.enabled && source.source_kind !== 'internal_queue' && source.last_status === 'error'),
+    [crawlerSources],
+  )
+  const systemReady = importPipelineReady && unhealthyCrawlerSources.length === 0
 
-  const visibleCandidates = useMemo(() => pendingCandidates.filter((candidate) => {
+  const documentCandidates = useMemo(
+    () => pendingCandidates.filter((candidate) => candidate.source_type !== 'form'),
+    [pendingCandidates],
+  )
+
+  const visibleCandidates = useMemo(() => documentCandidates.filter((candidate) => {
     if (candidateOrigin === 'all') return true
     const origin = String(candidate.raw_metadata?.candidate_origin || '')
     if (candidateOrigin === 'officer') return origin === 'officer_document_proposal'
     return origin !== 'officer_document_proposal'
-  }), [candidateOrigin, pendingCandidates])
+  }), [candidateOrigin, documentCandidates])
+
+  const candidateMetadataDefaults = (candidate: LegalCrawlCandidate): LegalCandidateMetadataUpdate => ({
+    title: candidate.title || '',
+    law_number: candidate.law_number || '',
+    document_type: candidate.document_type || '',
+    issuing_agency: candidate.issuing_agency || '',
+    scope: (candidate.scope === 'haiphong' || candidate.scope === 'local' ? candidate.scope : 'central'),
+    sector: String(candidate.raw_metadata?.sector || candidate.inferred_domain || ''),
+    issued_date: String(candidate.raw_metadata?.issued_date || ''),
+    effective_date: String(candidate.raw_metadata?.effective_date || ''),
+    expired_date: String(candidate.raw_metadata?.expired_date || ''),
+    source_url: candidate.source_url || '',
+    confirmed_official_source: Boolean(candidate.raw_metadata?.confirmed_official_source),
+  })
+
+  const candidateMetadataDraftFor = (candidate: LegalCrawlCandidate): LegalCandidateMetadataUpdate => ({
+    ...candidateMetadataDefaults(candidate),
+    ...(candidateMetadataDrafts[candidate.id] || {}),
+  })
+
+  const updateCandidateMetadataDraft = <K extends keyof LegalCandidateMetadataUpdate>(
+    candidate: LegalCrawlCandidate,
+    key: K,
+    value: LegalCandidateMetadataUpdate[K],
+  ) => {
+    setCandidateMetadataDrafts((current) => ({
+      ...current,
+      [candidate.id]: {
+        ...candidateMetadataDefaults(candidate),
+        ...(current[candidate.id] || {}),
+        [key]: value,
+      },
+    }))
+  }
+
+  const saveCandidateMetadata = async (candidate: LegalCrawlCandidate) => {
+    setSavingCandidateMetadataId(candidate.id)
+    try {
+      const payload = {
+        ...candidateMetadataDefaults(candidate),
+        ...(candidateMetadataDrafts[candidate.id] || {}),
+      }
+      const result = await legalImportApi.updateCandidateMetadata(candidate.id, payload)
+      setPendingCandidates((current) => current.map((item) => item.id === candidate.id ? result.candidate : item))
+      setCandidateMetadataDrafts((current) => {
+        const next = { ...current }
+        delete next[candidate.id]
+        return next
+      })
+      if (result.validation_errors.length > 0) {
+        toast.warning(`Đã lưu. Còn ${result.validation_errors.length} điều kiện cần xử lý trước khi nhập kho.`)
+      } else {
+        toast.success('Đã lưu và kiểm tra đủ thông tin trước khi duyệt.')
+      }
+    } catch (error) {
+      toast.error(errorMessage(error))
+    } finally {
+      setSavingCandidateMetadataId(null)
+    }
+  }
 
   const update = <K extends keyof LegalImportPayload>(
     key: K,
@@ -227,7 +389,7 @@ export default function LegalImportPage() {
       const result = await legalImportApi.preview(form)
       setPreview(result)
       if (result.valid) {
-        toast.success(`Đã nhận diện ${result.article_count} điều, ${result.chunk_count} chunk.`)
+        toast.success(`Đã nhận diện ${result.article_count} điều và ${result.chunk_count} đoạn tra cứu.`)
       } else {
         toast.error('Văn bản chưa đạt điều kiện nạp.')
       }
@@ -243,11 +405,14 @@ export default function LegalImportPage() {
     try {
       await legalImportApi.importDocument(form)
       toast.success(
-        `Đã gửi văn bản vào hàng đợi duyệt của admin thành công.`
+        'Đã gửi văn bản vào danh sách chờ duyệt.'
       )
       setForm(initialForm)
       setFileName('')
+      setCrawlUrl('')
       setPreview(null)
+      setCandidateStatus('pending')
+      setActiveTab('proposals')
       await loadCrawlerData()
     } catch (error) {
       toast.error(errorMessage(error))
@@ -261,15 +426,23 @@ export default function LegalImportPage() {
     setCrawling(true)
     try {
       const result = await legalImportApi.crawlPreview(crawlUrl.trim())
+      const detected = extractOfficialPageMetadata(result.content)
+      const detectedCount = Object.values(detected).filter(Boolean).length
       setForm((current) => ({
         ...current,
         title: current.title || result.title,
+        law_number: current.law_number || result.law_number || detected.law_number || '',
+        document_type: current.document_type || result.document_type || detected.document_type || '',
+        issuing_agency: current.issuing_agency || result.issuing_agency || detected.issuing_agency || '',
+        issued_date: current.issued_date || result.issued_date || detected.issued_date || null,
+        effective_date: current.effective_date || result.effective_date || detected.effective_date || '',
+        expired_date: current.expired_date || result.expired_date || null,
         source_url: result.source_url,
         content: result.content,
         confirmed_official_source: false,
       }))
       setPreview(null)
-      toast.success(`Đã quét ${result.characters} ký tự. Hãy kiểm tra trước khi nạp.`)
+      toast.success(`Đã lấy ${result.characters.toLocaleString('vi-VN')} ký tự${detectedCount > 0 ? ` và điền ${detectedCount} thông tin có nhãn rõ` : ''}. Hãy đối chiếu lại với văn bản gốc.`)
     } catch (error) {
       toast.error(errorMessage(error))
     } finally {
@@ -282,7 +455,7 @@ export default function LegalImportPage() {
     try {
       const result = await legalImportApi.scanNow(sourceId)
       toast.success(
-        `Quét xong: ${result.created || 0} văn bản mới, ${result.updated || 0} văn bản cập nhật.`
+        `Kiểm tra xong: ${result.created || 0} văn bản mới, ${result.updated || 0} văn bản có cập nhật.`
       )
       await loadCrawlerData()
     } catch (error) {
@@ -294,18 +467,22 @@ export default function LegalImportPage() {
 
   const reviewCandidate = async (
     candidateId: string,
-    decision: 'approved' | 'rejected' | 'changes_requested'
+    decision: 'approved' | 'rejected'
   ) => {
-    const note = reviewNotes[candidateId] || ''
-    if (decision === 'changes_requested' && note.trim().length < 5) {
-      toast.error('Hãy ghi rõ nội dung cán bộ cần bổ sung.')
-      return
-    }
     setReviewingCandidateId(candidateId)
     try {
-      await legalImportApi.reviewCandidate(candidateId, decision, note)
-      toast.success(decision === 'approved' ? 'Đã duyệt và xếp hàng nhập kho.' : decision === 'changes_requested' ? 'Đã gửi yêu cầu bổ sung cho cán bộ.' : 'Đã từ chối văn bản.')
-      setReviewNotes((current) => ({ ...current, [candidateId]: '' }))
+      const result = await legalImportApi.reviewCandidate(candidateId, decision)
+      if (decision === 'approved' && result.import_status === 'duplicate_conflict') {
+        toast.warning('Văn bản có số hiệu trùng trong kho. Đã chuyển sang mục cần đối chiếu và chưa đưa vào kho.')
+      } else if (decision === 'approved' && (result.status === 'changes_requested' || result.pipeline_stage === 'blocked')) {
+        const blockers = (result.blockers || []).join('; ')
+        toast.warning(blockers ? `Chưa thể nhập kho: ${blockers}` : 'Chưa thể nhập kho. Hãy bổ sung dữ liệu được đánh dấu trên văn bản.')
+      } else {
+        toast.success(decision === 'approved' ? 'Đã duyệt và xếp hàng đưa vào kho.' : 'Đã từ chối; đề xuất sẽ không được đưa vào kho.')
+      }
+      if (decision === 'approved' && result.status === 'import_queued') {
+        setCandidateStatus('import_queued')
+      }
       await loadCrawlerData()
     } catch (error) {
       toast.error(errorMessage(error))
@@ -314,693 +491,320 @@ export default function LegalImportPage() {
     }
   }
 
-  const assessCandidate = async (candidateId: string) => {
-    setAssessingCandidateId(candidateId)
+  const retryCandidateImport = async (candidateId: string) => {
+    setImportingCandidateId(candidateId)
     try {
-      const result = await legalImportApi.assessCandidate(candidateId)
-      if (result.ai_assessment) {
-        toast.success('Đã cập nhật AI assessment cho văn bản thành công!')
+      const result = await legalImportApi.importCandidate(candidateId)
+      if (result.status === 'duplicate_conflict') {
+        toast.warning('Văn bản trùng số hiệu với kho đang phục vụ. Đã chuyển sang mục cần đối chiếu.')
+        setCandidateStatus('changes_requested')
       } else {
-        toast.warning(result.warning || 'AI chưa đánh giá được candidate. Hệ thống vẫn đã cập nhật khuyến nghị kiểm duyệt theo rule-based checks.')
+        toast.success('Đã xếp hàng đưa vào kho. Hệ thống sẽ chuẩn hóa và tạo chỉ mục tra cứu ở chế độ nền.')
       }
-      setPendingCandidates((current) =>
-        current.map((c) => (c.id === candidateId ? result.candidate : c))
-      )
+      await loadCrawlerData()
     } catch (error) {
       toast.error(errorMessage(error))
     } finally {
-      setAssessingCandidateId(null)
+      setImportingCandidateId(null)
     }
   }
-
-  const reviewForm = async (formId: string, decision: 'approved' | 'rejected') => {
-    setReviewingFormId(formId)
-    try {
-      await legalImportApi.reviewForm(formId, decision, formReviewNotes[formId] || '', {
-        form_name: formEditNames[formId],
-        domain: formEditDomains[formId],
-        procedure_id: formEditProcedures[formId],
-        reason: formReviewNotes[formId] || '',
-      })
-      toast.success(decision === 'approved' ? 'Đã duyệt biểu mẫu thành công.' : 'Đã từ chối biểu mẫu.')
-      setFormReviewNotes((current) => ({ ...current, [formId]: '' }))
-      await loadFormsCandidates()
-      await loadFormsCatalog()
-    } catch (error) {
-      toast.error(errorMessage(error))
-    } finally {
-      setReviewingFormId(null)
-    }
-  }
-
-
 
   return (
-    <div className="mx-auto w-full max-w-6xl space-y-6 p-6 pb-16">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h1 className="flex items-center gap-3 text-3xl font-semibold">
-            <DatabaseZap className="h-8 w-8 text-primary" />
-            Nạp dữ liệu pháp luật
-          </h1>
-          <p className="mt-2 text-muted-foreground">
-            Kiểm tra văn bản, tách theo điều và embedding bằng VNLegal-LAL vào kho tra cứu Hải Phòng.
-          </p>
-        </div>
-        <Button variant="outline" className="gap-2 self-start sm:self-auto" asChild>
-          <Link href="/notebooks">
-            <ArrowLeft className="h-4 w-4" />
-            Quay lại Trang chính
-          </Link>
-        </Button>
-      </div>
-
-      {/* Kho biểu mẫu */}
-      <Card>
-        <CardHeader className="flex flex-row items-start justify-between gap-4">
-          <div>
-            <CardTitle>Kho biểu mẫu</CardTitle>
-            <CardDescription>
-              Chỉ file vượt qua kiểm tra định dạng và nguồn tải mới được tính là biểu mẫu chính thức.
-            </CardDescription>
-          </div>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => void loadFormsCatalog()}
-            disabled={loadingFormsCatalog}
-          >
-            <RefreshCcw className={`mr-2 h-4 w-4 ${loadingFormsCatalog ? 'animate-spin' : ''}`} />
-            Làm mới
-          </Button>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid gap-4 md:grid-cols-5">
-            <div className="rounded-lg border border-blue-300 bg-blue-50 p-4">
-              <p className="text-sm text-blue-800">Danh mục ưu tiên</p>
-              <p className="mt-1 text-2xl font-semibold text-blue-950">
-                {formsCatalog?.summary.hai_phong_official?.priority_200?.selected_count ?? 0}
-              </p>
-              <p className="mt-1 text-xs text-blue-700">Mục tiêu tối thiểu 200 mẫu</p>
-            </div>
-            <div className="rounded-lg border p-4">
-              <p className="text-sm text-muted-foreground">Tham chiếu đã nạp</p>
-              <p className="mt-1 text-2xl font-semibold">
-                {formsCatalog?.summary.hai_phong_official?.total_source_references ?? 0}
-              </p>
-            </div>
-            <div className="rounded-lg border p-4">
-              <p className="text-sm text-muted-foreground">Biểu mẫu có thể tải</p>
-              <p className="mt-1 text-2xl font-semibold">
-                {formsCatalog?.summary.hai_phong_official?.available_canonical_forms ?? 0}
-              </p>
-            </div>
-            <div className="rounded-lg border p-4">
-              <p className="text-sm text-muted-foreground">Bị chặn do hết hiệu lực</p>
-              <p className="mt-1 text-2xl font-semibold">
-                {formsCatalog?.summary.hai_phong_official?.blocked_effectivity_flags ?? 0}
-              </p>
-            </div>
-            <div className="rounded-lg border p-4">
-              <p className="text-sm text-muted-foreground">Tên mẫu cần duyệt</p>
-              <p className="mt-1 text-2xl font-semibold">
-                {formsCatalog?.summary.hai_phong_official?.review_required_title ?? 0}
-              </p>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Biểu mẫu mới cần admin duyệt */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Biểu mẫu mới cần admin duyệt</CardTitle>
-          <CardDescription>
-            Duyệt hoặc từ chối biểu mẫu trước khi đưa vào kho chính thức Hải Phòng và Procedures RAG.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-6">
-          <div className="flex flex-wrap items-center gap-3">
-            <Label htmlFor="form-review-status">Trạng thái</Label>
-            <Select value={formReviewStatus} onValueChange={setFormReviewStatus}>
-              <SelectTrigger id="form-review-status" className="w-[220px]">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="candidate_pending_review">Chờ duyệt</SelectItem>
-                <SelectItem value="approved">Đã duyệt</SelectItem>
-                <SelectItem value="rejected">Đã bỏ qua / từ chối</SelectItem>
-              </SelectContent>
-            </Select>
-            <Button type="button" variant="outline" onClick={() => void loadFormsCandidates()}>
-              Làm mới danh sách
-            </Button>
-          </div>
-
-          <div className="space-y-3 rounded-lg border p-4">
+    <AppShell>
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 pb-12 md:p-6 md:pb-16">
+        <div className="mx-auto w-full max-w-7xl space-y-6">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <h3 className="font-medium">Nguồn crawler và lịch chạy</h3>
-              <p className="text-sm text-muted-foreground">Nguồn mặc định chạy mỗi 10.080 phút (7 ngày). Admin có thể tắt nguồn hoặc quét riêng ngay.</p>
-            </div>
-            <div className="grid gap-3 md:grid-cols-2">
-              {crawlerSources.map((source) => <div key={source.id} className="rounded border p-3">
-                <div className="flex items-start justify-between gap-3">
-                  <div><p className="font-medium">{source.name}</p><p className="break-all text-xs text-muted-foreground">{source.base_url}</p></div>
-                  <Badge variant={source.enabled ? 'secondary' : 'outline'}>{source.enabled ? 'Đang bật' : 'Đã tắt'}</Badge>
-                </div>
-                <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                  <span>Chu kỳ: {source.interval_minutes} phút</span>
-                  <span>·</span><span>Lần cuối: {source.last_checked_at ? new Date(source.last_checked_at).toLocaleString('vi-VN') : 'Chưa quét'}</span>
-                </div>
-                <div className="mt-3 flex gap-2">
-                  <Button type="button" size="sm" variant="outline" onClick={() => runScan(source.id)} disabled={scanningSourceId === source.id}>{scanningSourceId === source.id ? 'Đang quét...' : 'Quét nguồn này'}</Button>
-                  <Button type="button" size="sm" variant="ghost" onClick={async () => { try { await legalImportApi.updateCrawlSource(source.id, { enabled: !source.enabled }); await loadCrawlerData() } catch (error) { toast.error(errorMessage(error)) } }}>{source.enabled ? 'Tắt' : 'Bật'}</Button>
-                </div>
-              </div>)}
-            </div>
-          </div>
-          {pendingForms.length === 0 ? (
-            <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">
-              Chưa có biểu mẫu nào trong hàng đợi duyệt.
-            </div>
-          ) : (
-            <div className="space-y-3">
-              {pendingForms.map((item) => {
-                const displayName = formEditNames[item.id] ?? item.title ?? item.detected_form_name ?? item.file_name ?? 'Biểu mẫu chưa rõ tên'
-                const displayDomain = formEditDomains[item.id] ?? item.domain ?? item.suggested_domain ?? ''
-                const displayProcedure = formEditProcedures[item.id] ?? item.procedure_id ?? item.suggested_procedure_id ?? ''
-                return (
-                <div key={item.id} className="rounded-lg border p-4">
-                  <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                    <div className="space-y-3 w-full">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <h4 className="font-medium">{displayName}</h4>
-                        <Badge variant="outline">{item.official_level || 'candidate'}</Badge>
-                        {typeof item.confidence === 'number' && (
-                          <Badge variant="secondary">conf {item.confidence.toFixed(2)}</Badge>
-                        )}
-                        <Badge variant="outline">{item.review_status || formReviewStatus}</Badge>
-                      </div>
-                      <p className="text-sm text-muted-foreground">
-                        ID: <span className="font-mono text-xs">{item.id}</span>
-                        {item.file_name ? ` • File: ${item.file_name}` : ''}
-                      </p>
-                      {item.source_url && (
-                        <p className="text-xs text-muted-foreground break-all">
-                          Nguồn: <a href={item.source_url} target="_blank" rel="noreferrer" className="underline hover:text-primary">{item.source_url}</a>
-                        </p>
-                      )}
-                      <div className="grid gap-3 md:grid-cols-3">
-                        <div className="space-y-1">
-                          <Label htmlFor={`form-name-${item.id}`}>Tên biểu mẫu</Label>
-                          <Input
-                            id={`form-name-${item.id}`}
-                            value={displayName}
-                            onChange={(event) =>
-                              setFormEditNames((current) => ({
-                                ...current,
-                                [item.id]: event.target.value,
-                              }))
-                            }
-                            placeholder="Sửa tên trước khi duyệt"
-                          />
-                        </div>
-                        <div className="space-y-1">
-                          <Label htmlFor={`form-domain-${item.id}`}>Lĩnh vực (domain)</Label>
-                          <Select
-                            value={displayDomain || 'unknown'}
-                            onValueChange={(value) =>
-                              setFormEditDomains((current) => ({
-                                ...current,
-                                [item.id]: value,
-                              }))
-                            }
-                          >
-                            <SelectTrigger id={`form-domain-${item.id}`}>
-                              <SelectValue placeholder="Chọn lĩnh vực" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="ho_tich">ho_tich</SelectItem>
-                              <SelectItem value="cu_tru">cu_tru</SelectItem>
-                              <SelectItem value="dat_dai_xay_dung">dat_dai_xay_dung</SelectItem>
-                              <SelectItem value="trat_tu_do_thi">trat_tu_do_thi</SelectItem>
-                              <SelectItem value="khieu_nai_to_cao">khieu_nai_to_cao</SelectItem>
-                              <SelectItem value="xu_phat_hanh_chinh">xu_phat_hanh_chinh</SelectItem>
-                              <SelectItem value="unknown">unknown</SelectItem>
-                            </SelectContent>
-                          </Select>
-                        </div>
-                        <div className="space-y-1">
-                          <Label htmlFor={`form-proc-${item.id}`}>procedure_id</Label>
-                          <Input
-                            id={`form-proc-${item.id}`}
-                            value={displayProcedure}
-                            onChange={(event) =>
-                              setFormEditProcedures((current) => ({
-                                ...current,
-                                [item.id]: event.target.value,
-                              }))
-                            }
-                            placeholder="vd: dang_ky_khai_sinh"
-                          />
-                        </div>
-                      </div>
-                      <div className="space-y-2">
-                        <Label htmlFor={`form-review-note-${item.id}`}>Ghi chú / lý do duyệt</Label>
-                        <Textarea
-                          id={`form-review-note-${item.id}`}
-                          rows={2}
-                          placeholder="Nhập ghi chú duyệt hoặc lý do từ chối..."
-                          value={formReviewNotes[item.id] || item.review_note || item.reason || ''}
-                          onChange={(event) =>
-                            setFormReviewNotes((current) => ({
-                              ...current,
-                              [item.id]: event.target.value,
-                            }))
-                          }
-                        />
-                      </div>
-                    </div>
-                    <div className="flex gap-2 shrink-0">
-                      <Button
-                        type="button"
-                        variant="outline"
-                        onClick={() => reviewForm(item.id, 'rejected')}
-                        disabled={reviewingFormId === item.id}
-                      >
-                        Từ chối
-                      </Button>
-                      <Button
-                        type="button"
-                        onClick={() => reviewForm(item.id, 'approved')}
-                        disabled={reviewingFormId === item.id}
-                      >
-                        Duyệt
-                      </Button>
-                    </div>
-                  </div>
-                </div>
-              )})}
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* VBPL tự động */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Văn bản mới cần admin duyệt (Review Queue)</CardTitle>
-          <CardDescription>
-            Bao gồm văn bản thu thập tự động từ VBPL và các bản nháp nạp thủ công đang chờ duyệt để embedding.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-6">
-          <div className="grid gap-4 md:grid-cols-4">
-            <div className="rounded-lg border p-4">
-              <p className="text-sm text-muted-foreground">Chờ duyệt</p>
-              <p className="mt-1 text-2xl font-semibold">{crawlSummary?.pending_review_count ?? 0}</p>
-            </div>
-            <div className="rounded-lg border p-4">
-              <p className="text-sm text-muted-foreground">Thông báo chưa đọc</p>
-              <p className="mt-1 text-2xl font-semibold">{crawlSummary?.unread_notification_count ?? 0}</p>
-            </div>
-            <div className="rounded-lg border p-4">
-              <p className="text-sm text-muted-foreground">Nguồn crawler</p>
-              <p className="mt-1 text-2xl font-semibold">{crawlSummary?.source_count ?? 0}</p>
-            </div>
-            <div className="rounded-lg border p-4">
-              <p className="text-sm text-muted-foreground">Lần quét gần nhất</p>
-              <p className="mt-1 text-sm font-medium">
-                {crawlSummary?.last_checked_at ? new Date(crawlSummary.last_checked_at).toLocaleString('vi-VN') : 'Chưa có'}
+              <h1 className="flex items-center gap-3 text-xl md:text-2xl font-bold">
+                <DatabaseZap className="h-8 w-8 text-primary" />
+                Trung tâm dữ liệu pháp luật
+              </h1>
+              <p className="mt-2 text-sm text-muted-foreground">
+                Thu thập, kiểm tra và đưa văn bản chính thức vào kho tra cứu Hải Phòng.
               </p>
-            </div>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-3">
-            <Button type="button" variant="outline" onClick={() => runScan()} disabled={scanningSourceId === '__all__'}>
-              <RefreshCcw className="mr-2 h-4 w-4" />
-              {scanningSourceId === '__all__' ? 'Đang quét...' : 'Quét ngay tất cả nguồn'}
-            </Button>
-            <p className="text-sm text-muted-foreground">
-              Hệ thống tự quét 7 ngày một lần, so sánh metadata cũ/mới và chỉ tạo candidate để admin duyệt.
-            </p>
-          </div>
-
-          <div className="space-y-4">
-            <div>
-              <h3 className="font-medium text-sm">Văn bản chờ duyệt trong hàng đợi</h3>
-            </div>
-            <div className="flex flex-wrap items-center gap-3">
-              <Label htmlFor="candidate-status">Trạng thái duyệt</Label>
-              <Select value={candidateStatus} onValueChange={setCandidateStatus}>
-                <SelectTrigger id="candidate-status" className="w-[220px]">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="pending">Chờ duyệt (Pending)</SelectItem>
-                  <SelectItem value="changes_requested">Cần bổ sung</SelectItem>
-                  <SelectItem value="approved">Đã duyệt (Approved)</SelectItem>
-                  <SelectItem value="import_queued">Đang chờ nhập kho</SelectItem>
-                  <SelectItem value="rejected">Đã bỏ qua (Rejected)</SelectItem>
-                  <SelectItem value="imported">Đã nhập kho (Imported)</SelectItem>
-                </SelectContent>
-              </Select>
-              <Select value={candidateOrigin} onValueChange={setCandidateOrigin}>
-                <SelectTrigger className="w-[220px]"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">Tất cả nguồn đề xuất</SelectItem>
-                  <SelectItem value="crawler">Crawler tự động</SelectItem>
-                  <SelectItem value="officer">Cán bộ đề xuất</SelectItem>
-                </SelectContent>
-              </Select>
-              <Button type="button" variant="outline" onClick={() => void loadCrawlerData()}>
-                Làm mới danh sách
-              </Button>
-            </div>
-            {visibleCandidates.length === 0 ? (
-              <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">
-                Chưa có văn bản nào trong hàng đợi duyệt.
+              <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                <Badge variant={systemReady ? 'outline' : 'secondary'}>
+                  <Activity className="mr-1 h-3 w-3" />
+                  {importReadiness === null
+                    ? 'Đang kiểm tra hệ thống'
+                    : systemReady
+                      ? 'Hệ thống sẵn sàng'
+                      : unhealthyCrawlerSources.length > 0
+                        ? `${unhealthyCrawlerSources.length} nguồn thu thập đang lỗi`
+                        : 'Hệ thống nhập kho cần kiểm tra'}
+                </Badge>
+                {lastRefreshedAt && <span>Cập nhật lúc {lastRefreshedAt.toLocaleTimeString('vi-VN')}</span>}
               </div>
-            ) : (
-              <div className="space-y-3">
-                {visibleCandidates.map((candidate) => (
-                  <div key={candidate.id} className="rounded-lg border p-4">
-                    <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                      <div className="space-y-2">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <h4 className="font-medium">{candidate.title}</h4>
-                          <Badge variant="outline">{candidate.suggested_action}</Badge>
-                          <Badge variant={candidate.comparison_status === 'updated' ? 'secondary' : 'outline'}>
-                            {candidate.comparison_status}
-                          </Badge>
-                          <Badge variant="secondary">{candidate.raw_metadata?.candidate_origin === 'officer_document_proposal' ? 'Cán bộ đề xuất' : 'Crawler'}</Badge>
-                          {candidateNeedsOcr(candidate) && (
-                            <Badge variant="destructive" className="bg-amber-500 hover:bg-amber-600 text-white border-none gap-1">
-                              <TriangleAlert className="h-3.5 w-3.5" />
-                              Bản Quét (Scan) / Cần OCR
-                            </Badge>
-                          )}
-                        </div>
-                        <p className="text-sm text-muted-foreground">
-                          {candidate.law_number || 'Chưa tách được số hiệu'} • {candidate.scope || 'Chưa rõ phạm vi'}
-                        </p>
-                        {candidate.description && (
-                          <p className="text-sm text-muted-foreground line-clamp-3">{candidate.description}</p>
-                        )}
-                        {candidate.source_url && <p className="text-sm"><a className="text-primary underline" href={candidate.source_url} target="_blank" rel="noreferrer">Mở nguồn gốc</a></p>}
-                        {(candidate.detected_change_details || []).length > 0 && <div className="rounded border bg-muted/20 p-3 text-xs"><b>So sánh cũ/mới</b><ul className="mt-2 list-disc space-y-1 pl-4">{candidate.detected_change_details?.map((change, index) => <li key={`${change.field}-${index}`}>{change.label}: <span className="text-red-700">{String(change.old_value ?? 'trống')}</span> → <span className="text-green-700">{String(change.new_value ?? 'trống')}</span></li>)}</ul></div>}
-                        {candidate.extraction_result && (
-                          <div className="mt-3 rounded-lg border bg-muted/20 p-3 text-xs space-y-2">
-                            <div className="flex flex-wrap items-center gap-2 font-semibold">
-                              <span>Trích xuất kiểm duyệt</span>
-                              <Badge variant="outline">{candidate.extraction_result.pdf_kind === 'scan' ? 'PDF scan' : candidate.extraction_result.pdf_kind === 'text_based' ? 'PDF có text' : candidate.extraction_result.extractor_used || 'Tệp nguồn'}</Badge>
-                              <Badge variant={candidate.extraction_result.ocr_status === 'ok' || candidate.extraction_result.ocr_status === 'not_required' || candidate.extraction_result.ocr_status === 'not_applicable' ? 'outline' : 'destructive'}>
-                                OCR: {candidate.extraction_result.ocr_status || 'chưa chạy'}
-                              </Badge>
-                            </div>
-                            <p className="text-muted-foreground">
-                              {candidate.extraction_result.page_count ?? 0} trang - {candidate.extraction_result.characters ?? 0} ký tự - {candidate.extraction_result.language || 'không rõ ngôn ngữ'}
-                              {candidate.extraction_result.ocr_confidence != null ? ` - OCR ${Math.round(candidate.extraction_result.ocr_confidence)}%` : ''}
-                            </p>
-                            {candidate.extraction_result.reason && <p className="text-amber-700">{candidate.extraction_result.reason}</p>}
-                            {candidate.extraction_result.preview && <p className="rounded bg-background p-2 text-muted-foreground line-clamp-4 whitespace-pre-wrap">{candidate.extraction_result.preview}</p>}
-                            {candidate.extraction_result.text_fingerprint && <p className="font-mono text-[10px] text-muted-foreground">Fingerprint: {candidate.extraction_result.text_fingerprint.slice(0, 16)}?</p>}
-                          </div>
-                        )}
-                        {candidate.review_recommendation && (
-                          <div className="mt-3 rounded-lg border border-primary/20 bg-primary/[0.03] p-3 space-y-2">
-                            <div className="flex flex-wrap items-center gap-2 text-xs font-semibold text-primary">
-                              <span>Khuyến nghị kiểm duyệt</span>
-                              <Badge variant="outline">Admin quyết định cuối</Badge>
-                            </div>
-                            {candidate.review_recommendation.scores && (
-                              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 text-xs">
-                                {Object.entries(candidate.review_recommendation.scores).map(([key, value]) => (
-                                  <div key={key} className="rounded border bg-background p-2">
-                                    <div className="flex justify-between gap-2"><span className="text-muted-foreground">{key.replaceAll('_', ' ')}</span><strong>{value}/100</strong></div>
-                                    <div className="mt-1 h-1.5 overflow-hidden rounded bg-muted"><div className="h-full bg-primary" style={{ width: `${Math.max(0, Math.min(100, value))}%` }} /></div>
-                                  </div>
-                                ))}
-                              </div>
-                            )}
-                            {(candidate.review_recommendation.evidence || []).length > 0 && (
-                              <ul className="list-disc space-y-1 pl-4 text-xs text-muted-foreground">
-                                {candidate.review_recommendation.evidence?.map((item) => <li key={item}>{item}</li>)}
-                              </ul>
-                            )}
-                            {(candidate.review_recommendation.evidence_snippets || []).map((snippet) => (
-                              <p key={`${snippet.kind}-${snippet.text.slice(0, 30)}`} className="rounded bg-background p-2 text-xs text-muted-foreground line-clamp-3 whitespace-pre-wrap">{snippet.text}</p>
-                            ))}
-                          </div>
-                        )}
-                        {candidate.ai_assessment && (
-                          <div className="mt-3 rounded-lg border bg-muted/30 p-3 space-y-2">
-                            <div className="flex items-center gap-2 text-xs font-semibold text-primary">
-                              <span>🤖 ĐÁNH GIÁ CỦA AI (Độ tin cậy: {Math.round(candidate.ai_assessment.confidence * 100)}%)</span>
-                            </div>
-                            <div className="flex flex-wrap gap-2">
-                              <Badge variant="outline" className="bg-primary/5">
-                                Lĩnh vực: {
-                                  candidate.ai_assessment.domain === 'ho_tich_chung_thuc' ? 'Hộ tịch - Chứng thực' :
-                                  candidate.ai_assessment.domain === 'dat_dai_xay_dung' ? 'Đất đai - Xây dựng' :
-                                  candidate.ai_assessment.domain === 'an_sinh_y_te_giao_duc' ? 'An sinh - Y tế - Giáo dục' :
-                                  candidate.ai_assessment.domain === 'hanh_chinh_cong' ? 'Hành chính công' :
-                                  candidate.ai_assessment.domain === 'cu_tru_an_ninh' ? 'Cư trú - An ninh' :
-                                  candidate.ai_assessment.domain === 'khieu_nai_to_cao_xu_phat' ? 'Khiếu nại - Tố cáo - Xử phạt' :
-                                  candidate.ai_assessment.domain
-                                }
-                              </Badge>
-                              <Badge variant="outline" className="bg-secondary/5">
-                                Cấp áp dụng: {
-                                  candidate.ai_assessment.scope === 'central' ? 'Trung ương' :
-                                  candidate.ai_assessment.scope === 'haiphong' ? 'Hải Phòng' :
-                                  candidate.ai_assessment.scope === 'local' ? 'Cấp phường/xã' :
-                                  candidate.ai_assessment.scope
-                                }
-                              </Badge>
-                              <Badge variant="outline">
-                                Phân loại: {
-                                  candidate.ai_assessment.official_level === 'official' ? 'Văn bản QPPL chính thức' :
-                                  candidate.ai_assessment.official_level === 'reference' ? 'Tài liệu tham khảo/hướng dẫn' :
-                                  candidate.ai_assessment.official_level === 'internal' ? 'Văn bản nội bộ' :
-                                  candidate.ai_assessment.official_level
-                                }
-                              </Badge>
-                              <Badge variant="outline" className={
-                                candidate.ai_assessment.effective_status === 'con_hieu_luc' ? 'border-green-300 text-green-700 bg-green-50/50' :
-                                candidate.ai_assessment.effective_status === 'het_hieu_luc' ? 'border-destructive/30 text-destructive bg-destructive/5' :
-                                'border-amber-300 text-amber-700 bg-amber-50/50'
-                              }>
-                                Hiệu lực: {
-                                  candidate.ai_assessment.effective_status === 'con_hieu_luc' ? 'Còn hiệu lực' :
-                                  candidate.ai_assessment.effective_status === 'het_hieu_luc' ? 'Hết hiệu lực' :
-                                  candidate.ai_assessment.effective_status === 'chua_co_hieu_luc' ? 'Chưa có hiệu lực' :
-                                  'Không rõ hiệu lực'
-                                }
-                              </Badge>
-                              <Badge variant="outline" className={
-                                candidate.ai_assessment.duplicate_risk === 'none' ? 'border-green-300 text-green-700 bg-green-50/50' :
-                                candidate.ai_assessment.duplicate_risk === 'possible' ? 'border-yellow-400 text-yellow-800 bg-yellow-50/50' :
-                                'border-destructive text-destructive bg-destructive/5 font-semibold'
-                              }>
-                                Trùng lặp: {
-                                  candidate.ai_assessment.duplicate_risk === 'none' ? 'Không trùng' :
-                                  candidate.ai_assessment.duplicate_risk === 'possible' ? 'Có thể trùng' :
-                                  'Khả năng cao trùng'
-                                }
-                              </Badge>
-                            </div>
-                            {candidate.ai_assessment.reasons && candidate.ai_assessment.reasons.length > 0 && (
-                              <ul className="text-xs text-muted-foreground list-disc pl-4 space-y-1">
-                                {candidate.ai_assessment.reasons.map((reason, idx) => (
-                                  <li key={idx}>{reason}</li>
-                                ))}
-                              </ul>
-                            )}
-                          </div>
-                        )}
-                        <div className="space-y-2 mt-2">
-                          <Label htmlFor={`review-note-${candidate.id}`}>Ghi chú duyệt</Label>
-                          <Textarea
-                            id={`review-note-${candidate.id}`}
-                            rows={3}
-                            placeholder="Lý do duyệt, bỏ qua, hoặc ghi chú cập nhật..."
-                            value={reviewNotes[candidate.id] || candidate.review_note || ''}
-                            onChange={(event) =>
-                              setReviewNotes((current) => ({
-                                ...current,
-                                [candidate.id]: event.target.value,
-                              }))
-                            }
-                          />
-                        </div>
-                      </div>
-                      <div className="flex flex-col gap-2">
-                        <div className="flex gap-2">
-                          <Button
-                            type="button"
-                            variant="secondary"
-                            onClick={() => reviewCandidate(candidate.id, 'changes_requested')}
-                            disabled={reviewingCandidateId === candidate.id}
-                          >
-                            Yêu cầu bổ sung
-                          </Button>
-                          <Button
-                            type="button"
-                            variant="outline"
-                            onClick={() => reviewCandidate(candidate.id, 'rejected')}
-                            disabled={reviewingCandidateId === candidate.id}
-                          >
-                            Bỏ qua
-                          </Button>
-                          <Button
-                            type="button"
-                            onClick={() => reviewCandidate(candidate.id, 'approved')}
-                            disabled={reviewingCandidateId === candidate.id}
-                          >
-                            Duyệt
-                          </Button>
-                        </div>
-                        <Button
-                          type="button"
-                          variant="secondary"
-                          size="sm"
-                          className="w-full gap-1.5"
-                          onClick={() => assessCandidate(candidate.id)}
-                          disabled={assessingCandidateId === candidate.id}
-                        >
-                          <RefreshCcw className={`h-3 w-3 ${assessingCandidateId === candidate.id ? 'animate-spin' : ''}`} />
-                          🤖 AI Đánh giá
-                        </Button>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
+            </div>
           </div>
-        </CardContent>
-      </Card>
 
-      {/* Form nạp văn bản thủ công */}
-      <form onSubmit={checkDocument} className="grid gap-6 lg:grid-cols-[1.4fr_1fr]">
-        <Card>
-          <CardHeader>
-            <CardTitle>Thông tin văn bản</CardTitle>
-            <CardDescription>
-              Không dùng AI để đoán số hiệu, ngày hiệu lực hoặc cơ quan ban hành.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="grid gap-5 sm:grid-cols-2">
-            <div className="space-y-2 sm:col-span-2">
-              <Label htmlFor="title">Tên văn bản *</Label>
-              <Input id="title" minLength={5} value={form.title} onChange={(e) => update('title', e.target.value)} required />
-              <p className="text-xs text-muted-foreground">Tối thiểu 5 ký tự.</p>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="law-number">Số, ký hiệu *</Label>
-              <Input id="law-number" value={form.law_number} onChange={(e) => update('law_number', e.target.value)} required />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="document-type">Loại văn bản *</Label>
-              <Input id="document-type" placeholder="Luật, Nghị định, Quyết định..." value={form.document_type} onChange={(e) => update('document_type', e.target.value)} required />
-            </div>
-            <div className="space-y-2 sm:col-span-2">
-              <Label htmlFor="agency">Cơ quan ban hành *</Label>
-              <Input id="agency" value={form.issuing_agency} onChange={(e) => update('issuing_agency', e.target.value)} required />
-            </div>
-            <div className="space-y-2">
-              <Label>Phạm vi áp dụng *</Label>
-              <Select value={form.scope} onValueChange={(value) => update('scope', value)}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="Trung ương - toàn quốc">Trung ương - toàn quốc</SelectItem>
-                  <SelectItem value="Thành phố Hải Phòng">Thành phố Hải Phòng</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-2">
-              <Label>Lĩnh vực *</Label>
-              <Select
-                value={form.field_id ? String(form.field_id) : ''}
-                onValueChange={(value) => update('field_id', Number(value))}
-              >
-                <SelectTrigger><SelectValue placeholder="Chọn lĩnh vực" /></SelectTrigger>
-                <SelectContent>
-                  {fields.map((field) => (
-                    <SelectItem key={field.id} value={String(field.id)}>{field.name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="issued-date">Ngày ban hành</Label>
-              <Input id="issued-date" type="date" value={form.issued_date || ''} onChange={(e) => update('issued_date', e.target.value || null)} />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="effective-date">Ngày có hiệu lực *</Label>
-              <Input id="effective-date" type="date" value={form.effective_date} onChange={(e) => update('effective_date', e.target.value)} required />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="expired-date">Ngày hết hiệu lực</Label>
-              <Input id="expired-date" type="date" value={form.expired_date || ''} onChange={(e) => update('expired_date', e.target.value || null)} />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="sector">Ngành/chủ đề</Label>
-              <Input id="sector" value={form.sector} onChange={(e) => update('sector', e.target.value)} />
-            </div>
-            <div className="space-y-2 sm:col-span-2">
-              <Label htmlFor="source-url">URL nguồn chính thức</Label>
-              <Input id="source-url" type="url" placeholder="https://..." value={form.source_url} onChange={(e) => update('source_url', e.target.value)} />
-            </div>
-            <div className="space-y-2 sm:col-span-2">
-              <Label htmlFor="applicability">Thông tin áp dụng/sửa đổi</Label>
-              <Textarea id="applicability" value={form.applicability_info} onChange={(e) => update('applicability_info', e.target.value)} />
-            </div>
-          </CardContent>
-        </Card>
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full space-y-6">
+        <TabsList className="grid h-auto w-full grid-cols-1 gap-1 p-1 sm:grid-cols-3">
+          <TabsTrigger value="proposals" className="gap-2">
+            <Inbox className="h-4 w-4" />
+            Đề xuất chờ duyệt ({crawlSummary?.pending_review_count ?? 0})
+          </TabsTrigger>
+          <TabsTrigger value="forms" className="gap-2">
+            <FileCode className="h-4 w-4" />
+            Biểu mẫu chờ duyệt
+          </TabsTrigger>
+          <TabsTrigger value="import" className="gap-2">
+            <Upload className="h-4 w-4" />
+            Thêm văn bản
+          </TabsTrigger>
+        </TabsList>
 
-        <div className="space-y-6">
+        {/* Tab 1: Đề xuất văn bản từ Cán bộ & Crawler (Hiện ngay đầu trang!) */}
+        <TabsContent value="proposals">
           <Card>
             <CardHeader>
-              <CardTitle>Nội dung toàn văn</CardTitle>
+              <CardTitle>Đề xuất chờ duyệt</CardTitle>
               <CardDescription>
-                Tệp phải có các tiêu đề dạng &quot;Điều 1. ...&quot;. Hỗ trợ TXT, Markdown, Word và PDF.
+                Xem thông tin và nguồn gốc, sau đó chọn Duyệt hoặc Từ chối. Các kiểm tra an toàn được hệ thống thực hiện tự động.
               </CardDescription>
             </CardHeader>
-            <CardContent className="space-y-4">
-              <Label htmlFor="legal-file" className="flex min-h-28 cursor-pointer flex-col items-center justify-center rounded-lg border border-dashed p-4 text-center hover:bg-muted/50">
-                <FileUp className="mb-2 h-7 w-7" />
-                <span>{fileName || 'Chọn tệp văn bản'}</span>
-                <span className="text-xs text-muted-foreground">.txt, .md, .json, .docx hoặc .pdf</span>
-              </Label>
-              <Input id="legal-file" className="hidden" type="file" accept=".txt,.md,.json,.docx,.pdf,text/plain,text/markdown,application/json,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onChange={readFile} />
-              <div className="space-y-2">
-                <Label>Chế độ trích xuất PDF/DOCX</Label>
-                <Select value={fileExtractor} onValueChange={(value) => setFileExtractor(value as LegalImportExtractor)}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="auto">Tự động - ưu tiên trích xuất nâng cao nếu sẵn sàng</SelectItem>
-                    <SelectItem value="basic">Cơ bản - nhanh, gọn</SelectItem>
-                    <SelectItem value="rag_anything">Trích xuất nâng cao - PDF/Văn phòng phức tạp</SelectItem>
-                  </SelectContent>
-                </Select>
+            <CardContent className="space-y-6">
+              {crawlerLoadError && (
+                <div role="alert" className="flex flex-col gap-3 rounded-lg border border-destructive/30 bg-destructive/5 p-4 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <p className="font-medium text-destructive">Không tải được dữ liệu vận hành</p>
+                    <p className="mt-1 text-sm text-muted-foreground">{crawlerLoadError}</p>
+                  </div>
+                  <Button type="button" variant="outline" onClick={() => void loadCrawlerData()} disabled={crawlerLoading}>
+                    <RefreshCcw className="mr-2 h-4 w-4" /> Thử lại
+                  </Button>
+                </div>
+              )}
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-muted/20 p-3">
+                <div>
+                  <p className="font-medium">{crawlSummary?.pending_review_count ?? 0} đề xuất đang chờ quyết định</p>
+                  <p className="text-sm text-muted-foreground">Đề xuất đến từ crawler dùng chung hoặc cán bộ. Không đề xuất nào tự được đưa vào kho.</p>
+                </div>
+                <Button type="button" variant="outline" onClick={() => runScan()} disabled={scanningSourceId !== null}>
+                  <RefreshCcw className="mr-2 h-4 w-4" />
+                  {scanningSourceId === '__all__' ? 'Đang kiểm tra...' : 'Kiểm tra nguồn'}
+                </Button>
               </div>
-              <Textarea
-                className="min-h-64 font-mono text-xs"
-                minLength={20}
-                placeholder={'Điều 1. Phạm vi điều chỉnh\nNội dung điều luật...'}
-                value={form.content}
-                onChange={(e) => update('content', e.target.value)}
-                required
+
+              <CrawlerSourceManager
+                sources={crawlerSources}
+                scanningSourceId={scanningSourceId}
+                onRefresh={loadCrawlerData}
+                onScan={runScan}
+                onCreate={async (payload) => {
+                  try {
+                    await legalImportApi.createCrawlSource(payload)
+                    toast.success('Đã thêm nguồn mới ở trạng thái tắt.')
+                    await loadCrawlerData()
+                  } catch (error) {
+                    toast.error(errorMessage(error))
+                    throw error
+                  }
+                }}
+                onUpdate={async (sourceId, payload) => {
+                  try {
+                    await legalImportApi.updateCrawlSource(sourceId, payload)
+                    toast.success('Đã lưu thay đổi nguồn thu thập.')
+                    await loadCrawlerData()
+                  } catch (error) {
+                    toast.error(errorMessage(error))
+                    throw error
+                  }
+                }}
+                onDelete={async (sourceId) => {
+                  try {
+                    await legalImportApi.deleteCrawlSource(sourceId)
+                    toast.success('Đã xóa nguồn khỏi danh sách vận hành; lịch sử và ứng viên được giữ nguyên.')
+                    await loadCrawlerData()
+                  } catch (error) {
+                    toast.error(errorMessage(error))
+                    throw error
+                  }
+                }}
               />
-              <p className="text-xs text-muted-foreground">
-                {form.content.length} ký tự. Tối thiểu 20 ký tự và phải có tiêu đề &quot;Điều 1&quot;.
-              </p>
-              <div className="space-y-2 rounded-lg border p-3">
-                <Label htmlFor="crawl-url">Bộ quét tự động từ URL chính thức</Label>
-                <div className="flex gap-2">
+
+              <div className="space-y-4">
+                <div>
+                  <h3 className="font-semibold">
+                    Danh sách đề xuất ({visibleCandidates.length})
+                  </h3>
+                  {!importPipelineReady && importReadiness !== null && <p className="mt-1 text-sm text-amber-700">Hệ thống nhập kho chưa sẵn sàng nên nút Duyệt tạm thời bị khóa.</p>}
+                </div>
+                <div className="grid gap-3 rounded-lg border bg-muted/20 p-3 md:grid-cols-[1fr_1fr_auto] md:items-end">
+                  <div className="space-y-1.5">
+                  <Label htmlFor="candidate-status">Danh sách</Label>
+                  <Select value={candidateStatus} onValueChange={setCandidateStatus}>
+                    <SelectTrigger id="candidate-status" className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="pending">Cần duyệt</SelectItem>
+                      <SelectItem value="needs_attention">Cần xử lý lỗi</SelectItem>
+                      <SelectItem value="import_queued">Đang nhập kho</SelectItem>
+                      <SelectItem value="rejected">Đã từ chối</SelectItem>
+                      <SelectItem value="imported">Đã nhập kho</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  </div>
+                  <div className="space-y-1.5">
+                  <Label htmlFor="candidate-origin">Nguồn đề xuất</Label>
+                  <Select value={candidateOrigin} onValueChange={setCandidateOrigin}>
+                    <SelectTrigger id="candidate-origin" className="w-full"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">Tất cả</SelectItem>
+                      <SelectItem value="crawler">Hệ thống tự thu thập</SelectItem>
+                      <SelectItem value="officer">Cán bộ đề xuất</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  </div>
+                  <Button type="button" variant="outline" onClick={() => void loadCrawlerData()} disabled={crawlerLoading}>
+                    <RefreshCcw className={`mr-2 h-4 w-4 ${crawlerLoading ? 'animate-spin' : ''}`} />
+                    {crawlerLoading ? 'Đang tải...' : 'Làm mới'}
+                  </Button>
+                </div>
+                {visibleCandidates.length === 0 ? (
+                  <div className="rounded-lg border border-dashed px-6 py-12 text-center">
+                    <CheckCircle2 className="mx-auto h-9 w-9 text-emerald-600" />
+                    <p className="mt-3 font-medium">Không có văn bản trong mục này</p>
+                    <p className="mt-1 text-sm text-muted-foreground">
+                      {documentCandidates.length > 0
+                        ? `Bộ lọc nguồn đang ẩn ${documentCandidates.length} văn bản trong trạng thái này.`
+                        : 'Bạn có thể kiểm tra nguồn để tìm văn bản mới hoặc tự thêm một văn bản.'}
+                    </p>
+                    <div className="mt-4 flex flex-wrap justify-center gap-2">
+                      {documentCandidates.length > 0 && candidateOrigin !== 'all' && (
+                        <Button type="button" variant="outline" onClick={() => setCandidateOrigin('all')}>
+                          Hiện tất cả nguồn
+                        </Button>
+                      )}
+                      <Button type="button" variant="outline" onClick={() => runScan()} disabled={scanningSourceId !== null}>
+                        <RefreshCcw className="mr-2 h-4 w-4" /> Kiểm tra nguồn
+                      </Button>
+                      <Button type="button" onClick={() => setActiveTab('import')}>
+                        <FilePlus2 className="mr-2 h-4 w-4" /> Thêm văn bản
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {visibleCandidates.map((candidate) => (
+                      <div key={candidate.id} className="rounded-lg border p-4">
+                        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                          <div className="space-y-2">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <h4 className="font-medium">{candidate.title}</h4>
+                              <Badge variant={candidate.comparison_status === 'updated' ? 'secondary' : 'outline'}>
+                                {comparisonStatusLabel(candidate.comparison_status)}
+                              </Badge>
+                              <Badge variant="secondary">{candidate.raw_metadata?.candidate_origin === 'officer_document_proposal' ? 'Cán bộ đề xuất' : 'Hệ thống thu thập'}</Badge>
+                              {candidateNeedsOcr(candidate) && (
+                                <Badge variant="destructive" className="bg-amber-500 hover:bg-amber-600 text-white border-none gap-1">
+                                  <TriangleAlert className="h-3.5 w-3.5" />
+                                  Tệp ảnh – cần nhận dạng chữ
+                                </Badge>
+                              )}
+                            </div>
+                            <p className="text-sm text-muted-foreground">
+                              {candidate.law_number || 'Chưa có số, ký hiệu'} · {candidate.document_type || 'Chưa rõ loại văn bản'} · {candidate.scope || 'Chưa rõ phạm vi'}
+                            </p>
+                            <p className="text-sm text-muted-foreground">Cơ quan ban hành: {candidate.issuing_agency || 'Chưa có thông tin'}</p>
+                            {candidate.description && (
+                              <p className="text-sm text-muted-foreground line-clamp-3">{candidate.description}</p>
+                            )}
+                            {candidate.source_url && <p className="text-sm"><a className="text-primary underline" href={candidate.source_url} target="_blank" rel="noreferrer">Mở nguồn gốc</a></p>}
+                            {(candidate.detected_change_details || []).length > 0 && <div className="rounded border bg-muted/20 p-3 text-xs"><b>So sánh cũ/mới</b><ul className="mt-2 list-disc space-y-1 pl-4">{candidate.detected_change_details?.map((change, index) => <li key={`${change.field}-${index}`}>{change.label}: <span className="text-red-700">{String(change.old_value ?? 'trống')}</span> → <span className="text-green-700">{String(change.new_value ?? 'trống')}</span></li>)}</ul></div>}
+                            {candidate.extraction_result && (
+                              <details className="mt-3 rounded-lg border bg-muted/20 p-3 text-xs">
+                                <summary className="cursor-pointer font-medium">Xem nội dung hệ thống đã đọc</summary>
+                                <div className="mt-3 space-y-2 border-t pt-3">
+                                <div className="flex flex-wrap items-center gap-2 font-semibold">
+                                  <span>Kết quả đọc tệp</span>
+                                  <Badge variant="outline">{candidate.extraction_result.pdf_kind === 'scan' ? 'PDF dạng ảnh' : candidate.extraction_result.pdf_kind === 'text_based' ? 'PDF có chữ' : 'Tệp nguồn'}</Badge>
+                                  <Badge variant={candidate.extraction_result.ocr_status === 'ok' || candidate.extraction_result.ocr_status === 'not_required' || candidate.extraction_result.ocr_status === 'not_applicable' ? 'outline' : 'destructive'}>
+                                    {candidate.extraction_result.ocr_status === 'ok' ? 'Đã nhận dạng chữ' : candidate.extraction_result.ocr_status === 'not_required' || candidate.extraction_result.ocr_status === 'not_applicable' ? 'Không cần nhận dạng' : 'Cần kiểm tra nhận dạng chữ'}
+                                  </Badge>
+                                  {Number(candidate.extraction_result.characters || 0) <= 0 && candidate.extraction_result.preview?.trim() && (
+                                  <Badge variant="secondary">Chưa có toàn văn</Badge>
+                                  )}
+                                </div>
+                                <p className="text-muted-foreground">
+                                  {candidate.extraction_result.page_count ?? 0} trang - {extractionCharacterSummary(candidate.extraction_result, candidate.content_characters)} - {candidate.extraction_result.language || 'không rõ ngôn ngữ'}
+                                  {candidate.extraction_result.ocr_confidence != null ? ` - Độ chính xác nhận dạng ${Math.round(candidate.extraction_result.ocr_confidence)}%` : ''}
+                                </p>
+                                {candidate.extraction_result.reason && <p className="text-amber-700">{candidate.extraction_result.reason}</p>}
+                                {candidate.extraction_result.preview && <p className="rounded bg-background p-2 text-muted-foreground line-clamp-4 whitespace-pre-wrap">{candidate.extraction_result.preview}</p>}
+                                </div>
+                              </details>
+                            )}
+                            {(candidate.status === 'pending' || candidate.status === 'changes_requested') && (
+                              <details className="mt-3 rounded-lg border border-blue-200 bg-blue-50/40 p-3">
+                                <summary className="cursor-pointer text-sm font-medium">Xem hoặc sửa thông tin chi tiết</summary>
+                                <div className="mt-3 space-y-3 border-t border-blue-200 pt-3">
+                                <div>
+                                  <p className="text-xs text-muted-foreground">Đối chiếu với nguồn gốc, sửa thông tin nếu cần và chỉ xác nhận nguồn chính thức khi đã kiểm tra.</p>
+                                </div>
+                                <div className="grid gap-3 md:grid-cols-2">
+                                  <div className="space-y-1 md:col-span-2"><Label>Tên văn bản</Label><Input value={candidateMetadataDraftFor(candidate).title || ''} onChange={(event) => updateCandidateMetadataDraft(candidate, 'title', event.target.value)} /></div>
+                                  <div className="space-y-1"><Label>Số, ký hiệu</Label><Input value={candidateMetadataDraftFor(candidate).law_number || ''} onChange={(event) => updateCandidateMetadataDraft(candidate, 'law_number', event.target.value)} /></div>
+                                  <div className="space-y-1"><Label>Loại văn bản</Label><Input value={candidateMetadataDraftFor(candidate).document_type || ''} onChange={(event) => updateCandidateMetadataDraft(candidate, 'document_type', event.target.value)} /></div>
+                                  <div className="space-y-1"><Label>Cơ quan ban hành</Label><Input value={candidateMetadataDraftFor(candidate).issuing_agency || ''} onChange={(event) => updateCandidateMetadataDraft(candidate, 'issuing_agency', event.target.value)} /></div>
+                                  <div className="space-y-1"><Label>Phạm vi</Label><Select value={candidateMetadataDraftFor(candidate).scope || 'central'} onValueChange={(value: 'central' | 'haiphong' | 'local') => updateCandidateMetadataDraft(candidate, 'scope', value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="central">Trung ương</SelectItem><SelectItem value="haiphong">Hải Phòng</SelectItem><SelectItem value="local">Phường/xã</SelectItem></SelectContent></Select></div>
+                                  <div className="space-y-1"><Label>Ngày ban hành</Label><Input type="date" value={candidateMetadataDraftFor(candidate).issued_date || ''} onChange={(event) => updateCandidateMetadataDraft(candidate, 'issued_date', event.target.value)} /></div>
+                                  <div className="space-y-1"><Label>Ngày có hiệu lực</Label><Input type="date" value={candidateMetadataDraftFor(candidate).effective_date || ''} onChange={(event) => updateCandidateMetadataDraft(candidate, 'effective_date', event.target.value)} /></div>
+                                  <div className="space-y-1 md:col-span-2"><Label>URL nguồn chính thức</Label><Input type="url" value={candidateMetadataDraftFor(candidate).source_url || ''} onChange={(event) => updateCandidateMetadataDraft(candidate, 'source_url', event.target.value)} /></div>
+                                </div>
+                                <div className="flex items-start gap-2 rounded border bg-background p-3">
+                                  <Checkbox id={`official-source-${candidate.id}`} checked={Boolean(candidateMetadataDraftFor(candidate).confirmed_official_source)} onCheckedChange={(checked) => updateCandidateMetadataDraft(candidate, 'confirmed_official_source', checked === true)} />
+                                  <Label htmlFor={`official-source-${candidate.id}`} className="font-normal leading-5">Tôi đã mở và đối chiếu URL trên đúng cổng thông tin chính thức.</Label>
+                                </div>
+                                <Button type="button" variant="outline" onClick={() => void saveCandidateMetadata(candidate)} disabled={savingCandidateMetadataId === candidate.id}>
+                                  <ShieldCheck className="mr-2 h-4 w-4" />{savingCandidateMetadataId === candidate.id ? 'Đang lưu...' : 'Lưu thông tin'}
+                                </Button>
+                                </div>
+                              </details>
+                            )}
+                          </div>
+                          <div className="flex w-full flex-col gap-2 lg:w-[360px]">
+                            <CandidateLifecycleActions
+                              candidate={candidate}
+                              importReady={importPipelineReady}
+                              busy={
+                                reviewingCandidateId === candidate.id
+                                || importingCandidateId === candidate.id
+                                || savingCandidateMetadataId === candidate.id
+                              }
+                              onReview={(candidateId, decision) => void reviewCandidate(candidateId, decision)}
+                              onRetryImport={(candidateId) => void retryCandidateImport(candidateId)}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* Tab 2: Quy trình PostgreSQL chuẩn duy nhất cho biểu mẫu */}
+        <TabsContent value="forms">
+          <FormGovernancePanel />
+        </TabsContent>
+
+        {/* Tab 3: Form nạp văn bản thủ công */}
+        <TabsContent value="import">
+          <form onSubmit={checkDocument} className="grid gap-6 lg:grid-cols-[1.4fr_1fr]">
+            <Card className="lg:col-span-2">
+              <CardHeader>
+                <CardTitle><h2>Bước 1 — Lấy nội dung văn bản</h2></CardTitle>
+                <CardDescription>Chọn một trong ba cách. Nội dung lấy được vẫn có thể chỉnh sửa trước khi gửi duyệt.</CardDescription>
+              </CardHeader>
+              <CardContent className="grid gap-4 lg:grid-cols-3">
+                <div className="space-y-3 rounded-lg border p-4">
+                  <div className="flex items-center gap-2 font-medium"><Link2 className="h-5 w-5 text-primary" /> Từ liên kết chính thức</div>
+                  <p className="text-sm text-muted-foreground">Dán đường dẫn VBPL hoặc trang cơ quan nhà nước.</p>
+                  <Label htmlFor="crawl-url">Đường dẫn văn bản</Label>
                   <Input
                     id="crawl-url"
                     type="url"
@@ -1008,51 +812,192 @@ export default function LegalImportPage() {
                     value={crawlUrl}
                     onChange={(event) => setCrawlUrl(event.target.value)}
                   />
-                  <Button type="button" variant="outline" onClick={crawlPreview} disabled={crawling || !crawlUrl.trim()}>
-                    {crawling ? 'Đang quét...' : 'Quét'}
+                  <Button type="button" className="w-full" onClick={crawlPreview} disabled={crawling || !crawlUrl.trim()}>
+                    {crawling ? <><RefreshCcw className="mr-2 h-4 w-4 animate-spin" /> Đang lấy nội dung...</> : 'Lấy nội dung từ liên kết'}
                   </Button>
                 </div>
-              </div>
-              <div className="flex items-start gap-3 rounded-lg border p-3">
-                <Checkbox
-                  id="official-source"
-                  checked={form.confirmed_official_source}
-                  onCheckedChange={(checked) => update('confirmed_official_source', checked === true)}
-                />
-                <Label htmlFor="official-source" className="leading-5">
-                  Tôi đã đối chiếu nội dung và metadata với nguồn văn bản chính thức.
-                </Label>
-              </div>
-              <Button type="submit" className="w-full" disabled={checking || importing}>
-                <ShieldCheck className="mr-2 h-4 w-4" />
-                {checking ? 'Đang kiểm tra...' : 'Kiểm tra trước khi nạp'}
-              </Button>
-            </CardContent>
-          </Card>
-
-          {preview && (
-            <Card className={preview.valid ? 'border-green-500/60' : 'border-destructive/60'}>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  {preview.valid ? <CheckCircle2 className="text-green-600" /> : <TriangleAlert className="text-destructive" />}
-                  {preview.valid ? 'Văn bản đạt điều kiện' : 'Cần sửa thông tin'}
-                </CardTitle>
-                <CardDescription>
-                  {preview.article_count} điều, {preview.chunk_count} chunk sẽ được duyệt trước khi embedding.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                {preview.errors.map((error) => <p key={error} className="text-sm text-destructive">• {error}</p>)}
-                {preview.warnings.map((warning) => <p key={warning} className="text-sm text-amber-700">• {warning}</p>)}
-                <Button type="button" className="w-full" disabled={!canImport} onClick={importDocument}>
-                  <DatabaseZap className="mr-2 h-4 w-4" />
-                  {importing ? 'Đang gửi bản nháp...' : 'Nạp vào hàng đợi chờ duyệt'}
-                </Button>
+                <div className="space-y-3 rounded-lg border p-4">
+                  <div className="flex items-center gap-2 font-medium"><FileUp className="h-5 w-5 text-primary" /> Từ tệp trên máy</div>
+                  <p className="text-sm text-muted-foreground">Hỗ trợ Word, PDF, TXT, Markdown và JSON.</p>
+                  <Label htmlFor="legal-file" className="flex min-h-24 cursor-pointer flex-col items-center justify-center rounded-lg border border-dashed p-4 text-center hover:bg-muted/50">
+                    <Upload className="mb-2 h-6 w-6" />
+                    <span className="text-sm font-medium">{fileName || 'Chọn tệp'}</span>
+                    <span className="text-xs text-muted-foreground">Tối đa theo giới hạn máy chủ</span>
+                  </Label>
+                  <Input id="legal-file" className="hidden" type="file" accept=".txt,.md,.json,.docx,.pdf,text/plain,text/markdown,application/json,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onChange={readFile} />
+                  <details className="text-xs text-muted-foreground">
+                    <summary className="cursor-pointer">Tùy chọn đọc tệp nâng cao</summary>
+                    <div className="mt-2">
+                      <Select value={fileExtractor} onValueChange={(value) => setFileExtractor(value as LegalImportExtractor)}>
+                        <SelectTrigger aria-label="Cách đọc tệp"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="auto">Tự động (khuyên dùng)</SelectItem>
+                          <SelectItem value="basic">Đọc nhanh</SelectItem>
+                          <SelectItem value="rag_anything">Tệp phức tạp hoặc nhiều bảng</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </details>
+                </div>
+                <div className="space-y-3 rounded-lg border p-4">
+                  <div className="flex items-center gap-2 font-medium"><ClipboardPaste className="h-5 w-5 text-primary" /> Dán nội dung</div>
+                  <p className="text-sm text-muted-foreground">Dùng khi bạn đã có toàn văn và muốn nhập trực tiếp.</p>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="w-full"
+                    onClick={() => document.getElementById('legal-content')?.focus()}
+                  >
+                    Mở ô nhập nội dung
+                  </Button>
+                  <div className="rounded-md bg-muted/40 p-3 text-xs text-muted-foreground">
+                    {form.content.length > 0 ? `Đã có ${form.content.length.toLocaleString('vi-VN')} ký tự.` : 'Chưa có nội dung.'}
+                  </div>
+                </div>
               </CardContent>
             </Card>
-          )}
-        </div>
-      </form>
+            <Card>
+              <CardHeader>
+                <CardTitle><h2>Bước 2 — Thông tin văn bản</h2></CardTitle>
+                <CardDescription>
+                  Nhập theo văn bản gốc. Hệ thống không tự đoán số hiệu, ngày hiệu lực hoặc cơ quan ban hành.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="grid gap-5 sm:grid-cols-2">
+                <div className="space-y-2 sm:col-span-2">
+                  <Label htmlFor="title">Tên văn bản *</Label>
+                  <Input id="title" minLength={5} value={form.title} onChange={(e) => update('title', e.target.value)} required />
+                  <p className="text-xs text-muted-foreground">Tối thiểu 5 ký tự.</p>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="law-number">Số, ký hiệu *</Label>
+                  <Input id="law-number" value={form.law_number} onChange={(e) => update('law_number', e.target.value)} required />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="document-type">Loại văn bản *</Label>
+                  <Input id="document-type" placeholder="Luật, Nghị định, Quyết định..." value={form.document_type} onChange={(e) => update('document_type', e.target.value)} required />
+                </div>
+                <div className="space-y-2 sm:col-span-2">
+                  <Label htmlFor="agency">Cơ quan ban hành *</Label>
+                  <Input id="agency" value={form.issuing_agency} onChange={(e) => update('issuing_agency', e.target.value)} required />
+                </div>
+                <div className="space-y-2">
+                  <Label>Phạm vi áp dụng *</Label>
+                  <Select value={form.scope} onValueChange={(value) => update('scope', value)}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="Trung ương - toàn quốc">Trung ương - toàn quốc</SelectItem>
+                      <SelectItem value="Thành phố Hải Phòng">Thành phố Hải Phòng</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <Label>Lĩnh vực *</Label>
+                  <Select
+                    value={form.field_id ? String(form.field_id) : ''}
+                    onValueChange={(value) => update('field_id', Number(value))}
+                  >
+                    <SelectTrigger><SelectValue placeholder="Chọn lĩnh vực" /></SelectTrigger>
+                    <SelectContent>
+                      {fields.map((field) => (
+                        <SelectItem key={field.id} value={String(field.id)}>{field.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="issued-date">Ngày ban hành</Label>
+                  <Input id="issued-date" type="date" value={form.issued_date || ''} onChange={(e) => update('issued_date', e.target.value || null)} />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="effective-date">Ngày có hiệu lực *</Label>
+                  <Input id="effective-date" type="date" value={form.effective_date} onChange={(e) => update('effective_date', e.target.value)} required />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="expired-date">Ngày hết hiệu lực</Label>
+                  <Input id="expired-date" type="date" value={form.expired_date || ''} onChange={(e) => update('expired_date', e.target.value || null)} />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="sector">Ngành/chủ đề</Label>
+                  <Input id="sector" value={form.sector} onChange={(e) => update('sector', e.target.value)} />
+                </div>
+                <div className="space-y-2 sm:col-span-2">
+                  <Label htmlFor="source-url">URL nguồn chính thức</Label>
+                  <Input id="source-url" type="url" placeholder="https://..." value={form.source_url} onChange={(e) => update('source_url', e.target.value)} />
+                </div>
+                <div className="space-y-2 sm:col-span-2">
+                  <Label htmlFor="applicability">Thông tin áp dụng/sửa đổi</Label>
+                  <Textarea id="applicability" value={form.applicability_info} onChange={(e) => update('applicability_info', e.target.value)} />
+                </div>
+              </CardContent>
+            </Card>
+
+            <div className="space-y-6">
+              <Card>
+                <CardHeader>
+                  <CardTitle>Nội dung đã lấy</CardTitle>
+                  <CardDescription>
+                    Kiểm tra và sửa trực tiếp. Văn bản nên có các tiêu đề dạng &quot;Điều 1. ...&quot;.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <Label htmlFor="legal-content">Toàn văn *</Label>
+                  <Textarea
+                    id="legal-content"
+                    className="min-h-64 font-mono text-xs"
+                    minLength={20}
+                    placeholder={'Điều 1. Phạm vi điều chỉnh\nNội dung điều luật...'}
+                    value={form.content}
+                    onChange={(e) => update('content', e.target.value)}
+                    required
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {form.content.length.toLocaleString('vi-VN')} ký tự. Tối thiểu 20 ký tự và nên có tiêu đề &quot;Điều 1&quot;.
+                  </p>
+                  <div className="flex items-start gap-3 rounded-lg border p-3">
+                    <Checkbox
+                      id="official-source"
+                      checked={form.confirmed_official_source}
+                      onCheckedChange={(checked) => update('confirmed_official_source', checked === true)}
+                    />
+                    <Label htmlFor="official-source" className="leading-5">
+                      Tôi đã đối chiếu nội dung và metadata với nguồn văn bản chính thức.
+                    </Label>
+                  </div>
+                  <Button type="submit" className="w-full" disabled={checking || importing}>
+                    <ShieldCheck className="mr-2 h-4 w-4" />
+                    {checking ? 'Đang kiểm tra...' : 'Bước 3 — Kiểm tra trước khi gửi'}
+                  </Button>
+                </CardContent>
+              </Card>
+
+              {preview && (
+                <Card className={preview.valid ? 'border-green-500/60' : 'border-destructive/60'}>
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                      {preview.valid ? <CheckCircle2 className="text-green-600" /> : <TriangleAlert className="text-destructive" />}
+                      {preview.valid ? 'Văn bản đạt điều kiện' : 'Cần sửa thông tin'}
+                    </CardTitle>
+                    <CardDescription>
+                      {preview.article_count} điều, {preview.chunk_count} đoạn tra cứu. Văn bản chỉ vào kho sau khi được duyệt.
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
+                    {preview.errors.map((error) => <p key={error} className="text-sm text-destructive">• {error}</p>)}
+                    {preview.warnings.map((warning) => <p key={warning} className="text-sm text-amber-700">• {warning}</p>)}
+                    <Button type="button" className="w-full" disabled={!canImport} onClick={importDocument}>
+                      <DatabaseZap className="mr-2 h-4 w-4" />
+                      {importing ? 'Đang gửi...' : 'Gửi vào danh sách chờ duyệt'}
+                    </Button>
+                  </CardContent>
+                </Card>
+              )}
+            </div>
+          </form>
+        </TabsContent>
+      </Tabs>
     </div>
+      </div>
+    </AppShell>
   )
 }

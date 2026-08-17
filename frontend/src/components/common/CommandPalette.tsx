@@ -16,12 +16,6 @@ import {
 import {
   Book,
   Search,
-  Mic,
-  Bot,
-  Shuffle,
-  Settings,
-  FileText,
-  Wrench,
   MessageCircleQuestion,
   Plus,
   Sun,
@@ -32,23 +26,12 @@ import {
 import { useTranslation } from '@/lib/hooks/use-translation'
 import { useAuthStore } from '@/lib/stores/auth-store'
 import type { TFunction } from 'i18next'
+import { createActionsForRole, navigationForRole } from '@/lib/navigation/capabilities'
 
-const getNavigationItems = (t: TFunction, role: 'citizen' | 'officer' | 'admin') => [
-  { name: t('navigation.sources'), href: '/sources', icon: FileText, keywords: ['files', 'documents', 'upload'] },
-  ...(role === 'citizen' ? [] : [{ name: t('navigation.notebooks'), href: '/notebooks', icon: Book, keywords: ['notes', 'research', 'projects'] }]),
-  { name: t('navigation.askAndSearch'), href: '/search', icon: Search, keywords: ['find', 'query'] },
-  { name: t('navigation.podcasts'), href: '/podcasts', icon: Mic, keywords: ['audio', 'episodes', 'generate'] },
-  { name: t('navigation.models'), href: '/settings/api-keys', icon: Bot, keywords: ['ai', 'llm', 'providers', 'openai', 'anthropic'] },
-  { name: t('navigation.transformations'), href: '/transformations', icon: Shuffle, keywords: ['prompts', 'templates', 'actions'] },
-  { name: t('navigation.settings'), href: '/settings', icon: Settings, keywords: ['preferences', 'config', 'options'] },
-  { name: t('navigation.advanced'), href: '/advanced', icon: Wrench, keywords: ['debug', 'system', 'tools'] },
-]
+const getNavigationItems = (role: 'citizen' | 'officer' | 'admin') =>
+  navigationForRole(role).flatMap((group) => group.items)
 
-const getCreateItems = (t: TFunction) => [
-  { name: t('common.newSource'), action: 'source', icon: FileText },
-  { name: t('common.newNotebook'), action: 'notebook', icon: Book },
-  { name: t('common.newPodcast'), action: 'podcast', icon: Mic },
-]
+const getCreateItems = (role: 'citizen' | 'officer' | 'admin') => createActionsForRole(role)
 
 const getThemeItems = (t: TFunction) => [
   { name: t('common.light'), value: 'light' as const, icon: Sun, keywords: ['bright', 'day'] },
@@ -62,14 +45,14 @@ export function CommandPalette() {
   const role = useAuthStore((state) => state.role) || 'citizen'
   const canUseSearchTab = role === 'officer' || role === 'admin'
   const commandInputId = useId()
-  const navigationItems = useMemo(() => getNavigationItems(t, role), [t, role])
-  const createItems = useMemo(() => getCreateItems(t), [t])
+  const navigationItems = useMemo(() => getNavigationItems(role), [role])
+  const createItems = useMemo(() => getCreateItems(role), [role])
   const themeItems = useMemo(() => getThemeItems(t), [t])
   
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
   const router = useRouter()
-  const { openSourceDialog, openNotebookDialog, openPodcastDialog } = useCreateDialogs()
+  const { openSourceDialog, openNotebookDialog } = useCreateDialogs()
   const { setTheme } = useTheme()
   const { data: notebooks, isLoading: notebooksLoading } = useNotebooks(false, role !== 'citizen')
 
@@ -132,9 +115,8 @@ export function CommandPalette() {
     handleSelect(() => {
       if (action === 'source') openSourceDialog()
       else if (action === 'notebook') openNotebookDialog()
-      else if (action === 'podcast') openPodcastDialog()
     })
-  }, [handleSelect, openSourceDialog, openNotebookDialog, openPodcastDialog])
+  }, [handleSelect, openSourceDialog, openNotebookDialog])
 
   const handleTheme = useCallback((theme: 'light' | 'dark' | 'system') => {
     handleSelect(() => setTheme(theme))
@@ -244,18 +226,18 @@ export function CommandPalette() {
         </CommandGroup>}
 
         {/* Create */}
-        <CommandGroup heading={t('navigation.create')}>
+        {createItems.length > 0 && <CommandGroup heading={t('navigation.create')}>
           {createItems.map((item) => (
             <CommandItem
-              key={item.action}
+              key={item.id}
               value={`create ${item.name}`}
-              onSelect={() => handleCreate(item.action)}
+              onSelect={() => handleCreate(item.id)}
             >
               <Plus className="h-4 w-4" />
               <span>{item.name}</span>
             </CommandItem>
           ))}
-        </CommandGroup>
+        </CommandGroup>}
 
         {/* Theme */}
         <CommandGroup heading={t('navigation.theme')}>

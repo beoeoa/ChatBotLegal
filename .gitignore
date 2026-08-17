@@ -1,4 +1,5 @@
 .env
+.env.release
 prompts/patterns/user/
 /notebooks/
 data/
@@ -6,7 +7,9 @@ data/
 sqlite-db/
 surreal-data/
 docker.env
-notebook_data/
+notebook_data/*
+!notebook_data/feature016-regression-100.json
+!notebook_data/feature016-golden-v2.json
 # Python-specific
 *.py[cod]
 __pycache__/
@@ -118,13 +121,36 @@ logs/
 tmp/
 scratch/
 outputs/
-reports/
+reports/*
+!reports/feature016/
+!reports/feature016/**
+node_modules/
+.codex-tmp/
+.codex-review-tmp/
+agent-skills-temp/
+release-data.zip
 *.tmp
 tmp_*
 _b[0-9]_*
 api-*.log
 frontend-*.log
 legal-*.log
+
+# One-off investigation and patch artefacts must not live at the repository root.
+# Keep reusable automation in scripts/; keep disposable work under scratch/.
+/_b[0-9]_*
+/_tmp_*
+/tmp_*
+/temp_*
+/fix_*.py
+/fix_*.js
+/patch.py
+/patch_*.py
+/scan_*.py
+/scan_*.js
+/inspect_*.py
+/inspect_*.txt
+/history.txt
 
 # Database files
 *.db
@@ -140,7 +166,13 @@ claude-logs/
 docs/custom_gpt
 doc_exports/
 
-specs/
+specs/*
+!specs/016-legal-answer-trust-hardening/
+!specs/016-legal-answer-trust-hardening/**
+!specs/017-procedure-form-governance/
+!specs/017-procedure-form-governance/**
+!specs/018-production-release-readiness/
+!specs/018-production-release-readiness/**
 .claude
 .sisyphus
 
@@ -154,6 +186,8 @@ specs/
 
 # Local retrieval/runtime environments and generated indexes
 .venv-retrieval-cu126/
+.venv-kaggle-cli/
+.venv-eval-generation/
 legal-chatbot-datachroma_store/
 surreal_data_backup_*/
 external/
@@ -163,5 +197,17 @@ release-data/notebook_data/*
 release-data/forms/*
 release-data/postgres/*
 release-data/legal-corpus/*
+
+# Kaggle embedding credentials and generated transfer bundles
+.kaggle/
+**/kaggle.json
+**/.kaggle/access_token
+kaggle/retrieval-v2/input/
+kaggle/retrieval-v2/input-smoke/
+kaggle/retrieval-v2/input-provisional/
+kaggle/retrieval-v2/output/
+kaggle/retrieval-v2/output-smoke/
+kaggle/retrieval-v2/model-dataset/
+kaggle/retrieval-v2/kernel-bundle/
 
 .mcp.json

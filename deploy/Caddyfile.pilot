@@ -1,0 +1,26 @@
+{
+	admin off
+}
+
+{$PILOT_HOSTNAME:chatbotlegal.local} {
+	tls internal
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		Content-Security-Policy "default-src 'self'; img-src 'self' data: blob:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' wss:; font-src 'self' data:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'"
+		-Server
+	}
+
+	handle /api/* {
+		reverse_proxy app:5055
+	}
+
+	handle {
+		reverse_proxy app:8502
+	}
+}

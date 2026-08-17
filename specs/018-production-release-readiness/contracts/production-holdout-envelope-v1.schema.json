@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "production-holdout-envelope-v1.schema.json",
+  "title": "Public envelope for independently held Retrieval Golden holdout",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "dataset_version", "split", "case_count",
+    "domain_counts", "content_sha256", "case_ids_sha256",
+    "source_snapshot_sha256", "manifest_sha256", "custody_ref",
+    "quota_policy_sha256", "quota_attestation_sha256",
+    "cross_split_leakage_audit_sha256",
+    "official_source_approval_manifest_sha256",
+    "custodian_id", "sealed_at", "reviewer_approval_count",
+    "eligible_for_single_run", "consumed_at", "consumed_candidate_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "production-holdout-envelope-v1"},
+    "dataset_version": {"type": "string", "minLength": 1},
+    "split": {"const": "production-holdout"},
+    "case_count": {"const": 500},
+    "domain_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "Hộ tịch/chứng thực",
+        "Đất đai/xây dựng/môi trường",
+        "Cư trú/căn cước/an ninh",
+        "Khiếu nại/tố cáo/tiếp công dân/xử phạt",
+        "An sinh/y tế/giáo dục"
+      ],
+      "properties": {
+        "Hộ tịch/chứng thực": {"const": 100},
+        "Đất đai/xây dựng/môi trường": {"const": 100},
+        "Cư trú/căn cước/an ninh": {"const": 100},
+        "Khiếu nại/tố cáo/tiếp công dân/xử phạt": {"const": 100},
+        "An sinh/y tế/giáo dục": {"const": 100}
+      }
+    },
+    "content_sha256": {"$ref": "#/$defs/sha256"},
+    "case_ids_sha256": {"$ref": "#/$defs/sha256"},
+    "source_snapshot_sha256": {"$ref": "#/$defs/sha256"},
+    "manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "quota_policy_sha256": {"$ref": "#/$defs/sha256"},
+    "quota_attestation_sha256": {"$ref": "#/$defs/sha256"},
+    "cross_split_leakage_audit_sha256": {"$ref": "#/$defs/sha256"},
+    "official_source_approval_manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "custody_ref": {"type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9._:-]+$"},
+    "custodian_id": {"type": "string", "minLength": 1},
+    "sealed_at": {"type": "string", "format": "date-time"},
+    "reviewer_approval_count": {"const": 500},
+    "eligible_for_single_run": {"type": "boolean"},
+    "consumed_at": {"type": ["string", "null"], "format": "date-time"},
+    "consumed_candidate_sha256": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  }
+}

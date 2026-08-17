@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "retrieval-source-gap-review-v2.schema.json",
+  "title": "Retrieval source-gap legal-review queue",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema_version",
+    "source_inventory_scope",
+    "reference_count",
+    "law_count",
+    "classification_counts",
+    "input_checksums",
+    "legal_review_required",
+    "approved_for_import",
+    "records",
+    "mutation",
+    "manifest_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "legal-retrieval-source-gap-review-v2"},
+    "source_inventory_scope": {"const": 12236},
+    "reference_count": {"const": 46},
+    "law_count": {"type": "integer", "minimum": 1},
+    "classification_counts": {"type": "object"},
+    "input_checksums": {
+      "type": "object",
+      "required": ["gap_manifest", "reconciliation", "official_observations"],
+      "properties": {
+        "gap_manifest": {"$ref": "#/$defs/sha256"},
+        "reconciliation": {"$ref": "#/$defs/sha256"},
+        "official_observations": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "legal_review_required": {"const": true},
+    "approved_for_import": {"const": false},
+    "records": {
+      "type": "array",
+      "minItems": 46,
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "case_id",
+          "law_number",
+          "classification",
+          "official_source_url",
+          "source_observation_status",
+          "legal_review_required",
+          "approved_for_import"
+        ],
+        "properties": {
+          "case_id": {"type": "string", "minLength": 1},
+          "law_number": {"type": "string", "minLength": 1},
+          "official_source_url": {"type": ["string", "null"]},
+          "official_source_checksum": {"type": ["string", "null"]},
+          "legal_review_required": {"const": true},
+          "approved_for_import": {"const": false}
+        }
+      }
+    },
+    "mutation": {
+      "type": "object",
+      "required": ["database_mutated", "metadata_mutated", "vectors_mutated", "active_pointer_changed"],
+      "properties": {
+        "database_mutated": {"const": false},
+        "metadata_mutated": {"const": false},
+        "vectors_mutated": {"const": false},
+        "active_pointer_changed": {"const": false}
+      }
+    },
+    "manifest_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  }
+}

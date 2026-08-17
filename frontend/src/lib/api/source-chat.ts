@@ -1,4 +1,5 @@
 import apiClient from './client'
+import { sessionSecurityHeaders } from './session-security'
 import {
   SourceChatSession,
   SourceChatSessionWithMessages,
@@ -72,8 +73,10 @@ export const sourceChatApi = {
     // Use fetch with ReadableStream for SSE
     return fetch(url, {
       method: 'POST',
+      credentials: 'include',
       headers: {
         'Content-Type': 'application/json',
+        ...sessionSecurityHeaders('POST'),
         ...(token && { 'Authorization': `Bearer ${token}` }),
         'X-User-Role': currentRole
       },

@@ -1,0 +1,30 @@
+groups:
+  - name: feature018-release
+    rules:
+      - alert: Feature018ServiceUnavailable
+        expr: probe_success{job="feature018-blackbox"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          privacy: content_free
+        annotations:
+          summary: "Một thành phần Feature 018 không sẵn sàng"
+          runbook: "deploy/runbooks/incident-and-rollback.md"
+      - alert: Feature018ProbeSlow
+        expr: probe_duration_seconds{job="feature018-blackbox"} > 5
+        for: 5m
+        labels:
+          severity: warning
+          privacy: content_free
+        annotations:
+          summary: "Kiểm tra sẵn sàng vượt 5 giây"
+          runbook: "deploy/runbooks/incident-and-rollback.md"
+      - alert: Feature018MonitoringTargetMissing
+        expr: count(probe_success{job="feature018-blackbox"}) < 4
+        for: 2m
+        labels:
+          severity: critical
+          privacy: content_free
+        annotations:
+          summary: "Thiếu mục tiêu giám sát bắt buộc"
+          runbook: "deploy/runbooks/incident-and-rollback.md"

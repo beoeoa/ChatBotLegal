@@ -16,11 +16,11 @@ import { Input } from '@/components/ui/input'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Badge } from '@/components/ui/badge'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { searchApi } from '@/lib/api/search'
 import { sourcesApi } from '@/lib/api/sources'
 import { useSources, useAddSourcesToNotebook } from '@/lib/hooks/use-sources'
 import { SourceListResponse } from '@/lib/types/api'
 import { useTranslation } from '@/lib/hooks/use-translation'
+import { legalDocumentsApi, type LegalDocumentListItem } from '@/lib/api/legal-documents'
 
 interface AddExistingSourceDialogProps {
   open: boolean
@@ -39,6 +39,7 @@ export function AddExistingSourceDialog({
   const [searchQuery, setSearchQuery] = useState('')
   const [debouncedSearchQuery] = useDebounce(searchQuery, 300)
   const [selectedSourceIds, setSelectedSourceIds] = useState<string[]>([])
+  const [selectedLegalDocs, setSelectedLegalDocs] = useState<Record<string, LegalDocumentListItem>>({})
   const [allSources, setAllSources] = useState<SourceListResponse[]>([])
   const [filteredSources, setFilteredSources] = useState<SourceListResponse[]>([])
   const [isSearching, setIsSearching] = useState(false)
@@ -55,14 +56,12 @@ export function AddExistingSourceDialog({
   const loadAllSources = useCallback(async () => {
     try {
       setIsSearching(true)
-      // Use sources API directly to get all sources (max 100 per API limit)
       const sources = await sourcesApi.list({
         limit: 100,
         offset: 0,
         sort_by: 'created',
         sort_order: 'desc',
       })
-
       setAllSources(sources)
       setFilteredSources(sources)
     } catch (error) {
@@ -73,42 +72,41 @@ export function AddExistingSourceDialog({
   }, [])
 
   const performSearch = useCallback(async () => {
-    if (debouncedSearchQuery.trim().length < 2) {
-      // Query too short or empty - show all sources
-      setFilteredSources(allSources)
-      setIsSearching(false)
-      return
-    }
-
+    const norm = debouncedSearchQuery.trim().toLowerCase()
+    setIsSearching(true)
     try {
-      setIsSearching(true)
-      const response = await searchApi.search({
-        query: debouncedSearchQuery,
-        type: 'text',
-        search_sources: true,
-        search_notes: false,
-        limit: 100,
-        minimum_score: 0.01,
+      const localMatches = allSources.filter((source) => {
+        const title = (source.title || '').toLowerCase()
+        const scope = (source.source_scope || '').toLowerCase()
+        const topics = (source.topics || []).join(' ').toLowerCase()
+        return !norm || title.includes(norm) || scope.includes(norm) || topics.includes(norm)
       })
 
-      // Since we set search_sources=true and search_notes=false,
-      // the API only returns sources, no need to filter
-      const sources = response.results.map(r => ({
-        id: r.parent_id,
-        title: r.title || 'Untitled',
-        topics: [],
-        asset: null,
-        embedded: false,
-        embedded_chunks: 0,
-        insights_count: 0,
-        created: r.created,
-        updated: r.updated,
-      })) as SourceListResponse[]
+      let legalDocsAsSources: SourceListResponse[] = []
+      if (norm.length >= 1) {
+        const res = await legalDocumentsApi.list({ q: norm, limit: 20 }).catch(() => ({ items: [] }))
+        const docsMap: Record<string, LegalDocumentListItem> = {}
+        legalDocsAsSources = (res.items || []).map((doc) => {
+          const fakeId = `legal_doc_${doc.doc_id}`
+          docsMap[fakeId] = doc
+          return {
+            id: fakeId,
+            title: `[Văn bản] ${doc.law_number ? `${doc.law_number} - ` : ''}${doc.document_title || ''}`,
+            topics: [doc.domain || doc.domain_name || 'phap_luat'],
+            asset: doc.source_url ? { url: doc.source_url } : null,
+            embedded: true,
+            embedded_chunks: doc.article_count || 1,
+            insights_count: 0,
+            created: doc.effective_date || new Date().toISOString(),
+            updated: doc.effective_date || new Date().toISOString(),
+          }
+        }) as unknown as SourceListResponse[]
 
-      setFilteredSources(sources)
-    } catch (error) {
-      console.error('Error searching sources:', error)
-      // On error, fall back to showing all sources
+        setSelectedLegalDocs((prev) => ({ ...prev, ...docsMap }))
+      }
+
+      setFilteredSources([...localMatches, ...legalDocsAsSources])
+    } catch {
       setFilteredSources(allSources)
     } finally {
       setIsSearching(false)
@@ -118,20 +116,14 @@ export function AddExistingSourceDialog({
   // Load all sources initially
   useEffect(() => {
     if (open) {
-      loadAllSources()
+      void loadAllSources()
     }
   }, [open, loadAllSources])
 
   // Filter sources when search query changes
   useEffect(() => {
-    if (!debouncedSearchQuery) {
-      setFilteredSources(allSources)
-      setIsSearching(false)
-      return
-    }
-
-    performSearch()
-  }, [debouncedSearchQuery, allSources, performSearch])
+    void performSearch()
+  }, [debouncedSearchQuery, performSearch])
 
   const handleToggleSource = (sourceId: string) => {
     setSelectedSourceIds(prev =>
@@ -145,10 +137,42 @@ export function AddExistingSourceDialog({
     if (selectedSourceIds.length === 0) return
 
     try {
-      await addSources.mutateAsync({
-        notebookId,
-        sourceIds: selectedSourceIds,
-      })
+      const normalIds = selectedSourceIds.filter((id) => !id.startsWith('legal_doc_'))
+      const legalDocIds = selectedSourceIds.filter((id) => id.startsWith('legal_doc_'))
+
+      if (normalIds.length > 0) {
+        await addSources.mutateAsync({
+          notebookId,
+          sourceIds: normalIds,
+        })
+      }
+
+      for (const legalId of legalDocIds) {
+        const docData = selectedLegalDocs[legalId]
+        if (docData) {
+          if (docData.source_url) {
+            await sourcesApi.create({
+              type: 'link',
+              title: docData.document_title || docData.law_number || `Văn bản ${docData.doc_id}`,
+              url: docData.source_url,
+              notebook_id: notebookId,
+              notebooks: [notebookId],
+              embed: false,
+              async_processing: false,
+            })
+          } else {
+            await sourcesApi.create({
+              type: 'text',
+              title: docData.document_title || docData.law_number || `Văn bản ${docData.doc_id}`,
+              content: `Văn bản pháp luật chính thức: ${docData.document_title || docData.law_number}. Số hiệu: ${docData.law_number || 'N/A'}. Cơ quan ban hành: ${docData.issuing_agency || 'N/A'}. Hiệu lực từ: ${docData.effective_date || 'chưa cập nhật'}.`,
+              notebook_id: notebookId,
+              notebooks: [notebookId],
+              embed: false,
+              async_processing: false,
+            })
+          }
+        }
+      }
 
       // Reset state
       setSelectedSourceIds([])
@@ -156,7 +180,6 @@ export function AddExistingSourceDialog({
       onOpenChange(false)
       onSuccess?.()
     } catch (error) {
-      // Error handled by the hook's onError
       console.error('Error adding sources:', error)
     }
   }
@@ -182,9 +205,9 @@ export function AddExistingSourceDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl sm:max-w-2xl max-h-[80vh] overflow-hidden flex flex-col">
+      <DialogContent className="max-w-4xl sm:max-w-4xl w-full max-h-[85vh] overflow-hidden flex flex-col">
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
+          <DialogTitle className="flex items-center gap-2 text-lg">
             <Link2 className="h-5 w-5" />
             {t('sources.addExistingTitle')}
           </DialogTitle>
@@ -209,7 +232,7 @@ export function AddExistingSourceDialog({
           </div>
 
           {/* Source List */}
-          <ScrollArea className="h-[400px] border rounded-md">
+          <ScrollArea className="h-[460px] border rounded-md">
             {isSearching && filteredSources.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-[200px] text-muted-foreground">
                 <LoaderIcon className="h-12 w-12 mb-2 animate-spin" />
@@ -229,22 +252,26 @@ export function AddExistingSourceDialog({
                   return (
                     <div
                       key={source.id}
-                      className={`flex items-start gap-3 p-3 rounded-lg border transition-colors min-w-0 ${
-                        isSelected ? 'bg-accent border-accent-foreground/20' : 'hover:bg-accent/50'
+                      onClick={() => !isAlreadyLinked && handleToggleSource(source.id)}
+                      className={`flex items-start gap-3 p-3 rounded-lg border transition-colors min-w-0 cursor-pointer ${
+                        isAlreadyLinked
+                          ? 'opacity-60 bg-muted/40 cursor-not-allowed'
+                          : isSelected
+                          ? 'bg-accent/80 border-primary/40 ring-1 ring-primary/20'
+                          : 'hover:bg-accent/50'
                       }`}
                     >
                       <Checkbox
                         checked={isSelected}
-                        onCheckedChange={() => handleToggleSource(source.id)}
                         disabled={isAlreadyLinked}
-                        className="mt-1"
+                        className="mt-1 pointer-events-none"
                       />
                       <div className="flex-1 min-w-0">
                         <div className="flex items-start gap-2 mb-1">
                           <div className="shrink-0 mt-0.5">
                             {getSourceIcon(source)}
                           </div>
-                          <h4 className="font-medium text-sm break-words line-clamp-2 flex-1 min-w-0">
+                          <h4 className="font-medium text-sm text-foreground flex-1 min-w-0 leading-snug">
                             {source.title}
                           </h4>
                           {isAlreadyLinked && (
@@ -253,7 +280,7 @@ export function AddExistingSourceDialog({
                             </Badge>
                           )}
                         </div>
-                        <p className="text-xs text-muted-foreground truncate">
+                        <p className="text-xs text-muted-foreground">
                           {t('sources.added').replace('{date}', formatDate(source.created))}
                         </p>
                       </div>

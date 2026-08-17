@@ -13,7 +13,7 @@ import {
   Plus,
   RefreshCcw,
   Search,
-  Trash2,
+  Sparkles,
   X,
 } from 'lucide-react'
 import Link from 'next/link'
@@ -39,23 +39,27 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
+import { apiClient } from '@/lib/api/client'
 import { useAuthStore } from '@/lib/stores/auth-store'
+import { AppShell } from '@/components/layout/AppShell'
 import {
   DOMAIN_OPTIONS,
   REVIEW_STATUS_OPTIONS,
   faqAdminApi,
   type FaqCreatePayload,
   type FaqItem,
+  type FaqRelease,
   type FaqUpdatePayload,
 } from '@/lib/api/faq-admin'
+import { legalImportApi, type FormProcedureCandidateV18 } from '@/lib/api/legal-import'
 
 /* ─── helpers ─── */
 
 function statusBadge(status: string) {
   const variant =
-    status === 'approved'
+    status === 'released'
       ? 'default'
-      : status === 'rejected'
+      : status === 'dismissed' || status === 'blocked'
         ? 'destructive'
         : 'secondary'
   return <Badge variant={variant}>{REVIEW_STATUS_OPTIONS[status] || status}</Badge>
@@ -157,10 +161,9 @@ const EMPTY_FAQ: FaqCreatePayload = {
   guidance_label: 'Hướng dẫn nghiệp vụ đã duyệt; cần đối chiếu văn bản hiện hành khi áp dụng.',
   requires_forms: false,
   steps: [],
-  form_ids: [],
   domain: 'hanh_chinh_cong',
+  confirmed_procedure_id: '',
   ward_scope: 'Le Chan',
-  review_status: 'draft',
 }
 
 function FaqFormDialog({
@@ -176,6 +179,9 @@ function FaqFormDialog({
 }) {
   const [form, setForm] = useState<FaqCreatePayload>(EMPTY_FAQ)
   const [saving, setSaving] = useState(false)
+  const [procedureQuery, setProcedureQuery] = useState('')
+  const [procedureCandidates, setProcedureCandidates] = useState<FormProcedureCandidateV18[]>([])
+  const [searchingProcedure, setSearchingProcedure] = useState(false)
   const isEdit = Boolean(editItem)
 
   useEffect(() => {
@@ -188,10 +194,9 @@ function FaqFormDialog({
         guidance_label: editItem.guidance_label || '',
         requires_forms: editItem.requires_forms,
         steps: editItem.steps || [],
-        form_ids: editItem.form_ids || [],
         domain: editItem.domain,
+        confirmed_procedure_id: editItem.confirmed_procedure_id || '',
         ward_scope: editItem.ward_scope || '',
-        review_status: editItem.review_status as 'draft' | 'approved' | 'rejected',
       })
     } else {
       setForm(EMPTY_FAQ)
@@ -200,6 +205,22 @@ function FaqFormDialog({
 
   const update = <K extends keyof FaqCreatePayload>(key: K, value: FaqCreatePayload[K]) =>
     setForm((prev) => ({ ...prev, [key]: value }))
+
+  const searchProcedures = async () => {
+    setSearchingProcedure(true)
+    try {
+      const result = await legalImportApi.formProcedureCandidates({
+        q: procedureQuery.trim() || undefined,
+        domain: form.domain === 'hanh_chinh_cong' ? undefined : form.domain,
+        limit: 20,
+      })
+      setProcedureCandidates(result.items)
+    } catch {
+      toast.error('Không tải được danh sách thủ tục trong phạm vi hiện hành.')
+    } finally {
+      setSearchingProcedure(false)
+    }
+  }
 
   const handleSave = async () => {
     if (!form.question.trim() || form.question.length < 5) {
@@ -210,15 +231,19 @@ function FaqFormDialog({
       toast.error('Câu trả lời phải có ít nhất 10 ký tự.')
       return
     }
+    if (!form.confirmed_procedure_id) {
+      toast.error('Hãy tìm và xác nhận đúng thủ tục trước khi lưu FAQ.')
+      return
+    }
     setSaving(true)
     try {
       if (isEdit && editItem) {
         const updatePayload: FaqUpdatePayload = { ...form }
         await faqAdminApi.update(editItem.id, updatePayload)
-        toast.success('Đã cập nhật FAQ thành công.')
+        toast.success('Đã tạo revision mới; nội dung công khai chưa thay đổi.')
       } else {
         await faqAdminApi.create(form)
-        toast.success('Đã tạo FAQ mới thành công.')
+        toast.success('Đã tạo FAQ chờ xác nhận; nội dung chưa công khai.')
       }
       onSaved()
       onClose()
@@ -238,13 +263,13 @@ function FaqFormDialog({
             {isEdit ? 'Sửa câu hỏi thường gặp' : 'Thêm câu hỏi thường gặp mới'}
           </DialogTitle>
           <DialogDescription>
-            {isEdit ? 'Chỉnh sửa nội dung FAQ. Thay đổi trạng thái sang "Đã duyệt" để hiển thị cho người dân.' : 'Tạo FAQ mới. Mặc định trạng thái "Nháp", admin phải duyệt để công khai.'}
+            {isEdit ? 'Mỗi thay đổi tạo một revision mới và không sửa bản đang công khai.' : 'FAQ mới phải được xác nhận, kiểm tra release và phát hành riêng.'}
           </DialogDescription>
         </DialogHeader>
 
         <div className="grid gap-5 py-2">
-          {/* Row: Domain + Status + Ward */}
-          <div className="grid gap-4 sm:grid-cols-3">
+          {/* Row: Domain + Ward */}
+          <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-2">
               <Label htmlFor="faq-domain">Lĩnh vực</Label>
               <Select value={form.domain} onValueChange={(v) => update('domain', v)}>
@@ -257,20 +282,25 @@ function FaqFormDialog({
               </Select>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="faq-status">Trạng thái</Label>
-              <Select value={form.review_status || 'draft'} onValueChange={(v) => update('review_status', v as 'draft' | 'approved' | 'rejected')}>
-                <SelectTrigger id="faq-status"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="draft">Nháp</SelectItem>
-                  <SelectItem value="approved">Đã duyệt</SelectItem>
-                  <SelectItem value="rejected">Từ chối</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-2">
               <Label htmlFor="faq-ward">Phường / xã</Label>
               <Input id="faq-ward" value={form.ward_scope || ''} onChange={(e) => update('ward_scope', e.target.value)} placeholder="VD: Le Chan" />
             </div>
+          </div>
+
+          <div className="space-y-3 rounded-md border bg-muted/30 p-3">
+            <div>
+              <Label htmlFor="faq-procedure-search">Thủ tục được xác nhận</Label>
+              <p className="text-xs text-muted-foreground">Tìm theo tên hoặc mã; biểu mẫu sẽ tự lấy từ release Feature 017 của thủ tục này.</p>
+            </div>
+            <div className="flex gap-2">
+              <Input id="faq-procedure-search" value={procedureQuery} onChange={event => setProcedureQuery(event.target.value)} placeholder="Tên hoặc mã thủ tục" />
+              <Button type="button" variant="outline" onClick={() => void searchProcedures()} disabled={searchingProcedure}>Tìm thủ tục</Button>
+            </div>
+            <select aria-label="Kết quả thủ tục" className="h-10 w-full rounded-md border bg-background px-3 text-sm" value={form.confirmed_procedure_id} onChange={event => update('confirmed_procedure_id', event.target.value)}>
+              <option value="">Chọn đúng thủ tục</option>
+              {editItem?.confirmed_procedure_id && !procedureCandidates.some(item => item.procedure_id === editItem.confirmed_procedure_id) && <option value={editItem.confirmed_procedure_id}>Thủ tục hiện tại · {editItem.confirmed_procedure_id}</option>}
+              {procedureCandidates.map(item => <option key={item.procedure_id} value={item.procedure_id}>{item.name} · {item.procedure_code} · {domainLabel(item.domain)}</option>)}
+            </select>
           </div>
 
           {/* Question */}
@@ -317,16 +347,16 @@ function FaqFormDialog({
               />
               <Label htmlFor="faq-requires-forms">Yêu cầu biểu mẫu</Label>
             </div>
+            {form.requires_forms && (
+              <div className="text-right">
+                <Link href="/legal-import?tab=forms" target="_blank" className="text-xs text-blue-600 hover:underline inline-flex items-center gap-1">
+                  Thủ tục thiếu biểu mẫu? Thêm biểu mẫu mới <FileText className="h-3 w-3" />
+                </Link>
+              </div>
+            )}
           </div>
 
-          {form.requires_forms && (
-            <EditableStringList
-              label="ID biểu mẫu liên quan"
-              items={form.form_ids || []}
-              onChange={(items) => update('form_ids', items)}
-              placeholder="Nhập ID biểu mẫu từ kho biểu mẫu"
-            />
-          )}
+          {form.requires_forms && <p className="rounded-md bg-muted p-3 text-sm">Không nhập mã biểu mẫu. Khi phát hành, hệ thống lấy đúng biểu mẫu đã phát hành, còn hiệu lực và hợp lệ checksum từ thủ tục đã xác nhận.</p>}
 
           {/* Guidance label */}
           <div className="space-y-2">
@@ -339,61 +369,6 @@ function FaqFormDialog({
           <Button variant="outline" onClick={onClose} disabled={saving}>Hủy</Button>
           <Button onClick={() => void handleSave()} disabled={saving}>
             {saving ? 'Đang lưu...' : isEdit ? 'Cập nhật' : 'Tạo FAQ'}
-          </Button>
-        </div>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-/* ─── delete confirmation ─── */
-
-function DeleteDialog({
-  open,
-  item,
-  onClose,
-  onDeleted,
-}: {
-  open: boolean
-  item: FaqItem | null
-  onClose: () => void
-  onDeleted: () => void
-}) {
-  const [deleting, setDeleting] = useState(false)
-  const handleDelete = async () => {
-    if (!item) return
-    setDeleting(true)
-    try {
-      await faqAdminApi.delete(item.id)
-      toast.success('Đã xóa FAQ thành công.')
-      onDeleted()
-      onClose()
-    } catch (error) {
-      toast.error(apiErrorDetail(error, 'Không thể xóa FAQ.'))
-    } finally {
-      setDeleting(false)
-    }
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
-      <DialogContent className="max-w-md">
-        <DialogHeader>
-          <DialogTitle className="text-destructive">Xóa câu hỏi thường gặp</DialogTitle>
-          <DialogDescription>
-            Bạn có chắc muốn xóa FAQ này? Hành động không thể hoàn tác.
-          </DialogDescription>
-        </DialogHeader>
-        {item && (
-          <div className="rounded-md border bg-muted/30 p-3 text-sm">
-            <p className="line-clamp-2 font-medium">{item.question}</p>
-            <p className="mt-1 text-xs text-muted-foreground">{domainLabel(item.domain)} · {REVIEW_STATUS_OPTIONS[item.review_status] || item.review_status}</p>
-          </div>
-        )}
-        <div className="flex justify-end gap-3">
-          <Button variant="outline" onClick={onClose} disabled={deleting}>Hủy</Button>
-          <Button variant="destructive" onClick={() => void handleDelete()} disabled={deleting}>
-            {deleting ? 'Đang xóa...' : 'Xóa'}
           </Button>
         </div>
       </DialogContent>
@@ -417,8 +392,23 @@ export default function FaqManagementPage() {
   // Dialogs
   const [formOpen, setFormOpen] = useState(false)
   const [editItem, setEditItem] = useState<FaqItem | null>(null)
-  const [deleteOpen, setDeleteOpen] = useState(false)
-  const [deleteItem, setDeleteItem] = useState<FaqItem | null>(null)
+  const [releaseSelection, setReleaseSelection] = useState<string[]>([])
+  const [release, setRelease] = useState<FaqRelease | null>(null)
+
+  const [suggestions, setSuggestions] = useState<Array<{ id: string; question: string; domain: string; suggested_answer: string }>>([])
+  const [suggestionsLoading, setSuggestionsLoading] = useState(false)
+
+  const loadSuggestions = useCallback(async () => {
+    setSuggestionsLoading(true)
+    try {
+      const response = await apiClient.get<{ items: Array<{ id: string; question: string; domain: string; suggested_answer: string }> }>('/faq/suggestions')
+      setSuggestions(response.data.items || [])
+    } catch {
+      setSuggestions([])
+    } finally {
+      setSuggestionsLoading(false)
+    }
+  }, [])
 
   const loadFaqs = useCallback(async () => {
     setLoading(true)
@@ -438,73 +428,103 @@ export default function FaqManagementPage() {
   }, [filterDomain, filterStatus, searchQuery])
 
   useEffect(() => {
-    if (role === 'admin') void loadFaqs()
-  }, [loadFaqs, role])
+    if (role === 'admin') {
+      void loadFaqs()
+      void loadSuggestions()
+    }
+  }, [loadFaqs, loadSuggestions, role])
 
-  // Quick status change
-  const quickStatusChange = async (item: FaqItem, newStatus: 'approved' | 'rejected' | 'draft') => {
+  const confirmRevision = async (item: FaqItem) => {
     try {
-      await faqAdminApi.update(item.id, { review_status: newStatus })
-      toast.success(`Đã ${newStatus === 'approved' ? 'duyệt' : newStatus === 'rejected' ? 'từ chối' : 'chuyển nháp'} FAQ.`)
+      await faqAdminApi.confirm(item.revision_id)
+      toast.success('Đã xác nhận nội dung và thủ tục. FAQ vẫn chưa công khai cho đến khi phát hành.')
       void loadFaqs()
     } catch (error) {
-      toast.error(apiErrorDetail(error, 'Không thể thay đổi trạng thái.'))
+      toast.error(apiErrorDetail(error, 'Không thể xác nhận revision FAQ.'))
     }
   }
 
-  const handleSeed = async () => {
+  const buildRelease = async () => {
+    if (!releaseSelection.length) return
     try {
-      const result = await faqAdminApi.seed()
-      toast.success(`Đã nạp ${result.imported} FAQ mới. Tổng: ${result.total}.`)
+      setRelease(await faqAdminApi.previewRelease(releaseSelection))
+      toast.success('Đã tạo bản phát hành thử. FAQ công khai chưa thay đổi.')
       void loadFaqs()
     } catch (error) {
-      toast.error(apiErrorDetail(error, 'Không thể nạp dữ liệu mẫu.'))
+      toast.error(apiErrorDetail(error, 'Không thể tạo bản phát hành thử.'))
+    }
+  }
+
+  const validateRelease = async () => {
+    if (!release) return
+    try {
+      const next = await faqAdminApi.validateRelease(release.id)
+      setRelease(next)
+      if (next.status === 'validated') toast.success('Release Gate đã đạt; vẫn cần thao tác Phát hành riêng.')
+      else toast.error(`Release Gate chưa đạt: ${(next.manifest.gate_report?.errors || []).join(', ')}`)
+    } catch (error) {
+      toast.error(apiErrorDetail(error, 'Không thể kiểm tra bản phát hành FAQ.'))
+    }
+  }
+
+  const activateRelease = async () => {
+    if (!release || release.status !== 'validated') return
+    if (!window.confirm('Phát hành FAQ đã xác nhận cho người dân? Biểu mẫu sẽ lấy từ release Feature 017 đang được khóa.')) return
+    try {
+      await faqAdminApi.activateRelease(release.id)
+      toast.success('Đã phát hành FAQ và biểu mẫu dẫn xuất từ release Feature 017.')
+      setRelease(null); setReleaseSelection([]); void loadFaqs()
+    } catch (error) {
+      toast.error(apiErrorDetail(error, 'Không thể phát hành; dữ liệu công khai không bị thay đổi.'))
     }
   }
 
   // Stats
   const stats = useMemo(() => {
-    const approved = faqs.filter((f) => f.review_status === 'approved').length
-    const draft = faqs.filter((f) => f.review_status === 'draft').length
-    const rejected = faqs.filter((f) => f.review_status === 'rejected').length
-    return { approved, draft, rejected }
+    const released = faqs.filter((f) => f.public_state === 'released').length
+    const confirmed = faqs.filter((f) => f.public_state === 'confirmed').length
+    const pending = faqs.filter((f) => ['pending', 'needs_review'].includes(f.public_state)).length
+    return { released, confirmed, pending }
   }, [faqs])
 
   if (role !== 'admin') {
     return (
-      <main className="p-8">
-        <Card>
-          <CardContent className="flex items-center gap-3 p-6 text-destructive">
-            <X className="h-5 w-5" />
-            Chỉ Admin có quyền quản lý Câu hỏi thường gặp.
-          </CardContent>
-        </Card>
-      </main>
+      <AppShell>
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 pb-12 md:p-6 md:pb-16">
+          <main className="mx-auto max-w-xl">
+            <Card>
+              <CardContent className="flex items-center gap-3 p-6 text-destructive">
+                <X className="h-5 w-5" />
+                Chỉ Admin có quyền quản lý Câu hỏi thường gặp.
+              </CardContent>
+            </Card>
+          </main>
+        </div>
+      </AppShell>
     )
   }
 
   return (
-    <main className="mx-auto w-full max-w-7xl space-y-6 p-4 pb-16 md:p-8">
-      {/* Header */}
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h1 className="flex items-center gap-3 text-2xl font-bold tracking-tight">
-            <MessageCircleQuestion className="h-7 w-7 text-primary" />
-            Quản lý Câu hỏi thường gặp
-          </h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Thêm, sửa, xóa và duyệt câu hỏi thường gặp. FAQ đã duyệt sẽ hiển thị cho người dân tại trang Thủ tục.
-          </p>
-        </div>
-        <div className="flex gap-2 self-start sm:self-auto">
-          <Button variant="outline" asChild>
-            <Link href="/procedures"><FileText className="mr-2 h-4 w-4" />Xem trang công khai</Link>
-          </Button>
-          <Button variant="outline" asChild>
-            <Link href="/notebooks"><ArrowLeft className="mr-2 h-4 w-4" />Trang chính</Link>
-          </Button>
-        </div>
-      </div>
+    <AppShell>
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 pb-12 md:p-6 md:pb-16">
+        <main className="mx-auto w-full max-w-7xl space-y-6">
+          {/* Header */}
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h1 className="flex items-center gap-3 text-xl md:text-2xl font-bold tracking-tight">
+                <MessageCircleQuestion className="h-7 w-7 text-primary" />
+                Quản lý Câu hỏi thường gặp
+              </h1>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Tạo revision, xác nhận thủ tục, chạy Release Gate rồi phát hành. Chỉ bản đã phát hành mới hiển thị cho người dân.
+              </p>
+            </div>
+            <div className="flex gap-2 self-start sm:self-auto">
+              <Button variant="outline" asChild>
+                <Link href="/procedures"><FileText className="mr-2 h-4 w-4" />Xem trang công khai</Link>
+              </Button>
+            </div>
+          </div>
 
       {/* Stats */}
       <div className="grid gap-3 sm:grid-cols-4">
@@ -525,8 +545,8 @@ export default function FaqManagementPage() {
               <Check className="h-5 w-5" />
             </div>
             <div>
-              <p className="text-xs text-muted-foreground">Đã duyệt</p>
-              <p className="text-2xl font-semibold">{stats.approved}</p>
+              <p className="text-xs text-muted-foreground">Đã phát hành</p>
+              <p className="text-2xl font-semibold">{stats.released}</p>
             </div>
           </CardContent>
         </Card>
@@ -536,8 +556,8 @@ export default function FaqManagementPage() {
               <Edit3 className="h-5 w-5" />
             </div>
             <div>
-              <p className="text-xs text-muted-foreground">Nháp</p>
-              <p className="text-2xl font-semibold">{stats.draft}</p>
+              <p className="text-xs text-muted-foreground">Đã xác nhận · chờ phát hành</p>
+              <p className="text-2xl font-semibold">{stats.confirmed}</p>
             </div>
           </CardContent>
         </Card>
@@ -547,8 +567,8 @@ export default function FaqManagementPage() {
               <X className="h-5 w-5" />
             </div>
             <div>
-              <p className="text-xs text-muted-foreground">Từ chối</p>
-              <p className="text-2xl font-semibold">{stats.rejected}</p>
+              <p className="text-xs text-muted-foreground">Chờ xác nhận</p>
+              <p className="text-2xl font-semibold">{stats.pending}</p>
             </div>
           </CardContent>
         </Card>
@@ -579,9 +599,10 @@ export default function FaqManagementPage() {
             <SelectTrigger className="w-[160px]"><SelectValue placeholder="Trạng thái" /></SelectTrigger>
             <SelectContent>
               <SelectItem value="all">Tất cả</SelectItem>
-              <SelectItem value="approved">Đã duyệt</SelectItem>
-              <SelectItem value="draft">Nháp</SelectItem>
-              <SelectItem value="rejected">Từ chối</SelectItem>
+              <SelectItem value="released">Đã phát hành</SelectItem>
+              <SelectItem value="confirmed">Đã xác nhận · chưa công khai</SelectItem>
+              <SelectItem value="pending">Chờ xác nhận</SelectItem>
+              <SelectItem value="blocked">Đang bị chặn</SelectItem>
             </SelectContent>
           </Select>
           <Button variant="outline" onClick={() => void loadFaqs()} disabled={loading}>
@@ -592,17 +613,77 @@ export default function FaqManagementPage() {
             <Plus className="mr-2 h-4 w-4" />
             Thêm FAQ
           </Button>
-          <Button variant="ghost" size="sm" onClick={() => void handleSeed()}>
-            Nạp dữ liệu mẫu
-          </Button>
         </CardContent>
       </Card>
+
+      <Card className="border-primary/30">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">Phát hành FAQ đã xác nhận</CardTitle>
+          <CardDescription>Ba bước riêng: tạo bản thử → kiểm tra FAQ và form release → phát hành. Xác nhận không tự công khai.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <p className="text-sm">Đã chọn {releaseSelection.length} revision ở trạng thái “Đã xác nhận”.</p>
+          <div className="flex flex-wrap gap-2">
+            <Button onClick={() => void buildRelease()} disabled={!releaseSelection.length}>Tạo bản phát hành thử</Button>
+            {release && <Button variant="outline" onClick={() => void validateRelease()} disabled={release.status !== 'candidate'}>Chạy Release Gate</Button>}
+            {release && <Button onClick={() => void activateRelease()} disabled={release.status !== 'validated'}>Phát hành cho người dân</Button>}
+          </div>
+          {release && <div className="rounded-md bg-muted p-3 text-sm"><p>Bản {release.version} · {release.status} · form release {release.form_release_id}</p>{release.manifest.gate_report && <p>{release.manifest.gate_report.passed ? 'Đã đạt toàn bộ cổng kiểm tra.' : `Chưa đạt: ${release.manifest.gate_report.errors.join(', ')}`}</p>}</div>}
+        </CardContent>
+      </Card>
+
+      {/* Suggestions Card */}
+      {suggestionsLoading && (
+        <Card className="border-amber-200 bg-amber-50/40">
+          <CardContent className="py-5 text-sm text-amber-900">
+            Đang tổng hợp gợi ý FAQ từ các câu hỏi đã được phép sử dụng.
+          </CardContent>
+        </Card>
+      )}
+      {suggestions.length > 0 && (
+        <Card className="border-amber-200 bg-amber-50/40">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base flex items-center gap-2 text-amber-900">
+              <Sparkles className="h-4 w-4 text-amber-600" />
+              Gợi ý FAQ tự động từ Chat Logs công dân ({suggestions.length})
+            </CardTitle>
+            <CardDescription className="text-amber-800/80">
+              Hệ thống tự động trích xuất các thắc mắc phổ biến từ phiên chat hỗ trợ trực tuyến và tra cứu công dân.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {suggestions.map((sug) => (
+              <div key={sug.id} className="flex flex-wrap items-center justify-between gap-2 rounded border border-amber-200 bg-background p-3 text-xs">
+                <div className="space-y-0.5">
+                  <span className="font-medium text-foreground">{sug.question}</span>
+                  <div className="flex gap-2 text-muted-foreground">
+                    <Badge variant="outline" className="text-[10px]">{domainLabel(sug.domain)}</Badge>
+                    <span>ID: {sug.id}</span>
+                  </div>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="gap-1 text-xs text-amber-900 hover:bg-amber-100"
+                  onClick={() => {
+                    setEditItem(null)
+                    setFormOpen(true)
+                  }}
+                >
+                  <Plus className="h-3 w-3" />
+                  Thêm vào kho FAQ
+                </Button>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      )}
 
       {/* FAQ List */}
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-base">Danh sách câu hỏi ({faqs.length})</CardTitle>
-          <CardDescription>Click vào câu hỏi để sửa. Dùng nút bên phải để duyệt/từ chối/xóa nhanh.</CardDescription>
+          <CardDescription>Chọn thủ tục trước, xác nhận revision sau, rồi đưa revision đã xác nhận vào một bản phát hành có kiểm tra.</CardDescription>
         </CardHeader>
         <CardContent>
           {loading && <p className="py-8 text-center text-sm text-muted-foreground">Đang tải...</p>}
@@ -629,7 +710,7 @@ export default function FaqManagementPage() {
                     }}
                   >
                     <div className="flex flex-wrap items-center gap-2">
-                      {statusBadge(faq.review_status)}
+                      {statusBadge(faq.public_state)}
                       <Badge variant="outline">{domainLabel(faq.domain)}</Badge>
                       {faq.requires_forms && <Badge variant="secondary">Cần biểu mẫu</Badge>}
                       {faq.ward_scope && (
@@ -643,40 +724,21 @@ export default function FaqManagementPage() {
                     <div className="mt-2 flex flex-wrap gap-3 text-[11px] text-muted-foreground">
                       {faq.steps.length > 0 && <span>{faq.steps.length} bước</span>}
                       {faq.legal_basis.length > 0 && <span>{faq.legal_basis.length} căn cứ</span>}
-                      {faq.form_ids.length > 0 && <span>{faq.form_ids.length} biểu mẫu</span>}
-                      <span>ID: {faq.id}</span>
+                      {faq.forms.length > 0 && <span>{faq.forms.length} biểu mẫu từ Feature 017</span>}
+                      <span>Thủ tục: {faq.confirmed_procedure_id}</span>
+                      <span>Revision {faq.revision_number}</span>
                       <span>Cập nhật: {new Date(faq.updated_at).toLocaleDateString('vi-VN')}</span>
                     </div>
                   </div>
 
                   {/* Actions */}
                   <div className="flex shrink-0 flex-col gap-1 opacity-0 transition-opacity group-hover:opacity-100">
-                    {faq.review_status !== 'approved' && (
-                      <Button size="sm" variant="outline" className="text-green-600 hover:bg-green-50 hover:text-green-700" onClick={() => void quickStatusChange(faq, 'approved')}>
-                        <Check className="mr-1 h-3 w-3" />Duyệt
+                    {['pending', 'needs_review'].includes(faq.public_state) && (
+                      <Button size="sm" variant="outline" className="text-green-600 hover:bg-green-50 hover:text-green-700" onClick={() => void confirmRevision(faq)}>
+                        <Check className="mr-1 h-3 w-3" />Xác nhận nội dung và thủ tục
                       </Button>
                     )}
-                    {faq.review_status !== 'rejected' && (
-                      <Button size="sm" variant="outline" className="text-amber-600 hover:bg-amber-50 hover:text-amber-700" onClick={() => void quickStatusChange(faq, 'rejected')}>
-                        <X className="mr-1 h-3 w-3" />Từ chối
-                      </Button>
-                    )}
-                    {faq.review_status !== 'draft' && (
-                      <Button size="sm" variant="outline" onClick={() => void quickStatusChange(faq, 'draft')}>
-                        <Edit3 className="mr-1 h-3 w-3" />Nháp
-                      </Button>
-                    )}
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      className="text-destructive hover:bg-destructive/10"
-                      onClick={() => {
-                        setDeleteItem(faq)
-                        setDeleteOpen(true)
-                      }}
-                    >
-                      <Trash2 className="mr-1 h-3 w-3" />Xóa
-                    </Button>
+                    {faq.public_state === 'confirmed' && <label className="flex items-center gap-2 rounded-md border px-2 py-1 text-xs"><Checkbox checked={releaseSelection.includes(faq.revision_id)} onCheckedChange={checked => setReleaseSelection(current => checked ? [...new Set([...current, faq.revision_id])] : current.filter(id => id !== faq.revision_id))} />Chọn vào bản phát hành</label>}
                   </div>
                 </div>
               ))}
@@ -695,15 +757,8 @@ export default function FaqManagementPage() {
         }}
         onSaved={() => void loadFaqs()}
       />
-      <DeleteDialog
-        open={deleteOpen}
-        item={deleteItem}
-        onClose={() => {
-          setDeleteOpen(false)
-          setDeleteItem(null)
-        }}
-        onDeleted={() => void loadFaqs()}
-      />
     </main>
+      </div>
+    </AppShell>
   )
 }

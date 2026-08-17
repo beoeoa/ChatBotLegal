@@ -9,8 +9,13 @@ def bypass_auth():
     async def no_real_users():
         return False
 
+    async def no_audit(**kwargs):
+        return None
+
     with patch("api.auth.has_real_users", new=no_real_users), patch(
         "api.auth.configured_role_passwords", return_value={}
+    ), patch(
+        "api.routers.models.write_audit_log", new=no_audit
     ):
         yield
 
@@ -20,11 +25,26 @@ def client():
     """Create test client after environment variables have been cleared by conftest."""
     from api.main import app
 
-    return TestClient(app)
+    return TestClient(
+        app,
+        headers={"X-User-Role": "admin", "X-User-Id": "admin"},
+    )
 
 
 class TestModelCreation:
     """Test suite for Model Creation endpoint."""
+
+    def test_officer_cannot_create_or_auto_assign_models(self, client):
+        headers = {"X-User-Role": "officer", "X-User-Id": "officer_cutru"}
+        create = client.post(
+            "/api/models",
+            headers=headers,
+            json={"name": "blocked-model", "provider": "ollama", "type": "language"},
+        )
+        auto_assign = client.post("/api/models/auto-assign", headers=headers)
+
+        assert create.status_code == 403
+        assert auto_assign.status_code == 403
 
     @pytest.mark.asyncio
     @patch("open_notebook.database.repository.repo_query")
@@ -108,8 +128,8 @@ class TestModelCreation:
 
     @pytest.mark.asyncio
     @patch("open_notebook.database.repository.repo_query")
-    async def test_create_same_model_name_different_type(self, mock_repo_query, client):
-        """Test that creating a model with same name but different type is allowed."""
+    async def test_create_same_model_name_wrong_output_type_is_rejected(self, mock_repo_query, client):
+        """A chat-only model cannot be relabelled as an embedding model."""
         from open_notebook.ai.models import Model
 
         # Mock repo_query to return empty (no duplicate found for different type)
@@ -123,8 +143,9 @@ class TestModelCreation:
                 json={"name": "gpt-4", "provider": "openai", "type": "embedding"},
             )
 
-            # Should succeed because type is different
-            assert response.status_code == 200
+            assert response.status_code == 400
+            assert "model_modality_mismatch" in response.text
+            assert not mock_save.called
 
 
 class TestModelsProviderAvailability:

@@ -1,10 +1,12 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   BookOpen,
   CalendarDays,
+  ChevronLeft,
+  ChevronRight,
+  Download,
   ExternalLink,
   FileText,
   RefreshCw,
@@ -17,13 +19,32 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
+  LegalDocumentFilterParams,
   LegalDocumentListItem,
   LegalDomain,
   LegalRetrievalTier,
   legalDocumentsApi,
 } from '@/lib/api/legal-documents'
 
-const PAGE_SIZE = 30
+const PAGE_SIZE = 20
+
+type DateField = 'effective' | 'issued' | 'expired'
+type PaginationItem = number | 'ellipsis-start' | 'ellipsis-end'
+
+function paginationItems(page: number, pageCount: number): PaginationItem[] {
+  if (pageCount <= 7) return Array.from({ length: pageCount }, (_, index) => index + 1)
+  const pages = new Set([1, pageCount, page - 1, page, page + 1])
+  const visible = [...pages].filter((item) => item >= 1 && item <= pageCount).sort((a, b) => a - b)
+  const result: PaginationItem[] = []
+  visible.forEach((item, index) => {
+    const previous = visible[index - 1]
+    if (previous && item - previous > 1) {
+      result.push(previous === 1 ? 'ellipsis-start' : 'ellipsis-end')
+    }
+    result.push(item)
+  })
+  return result
+}
 
 function formatDate(value?: string | null): string {
   if (!value) return 'Chưa cập nhật'
@@ -44,24 +65,36 @@ function getErrorMessage(error: unknown): string {
 }
 
 export default function SourcesPage() {
-  const router = useRouter()
   const [documents, setDocuments] = useState<LegalDocumentListItem[]>([])
   const [domains, setDomains] = useState<LegalDomain[]>([])
   const [searchText, setSearchText] = useState('')
   const [query, setQuery] = useState('')
   const [domain, setDomain] = useState('')
   const [tier, setTier] = useState<LegalRetrievalTier>('all')
-  const [offset, setOffset] = useState(0)
+  const [dateField, setDateField] = useState<DateField>('effective')
+  const [dateFrom, setDateFrom] = useState('')
+  const [dateTo, setDateTo] = useState('')
+  const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
   const [asOf, setAsOf] = useState('')
   const [loading, setLoading] = useState(true)
-  const [loadingMore, setLoadingMore] = useState(false)
+  const [exporting, setExporting] = useState(false)
+  const [refreshVersion, setRefreshVersion] = useState(0)
   const [error, setError] = useState<string | null>(null)
+  const requestSequence = useRef(0)
+  const listTopRef = useRef<HTMLDivElement | null>(null)
+  const scrollAfterLoadRef = useRef(false)
 
   useEffect(() => {
-    const timeout = window.setTimeout(() => setQuery(searchText.trim()), 350)
+    const timeout = window.setTimeout(() => {
+      const nextQuery = searchText.trim()
+      if (nextQuery !== query) {
+        setQuery(nextQuery)
+        setPage(1)
+      }
+    }, 350)
     return () => window.clearTimeout(timeout)
-  }, [searchText])
+  }, [query, searchText])
 
   useEffect(() => {
     legalDocumentsApi.domains()
@@ -69,46 +102,109 @@ export default function SourcesPage() {
       .catch(() => setDomains([]))
   }, [])
 
-  const loadDocuments = useCallback(async (nextOffset = 0, append = false) => {
-    try {
-      if (append) setLoadingMore(true)
-      else setLoading(true)
-      setError(null)
-      const result = await legalDocumentsApi.list({
-        q: query || undefined,
-        domain: domain || undefined,
-        tier,
-        limit: PAGE_SIZE,
-        offset: nextOffset,
-        sort_by: 'effective_date',
-        sort_order: 'desc',
-      })
-      setDocuments((current) => append ? [...current, ...result.items] : result.items)
-      setOffset(nextOffset + result.items.length)
+  const dateError = dateFrom && dateTo && dateFrom > dateTo
+    ? 'Ngày bắt đầu không được sau ngày kết thúc.'
+    : null
+
+  const filterParams = useMemo<LegalDocumentFilterParams>(() => {
+    const params: LegalDocumentFilterParams = {
+      q: query || undefined,
+      domain: domain || undefined,
+      tier,
+      sort_by: 'effective_date',
+      sort_order: 'desc',
+    }
+    if (dateFrom) params[`${dateField}_from`] = dateFrom
+    if (dateTo) params[`${dateField}_to`] = dateTo
+    return params
+  }, [dateField, dateFrom, dateTo, domain, query, tier])
+
+  useEffect(() => {
+    if (dateError) {
+      requestSequence.current += 1
+      setDocuments([])
+      setTotal(0)
+      setError(dateError)
+      setLoading(false)
+      return
+    }
+
+    const controller = new AbortController()
+    const requestId = requestSequence.current + 1
+    requestSequence.current = requestId
+    setLoading(true)
+    setError(null)
+
+    void legalDocumentsApi.list({
+      ...filterParams,
+      limit: PAGE_SIZE,
+      offset: (page - 1) * PAGE_SIZE,
+    }, controller.signal).then((result) => {
+      if (requestSequence.current !== requestId) return
+      const lastPage = Math.max(1, Math.ceil(result.total / PAGE_SIZE))
+      if (page > lastPage) {
+        setPage(lastPage)
+        return
+      }
+      setDocuments(result.items)
       setTotal(result.total)
       setAsOf(result.as_of)
-    } catch (caught) {
+      if (scrollAfterLoadRef.current) {
+        scrollAfterLoadRef.current = false
+        window.requestAnimationFrame(() => listTopRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
+      }
+    }).catch((caught: unknown) => {
+      if (requestSequence.current !== requestId) return
+      if ((caught as { code?: string }).code === 'ERR_CANCELED') return
       const message = getErrorMessage(caught)
       setError(message)
       toast.error(message)
-    } finally {
-      setLoading(false)
-      setLoadingMore(false)
-    }
-  }, [domain, query, tier])
+    }).finally(() => {
+      if (requestSequence.current === requestId) setLoading(false)
+    })
 
-  useEffect(() => {
-    void loadDocuments(0, false)
-  }, [loadDocuments])
+    return () => controller.abort()
+  }, [dateError, filterParams, page, refreshVersion])
+
+  const handleExport = async () => {
+    if (dateError) {
+      toast.error(dateError)
+      return
+    }
+    try {
+      setExporting(true)
+      const exported = await legalDocumentsApi.exportXlsx(filterParams)
+      const url = window.URL.createObjectURL(exported.blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = exported.filename
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      window.URL.revokeObjectURL(url)
+      toast.success(`Đã xuất ${total.toLocaleString('vi-VN')} văn bản.`)
+    } catch (caught) {
+      toast.error(getErrorMessage(caught))
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE))
+  const firstVisible = total === 0 ? 0 : (page - 1) * PAGE_SIZE + 1
+  const lastVisible = Math.min(page * PAGE_SIZE, total)
+
+  const goToPage = (nextPage: number) => {
+    const bounded = Math.max(1, Math.min(pageCount, nextPage))
+    if (bounded === page) return
+    scrollAfterLoadRef.current = true
+    setPage(bounded)
+  }
 
   const selectedDomainName = useMemo(
     () => domains.find((item) => item.slug === domain)?.name,
     [domain, domains],
   )
-
-  const openDocument = (document: LegalDocumentListItem) => {
-    router.push(`/legal-documents/${encodeURIComponent(String(document.doc_id))}`)
-  }
 
   return (
     <AppShell>
@@ -124,49 +220,110 @@ export default function SourcesPage() {
                 Kho văn bản đang được hệ thống Legal Retrieval dùng để tra cứu và tạo căn cứ trả lời.
               </p>
             </div>
-            <Button variant="outline" onClick={() => void loadDocuments(0, false)} disabled={loading}>
-              <RefreshCw className={`mr-2 h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-              Làm mới
-            </Button>
+            <div className="flex flex-wrap gap-2">
+              <Button variant="outline" onClick={() => void handleExport()} disabled={exporting || loading || Boolean(dateError)}>
+                {exporting
+                  ? <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                  : <Download className="mr-2 h-4 w-4" />}
+                {exporting ? 'Đang xuất...' : 'Xuất Excel'}
+              </Button>
+              <Button variant="outline" onClick={() => setRefreshVersion((value) => value + 1)} disabled={loading}>
+                <RefreshCw className={`mr-2 h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+                Làm mới
+              </Button>
+            </div>
           </div>
         </header>
 
         <div className="min-h-0 flex-1 overflow-y-auto">
           <div className="mx-auto max-w-7xl space-y-5 p-6">
-            <section className="grid gap-3 rounded-xl border bg-card p-4 shadow-sm lg:grid-cols-[1fr_260px_220px]">
-              <label className="relative block">
-                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  value={searchText}
-                  onChange={(event) => setSearchText(event.target.value)}
-                  placeholder="Tìm theo số hiệu, tên văn bản, cơ quan ban hành..."
-                  className="pl-9"
-                />
-              </label>
-              <select
-                value={domain}
-                onChange={(event) => setDomain(event.target.value)}
-                className="h-9 rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
-                aria-label="Lọc theo lĩnh vực"
-              >
-                <option value="">Tất cả lĩnh vực</option>
-                {domains.map((item) => (
-                  <option key={item.slug} value={item.slug}>{item.name}</option>
-                ))}
-              </select>
-              <select
-                value={tier}
-                onChange={(event) => setTier(event.target.value as LegalRetrievalTier)}
-                className="h-9 rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
-                aria-label="Lọc theo tầng truy xuất"
-              >
-                <option value="all">Toàn bộ kho tra cứu</option>
-                <option value="core">Kho nhanh</option>
-                <option value="expanded">Kho mở rộng</option>
-              </select>
+            <section className="space-y-3 rounded-xl border bg-card p-4 shadow-sm">
+              <div className="grid gap-3 lg:grid-cols-[1fr_260px_220px]">
+                <label className="relative block">
+                  <span className="sr-only">Tìm kiếm văn bản</span>
+                  <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    value={searchText}
+                    onChange={(event) => setSearchText(event.target.value)}
+                    placeholder="Tìm theo số hiệu, tên văn bản, cơ quan ban hành..."
+                    className="pl-9"
+                  />
+                </label>
+                <select
+                  value={domain}
+                  onChange={(event) => {
+                    setDomain(event.target.value)
+                    setPage(1)
+                  }}
+                  className="h-9 rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+                  aria-label="Lọc theo lĩnh vực"
+                >
+                  <option value="">Tất cả lĩnh vực</option>
+                  {domains.map((item) => (
+                    <option key={item.slug} value={item.slug}>{item.name}</option>
+                  ))}
+                </select>
+                <select
+                  value={tier}
+                  onChange={(event) => {
+                    setTier(event.target.value as LegalRetrievalTier)
+                    setPage(1)
+                  }}
+                  className="h-9 rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+                  aria-label="Lọc theo tầng truy xuất"
+                >
+                  <option value="all">Toàn bộ kho tra cứu</option>
+                  <option value="core">Kho nhanh</option>
+                  <option value="expanded">Kho mở rộng</option>
+                </select>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-3">
+                <label className="space-y-1 text-xs font-medium text-muted-foreground">
+                  Mốc thời gian
+                  <select
+                    value={dateField}
+                    onChange={(event) => {
+                      setDateField(event.target.value as DateField)
+                      setPage(1)
+                    }}
+                    className="block h-9 w-full rounded-md border border-input bg-background px-3 text-sm font-normal text-foreground outline-none focus:ring-2 focus:ring-ring"
+                    aria-label="Chọn loại ngày"
+                  >
+                    <option value="effective">Ngày hiệu lực</option>
+                    <option value="issued">Ngày ban hành</option>
+                    <option value="expired">Ngày hết hiệu lực</option>
+                  </select>
+                </label>
+                <label className="space-y-1 text-xs font-medium text-muted-foreground">
+                  Từ ngày
+                  <Input
+                    type="date"
+                    value={dateFrom}
+                    onChange={(event) => {
+                      setDateFrom(event.target.value)
+                      setPage(1)
+                    }}
+                    aria-label="Từ ngày"
+                    className="block font-normal text-foreground"
+                  />
+                </label>
+                <label className="space-y-1 text-xs font-medium text-muted-foreground">
+                  Đến ngày
+                  <Input
+                    type="date"
+                    value={dateTo}
+                    onChange={(event) => {
+                      setDateTo(event.target.value)
+                      setPage(1)
+                    }}
+                    aria-label="Đến ngày"
+                    className="block font-normal text-foreground"
+                  />
+                </label>
+              </div>
             </section>
 
-            <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+            <div ref={listTopRef} className="scroll-mt-4 flex flex-wrap items-center justify-between gap-2 text-sm">
               <div className="flex flex-wrap items-center gap-2">
                 <Badge variant="secondary">{total.toLocaleString('vi-VN')} văn bản</Badge>
                 {selectedDomainName && <Badge variant="outline">{selectedDomainName}</Badge>}
@@ -206,13 +363,7 @@ export default function SourcesPage() {
                 {documents.map((document) => (
                   <article
                     key={String(document.doc_id)}
-                    className="group cursor-pointer rounded-xl border bg-card p-4 shadow-sm transition hover:border-primary/40 hover:shadow-md"
-                    onClick={() => openDocument(document)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter' || event.key === ' ') openDocument(document)
-                    }}
-                    role="button"
-                    tabIndex={0}
+                    className="rounded-xl border bg-card p-4 shadow-sm transition hover:border-primary/30"
                   >
                     <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                       <div className="min-w-0 flex-1">
@@ -224,7 +375,7 @@ export default function SourcesPage() {
                           </Badge>
                           {document.domain_name && <Badge variant="outline">{document.domain_name}</Badge>}
                         </div>
-                        <h2 className="text-base font-semibold leading-6 group-hover:text-primary">
+                        <h2 className="text-base font-semibold leading-6">
                           {document.document_title || document.law_number || `Văn bản ${document.doc_id}`}
                         </h2>
                         <div className="mt-2 grid gap-1 text-sm text-muted-foreground sm:grid-cols-2">
@@ -235,20 +386,22 @@ export default function SourcesPage() {
                         </div>
                       </div>
                       <div className="flex shrink-0 gap-2">
-                        {document.source_url && /^https?:\/\//i.test(document.source_url) && (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            asChild
-                            onClick={(event) => event.stopPropagation()}
+                        <Button
+                          variant="default"
+                          size="sm"
+                          asChild
+                        >
+                          <a
+                            href={
+                              document.source_url && /^https?:\/\//i.test(document.source_url)
+                                ? document.source_url
+                                : `https://vbpl.vn`
+                            }
+                            target="_blank"
+                            rel="noreferrer"
                           >
-                            <a href={document.source_url} target="_blank" rel="noreferrer">
-                              Nguồn gốc <ExternalLink className="ml-2 h-4 w-4" />
-                            </a>
-                          </Button>
-                        )}
-                        <Button size="sm" onClick={(event) => { event.stopPropagation(); openDocument(document) }}>
-                          Xem văn bản
+                            Xem văn bản <ExternalLink className="ml-2 h-4 w-4" />
+                          </a>
                         </Button>
                       </div>
                     </div>
@@ -257,16 +410,43 @@ export default function SourcesPage() {
               </div>
             )}
 
-            {!loading && documents.length < total && (
-              <div className="flex justify-center pb-6">
-                <Button
-                  variant="outline"
-                  onClick={() => void loadDocuments(offset, true)}
-                  disabled={loadingMore}
-                >
-                  {loadingMore ? <RefreshCw className="mr-2 h-4 w-4 animate-spin" /> : null}
-                  {loadingMore ? 'Đang tải...' : 'Tải thêm văn bản'}
-                </Button>
+            {!loading && total > 0 && (
+              <div className="flex flex-col items-center justify-between gap-3 border-t pb-6 pt-4 sm:flex-row">
+                <p className="text-sm text-muted-foreground">
+                  Trang <span className="font-medium text-foreground">{page}/{pageCount}</span>
+                  {' · '}Đang xem {firstVisible.toLocaleString('vi-VN')}–{lastVisible.toLocaleString('vi-VN')}
+                  {' '}trong tổng số {total.toLocaleString('vi-VN')} văn bản
+                </p>
+                <nav className="flex flex-wrap items-center justify-center gap-1" aria-label="Phân trang văn bản">
+                  <Button variant="outline" size="sm" onClick={() => goToPage(1)} disabled={page === 1}>
+                    Trang đầu
+                  </Button>
+                  <Button variant="outline" size="icon" onClick={() => goToPage(page - 1)} disabled={page === 1} aria-label="Trang trước">
+                    <ChevronLeft className="h-4 w-4" />
+                  </Button>
+                  {paginationItems(page, pageCount).map((item) => (
+                    typeof item === 'number' ? (
+                      <Button
+                        key={item}
+                        variant={item === page ? 'default' : 'outline'}
+                        size="icon"
+                        onClick={() => goToPage(item)}
+                        aria-label={`Trang ${item}`}
+                        aria-current={item === page ? 'page' : undefined}
+                      >
+                        {item}
+                      </Button>
+                    ) : (
+                      <span key={item} className="px-1 text-sm text-muted-foreground" aria-hidden="true">…</span>
+                    )
+                  ))}
+                  <Button variant="outline" size="icon" onClick={() => goToPage(page + 1)} disabled={page === pageCount} aria-label="Trang sau">
+                    <ChevronRight className="h-4 w-4" />
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={() => goToPage(pageCount)} disabled={page === pageCount}>
+                    Trang cuối
+                  </Button>
+                </nav>
               </div>
             )}
           </div>

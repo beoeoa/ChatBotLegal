@@ -30,6 +30,28 @@ export const resources = {
 
 export type TranslationKeys = typeof enUS;
 
+export const legalValidityLabelsVi = {
+  status: {
+    active: 'Còn hiệu lực',
+    not_yet_effective: 'Chưa có hiệu lực',
+    expired: 'Hết hiệu lực',
+    expired_partial: 'Hết hiệu lực một phần',
+    suspended: 'Tạm ngưng hiệu lực',
+    suspended_partial: 'Tạm ngưng một phần',
+    amended: 'Đã được sửa đổi, bổ sung',
+    replaced: 'Đã được thay thế',
+    repealed: 'Đã bị bãi bỏ',
+    unknown: 'Chưa xác minh được',
+  },
+  warning: {
+    validity_snapshot_stale: 'Dữ liệu xác minh có thể đã cũ',
+    validity_snapshot_unavailable: 'Chưa tải được snapshot xác minh hiệu lực',
+    partial_scope_unresolved: 'Chưa xác định chính xác phạm vi điều khoản bị ảnh hưởng',
+  },
+  verifiedAt: 'Xác minh',
+  source: 'Nguồn xác minh hiệu lực',
+} as const;
+
 export type LanguageCode = 'zh-CN' | 'en-US' | 'zh-TW' | 'pt-BR' | 'ja-JP' | 'it-IT' | 'fr-FR' | 'ru-RU' | 'bn-IN' | 'ca-ES' | 'es-ES' | 'de-DE' | 'pl-PL' | 'vi-VN';
 
 export type Language = {

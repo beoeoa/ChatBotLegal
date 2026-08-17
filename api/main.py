@@ -12,12 +12,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from loguru import logger
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from api.auth import PasswordAuthMiddleware
+from api.auth import PasswordAuthMiddleware, production_mode_enabled
+from api import gateway_rate_limit
+from api.auth_rate_limit import AuthRateLimitMiddleware
 from api import readiness
 from api.legal_crawl_service import LegalCrawlService, legal_crawl_scheduler_loop, legal_import_worker_loop
 from api.observability import RuntimeTelemetryMiddleware
 from api.retention_service import retention_scheduler_loop
+from api.legal_effectivity_service import legal_effectivity_scheduler_loop
 from api.routers import (
     auth,
     chat,
@@ -26,21 +30,17 @@ from api.routers import (
     credentials,
     embedding,
     embedding_rebuild,
-    episode_profiles,
     insights,
     languages,
     legal_search,
-    legal_quality,
+    legal_management,
     models,
     notebooks,
     notes,
-    podcasts,
     search,
     settings,
     source_chat,
     sources,
-    speaker_profiles,
-    transformations,
     users,
     ward_procedures,
     legal_crawl_api,
@@ -49,7 +49,9 @@ from api.routers import (
     live_support,
     conversations,
     admin_control,
-    quality_aliases,
+    admin_activity,
+    admin_capabilities,
+    procedure_forms_catalog,
 
 )
 from api.routers import commands as commands_router
@@ -79,6 +81,11 @@ def _parse_cors_origins(raw: str) -> list[str]:
 _cors_origins_raw = os.getenv("CORS_ORIGINS")
 CORS_ALLOWED_ORIGINS = _parse_cors_origins(_cors_origins_raw or "*")
 CORS_IS_DEFAULT_WILDCARD = _cors_origins_raw is None
+PRODUCTION_MODE = production_mode_enabled()
+if PRODUCTION_MODE and (
+    CORS_IS_DEFAULT_WILDCARD or "*" in CORS_ALLOWED_ORIGINS
+):
+    raise RuntimeError("CORS_ORIGINS must be explicit in production mode")
 
 
 def _cors_headers(request: Request) -> dict[str, str]:
@@ -153,26 +160,19 @@ async def lifespan(app: FastAPI):
         # Fail fast - don't start the API with an outdated database schema
         raise RuntimeError(f"Failed to run database migrations: {str(e)}") from e
 
-    # Run podcast profile data migration (legacy strings -> Model registry)
-    try:
-        from open_notebook.podcasts.migration import migrate_podcast_profiles
-
-        await migrate_podcast_profiles()
-    except Exception as e:
-        logger.warning(f"Podcast profile migration encountered errors: {e}")
-        # Non-fatal: profiles can be migrated manually via UI
-
     logger.success("API initialization completed successfully")
 
     await LegalCrawlService.ensure_default_sources()
     crawler_task = None
     import_worker_task = None
     retention_task = None
+    effectivity_task = None
     if os.getenv("LEGAL_CRAWLER_ENABLED", "true").lower() not in {"false", "0", "no"}:
         crawler_task = asyncio.create_task(legal_crawl_scheduler_loop())
     if os.getenv("LEGAL_IMPORT_WORKER_ENABLED", "true").lower() not in {"false", "0", "no"}:
         import_worker_task = asyncio.create_task(legal_import_worker_loop())
     retention_task = asyncio.create_task(retention_scheduler_loop())
+    effectivity_task = asyncio.create_task(legal_effectivity_scheduler_loop())
 
     # Yield control to the application
     yield
@@ -190,6 +190,10 @@ async def lifespan(app: FastAPI):
         retention_task.cancel()
         with suppress(asyncio.CancelledError):
             await retention_task
+    if effectivity_task:
+        effectivity_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await effectivity_task
     logger.info("API shutdown complete")
 
 
@@ -197,6 +201,9 @@ app = FastAPI(
     title="Hai Phong Ward and Commune Legal Assistant API",
     description="API for legal lookup and administrative procedure assistance in Hai Phong",
     lifespan=lifespan,
+    docs_url=None if PRODUCTION_MODE else "/docs",
+    redoc_url=None if PRODUCTION_MODE else "/redoc",
+    openapi_url=None if PRODUCTION_MODE else "/openapi.json",
 )
 
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -231,22 +238,36 @@ else:
 
 # Add password authentication middleware first
 # Exclude /api/auth/status and /api/config from authentication
-app.add_middleware(
-    PasswordAuthMiddleware,
-    excluded_paths=[
-        "/",
-        "/health",
-        "/ready",
+public_paths = [
+    "/",
+    "/health",
+    "/ready",
+    "/ready/import",
+    "/ready/answer",
+    # Next.js proxies relative API requests by retaining the `/api` prefix.
+    # Keep the readiness aliases public as well so the admin UI can report
+    # import health before a user action attempts to create a job.
+    "/api/ready/import",
+    "/api/ready/answer",
+    "/api/auth/status",
+    "/api/auth/login",
+    "/api/auth/register",
+    "/api/auth/forgot-password",
+    "/api/auth/reset-password",
+    "/api/config",
+    "/internal/gateway-rate-limit",
+]
+if not PRODUCTION_MODE:
+    public_paths.extend([
         "/docs",
         "/openapi.json",
         "/redoc",
-        "/api/auth/status",
-        "/api/auth/login",
-        "/api/auth/register",
-        "/api/auth/forgot-password",
-        "/api/auth/reset-password",
-        "/api/config",
-    ],
+    ])
+
+app.add_middleware(AuthRateLimitMiddleware)
+app.add_middleware(
+    PasswordAuthMiddleware,
+    excluded_paths=public_paths,
 )
 
 # Add CORS middleware last (so it processes first)
@@ -257,6 +278,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+if PRODUCTION_MODE:
+    trusted_hosts = [
+        item.strip()
+        for item in str(os.getenv("TRUSTED_HOSTS") or "").split(",")
+        if item.strip()
+    ]
+    if not trusted_hosts:
+        raise RuntimeError("TRUSTED_HOSTS must be explicit in production mode")
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=trusted_hosts)
 app.add_middleware(RuntimeTelemetryMiddleware)
 
 
@@ -358,11 +388,8 @@ app.include_router(config.router, prefix="/api", tags=["config"])
 app.include_router(notebooks.router, prefix="/api", tags=["notebooks"])
 app.include_router(search.router, prefix="/api", tags=["search"])
 app.include_router(models.router, prefix="/api", tags=["models"])
-app.include_router(transformations.router, prefix="/api", tags=["transformations"])
 app.include_router(notes.router, prefix="/api", tags=["notes"])
 app.include_router(embedding.router, prefix="/api", tags=["embedding"])
-app.include_router(legal_quality.router, prefix="/api", tags=["legal-quality"])
-app.include_router(quality_aliases.router, prefix="/api", tags=["quality"])
 app.include_router(
     embedding_rebuild.router, prefix="/api/embeddings", tags=["embeddings"]
 )
@@ -371,9 +398,6 @@ app.include_router(context.router, prefix="/api", tags=["context"])
 app.include_router(sources.router, prefix="/api", tags=["sources"])
 app.include_router(insights.router, prefix="/api", tags=["insights"])
 app.include_router(commands_router.router, prefix="/api", tags=["commands"])
-app.include_router(podcasts.router, prefix="/api", tags=["podcasts"])
-app.include_router(episode_profiles.router, prefix="/api", tags=["episode-profiles"])
-app.include_router(speaker_profiles.router, prefix="/api", tags=["speaker-profiles"])
 app.include_router(chat.router, prefix="/api", tags=["chat"])
 app.include_router(source_chat.router, prefix="/api", tags=["source-chat"])
 app.include_router(credentials.router, prefix="/api", tags=["credentials"])
@@ -382,10 +406,15 @@ app.include_router(ward_procedures.router, prefix="/api", tags=["ward-procedures
 app.include_router(faq.router, prefix="/api", tags=["faq"])
 app.include_router(legal_crawl_api.router, prefix="/api")
 app.include_router(legal_search.router, prefix="/api")
+app.include_router(legal_management.router, prefix="/api")
 app.include_router(ask_sessions.router, prefix="/api", tags=["ask-sessions"])
 app.include_router(conversations.router, prefix="/api", tags=["conversations"])
 app.include_router(live_support.router, prefix="/api", tags=["live-support"])
 app.include_router(admin_control.router, prefix="/api", tags=["admin-control"])
+app.include_router(admin_activity.router, prefix="/api", tags=["admin-activity"])
+app.include_router(admin_capabilities.router, prefix="/api", tags=["admin-capabilities"])
+app.include_router(procedure_forms_catalog.router, prefix="/api")
+app.include_router(gateway_rate_limit.router)
 
 
 @app.get("/")
@@ -405,4 +434,19 @@ async def ready():
     return JSONResponse(status_code=status_code, content=report)
 
 
+@app.get("/api/ready/answer", include_in_schema=False)
+@app.get("/ready/answer")
+async def answer_ready():
+    """Readiness for Ask traffic, including the configured chat model."""
+    report = await readiness.collect_answer_readiness()
+    status_code = 200 if report["status"] == "ready" else 503
+    return JSONResponse(status_code=status_code, content=report)
 
+
+@app.get("/api/ready/import", include_in_schema=False)
+@app.get("/ready/import")
+async def import_ready():
+    """Readiness for the deterministic legal-import and embedding pipeline."""
+    report = await readiness.collect_import_readiness()
+    status_code = 200 if report["status"] == "ready" else 503
+    return JSONResponse(status_code=status_code, content=report)

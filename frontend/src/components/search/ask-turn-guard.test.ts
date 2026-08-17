@@ -9,6 +9,8 @@ describe('ask turn protection', () => {
     )
     expect(page).toContain('askSubmitLockRef')
     expect(page).toContain('askSubmitLockRef.current = true')
+    expect(page).toContain('currentSessionIdRef.current = conversation.id')
+    expect(page).toContain('currentSessionIdRef.current || currentSessionId')
     expect(page).toContain("previous?.role === 'assistant'")
   })
 })

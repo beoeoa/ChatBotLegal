@@ -1,4 +1,5 @@
 import pytest
+from datetime import datetime, timezone
 from fastapi.testclient import TestClient
 from unittest.mock import patch, AsyncMock, MagicMock
 
@@ -20,9 +21,10 @@ def bypass_auth():
 @pytest.fixture(autouse=True)
 def mock_db_repository():
     """Globally mock repository methods across all relevant modules to prevent real DB operations."""
-    mock_create = AsyncMock(return_value=[{"id": "source:fake", "created": "2026-07-07", "updated": "2026-07-07"}])
+    timestamp = datetime(2026, 7, 7, tzinfo=timezone.utc)
+    mock_create = AsyncMock(return_value=[{"id": "source:fake", "created": timestamp, "updated": timestamp}])
     mock_query = AsyncMock(return_value=[])
-    mock_update = AsyncMock(return_value=[{"id": "source:fake", "created": "2026-07-07", "updated": "2026-07-07"}])
+    mock_update = AsyncMock(return_value=[{"id": "source:fake", "created": timestamp, "updated": timestamp}])
 
     with patch("open_notebook.database.repository.repo_create", new=mock_create), \
          patch("open_notebook.database.repository.repo_query", new=mock_query), \

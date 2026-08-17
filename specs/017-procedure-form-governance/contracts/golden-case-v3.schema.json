@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://chatbotlegal.local/schemas/golden-case-v3.schema.json",
+  "title": "GoldenCaseV3",
+  "type": "object",
+  "required": ["case_id", "schema_version", "domain", "category", "question", "procedure_id", "expected_form_ids", "forbidden_form_ids", "audience", "legal_as_of", "expected_clarification", "expected_state", "expected_answer_mode", "release_id", "release_manifest_sha256", "review_status"],
+  "properties": {
+    "case_id": {"type": "string", "pattern": "^f017_[a-z0-9_-]{4,91}$"},
+    "schema_version": {"const": "3.0"},
+    "domain": {"enum": ["ho_tich_chung_thuc", "dat_dai_xay_dung", "an_sinh_y_te_giao_duc", "cu_tru_an_ninh", "khieu_nai_to_cao_xu_phat"]},
+    "category": {"enum": ["procedure_dossier", "exact_form_set", "conditional_eform_gap", "ambiguity_hard_negative", "validity_role_version"]},
+    "question": {"type": "string", "minLength": 5},
+    "procedure_id": {"type": ["string", "null"]},
+    "expected_form_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "forbidden_form_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "required_or_conditional": {"enum": ["required", "conditional", "mixed", "none"]},
+    "condition": {"type": ["string", "null"]},
+    "audience": {"enum": ["citizen", "officer"]},
+    "legal_as_of": {"type": "string", "format": "date"},
+    "source_url": {"type": ["string", "null"], "format": "uri"},
+    "source_checksum": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+    "expected_clarification": {"type": "boolean"},
+    "expected_state": {"enum": ["released", "verified_gap", "clarification_required", "blocked_expired", "blocked_role", "superseded"]},
+    "expected_answer_mode": {"enum": ["grounded_answer", "verified_source_condensed", "source_view_only"]},
+    "release_id": {"type": "string", "minLength": 1},
+    "release_manifest_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "generation_type": {"enum": ["template", "model_paraphrase"]},
+    "review_status": {"enum": ["proposed", "legally_reviewed", "approved"]}
+  },
+  "additionalProperties": false
+}

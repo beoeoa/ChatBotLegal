@@ -1,0 +1,32 @@
+{
+  "schema_version": "feature016-phase-e-fixtures-v1",
+  "html_table": "<main><p>Bảng lệ phí</p><table><tr><th>Thủ tục</th><th>Mức thu</th></tr><tr><td>Đăng ký</td><td>10.000 đồng</td></tr></table></main>",
+  "pdf_pages": [
+    "Trang 1\nĐiều 1. Phạm vi điều chỉnh.",
+    "Trang 2\nKhoản 1. Trình tự thực hiện."
+  ],
+  "ocr_data": {
+    "text": ["Điều", "1", "Nội", "dung"],
+    "conf": ["95", "93", "90", "91"],
+    "left": [10, 60, 10, 70],
+    "top": [20, 20, 60, 60],
+    "width": [40, 10, 50, 40],
+    "height": [20, 20, 20, 20],
+    "block_num": [1, 1, 1, 1],
+    "par_num": [1, 1, 1, 1],
+    "line_num": [1, 1, 2, 2]
+  },
+  "documents": {
+    "A": {"document_id": "A", "law_number": "A/2026/TEST", "effective_status": "effective", "jurisdiction": "central", "authority_eligible": true, "facets": ["procedure"]},
+    "B": {"document_id": "B", "law_number": "B/2026/TEST", "effective_status": "effective", "jurisdiction": "central", "authority_eligible": true, "facets": ["procedure"]},
+    "C": {"document_id": "C", "law_number": "C/2026/TEST", "effective_status": "effective", "jurisdiction": "central", "authority_eligible": true, "facets": ["procedure"]},
+    "OLD": {"document_id": "OLD", "law_number": "OLD/2014/TEST", "effective_status": "expired", "jurisdiction": "central", "authority_eligible": true, "facets": ["procedure"]}
+  },
+  "relationships": [
+    {"source_document_id": "A", "target_document_id": "B", "relationship_type": "Văn bản căn cứ", "verification_status": "verified"},
+    {"source_document_id": "B", "target_document_id": "C", "relationship_type": "amended_by", "verified": true},
+    {"source_document_id": "C", "target_document_id": "A", "relationship_type": "references", "verified": true},
+    {"source_document_id": "A", "target_document_id": "OLD", "relationship_type": "references", "verified": true},
+    {"source_document_id": "A", "target_document_id": "UNVERIFIED", "relationship_type": "references", "verified": false}
+  ]
+}

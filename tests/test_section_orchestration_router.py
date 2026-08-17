@@ -2,7 +2,11 @@ import asyncio
 
 from api.models import AskRequest
 from api.routers import search
-from api.routers.search import _build_section_graph_input
+from api.routers.search import (
+    _append_request_exact_identifiers,
+    _build_section_graph_input,
+)
+from api.legal_exact_retrieval import plan_exact_lookup
 
 
 def test_section_graph_input_uses_only_the_current_issue_for_retrieval():
@@ -23,6 +27,17 @@ def test_section_graph_input_uses_only_the_current_issue_for_retrieval():
     assert graph_input["issue_id"] == "issue-2"
     assert graph_input["request_id"] == "request-opaque-1"
     assert graph_input["domain"] == "administrative"
+
+
+def test_split_issue_keeps_exact_document_identity_from_original_question():
+    query = _append_request_exact_identifiers(
+        "thẩm quyền và nơi nộp; khu đất tại xã có diện tích bao nhiêu",
+        request_exact_plan=plan_exact_lookup(
+            "Theo Nghị quyết 22/2025/NQ-HĐND, khu đất tại xã có diện tích bao nhiêu?"
+        ),
+    )
+
+    assert plan_exact_lookup(query).law_number == "22/2025/NQ-HDND"
 
 
 def test_orchestration_keeps_supported_issue_when_another_issue_has_no_evidence(monkeypatch):

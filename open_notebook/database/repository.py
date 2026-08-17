@@ -70,23 +70,96 @@ def prepare_update_payload(table: str, data: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
+import asyncio
+
+_global_db_client: Optional[AsyncSurreal] = None
+_global_db_lock: Optional[asyncio.Lock] = None
+_global_db_operation_lock: Optional[asyncio.Lock] = None
+
+
+def _get_db_lock() -> asyncio.Lock:
+    global _global_db_lock
+    if _global_db_lock is None:
+        _global_db_lock = asyncio.Lock()
+    return _global_db_lock
+
+
+def _get_db_operation_lock() -> asyncio.Lock:
+    global _global_db_operation_lock
+    if _global_db_operation_lock is None:
+        _global_db_operation_lock = asyncio.Lock()
+    return _global_db_operation_lock
+
+
+def _is_connection_failure(exc: BaseException) -> bool:
+    text = str(exc).casefold()
+    return (
+        isinstance(exc, (ConnectionError, OSError, KeyError))
+        or any(
+            marker in text
+            for marker in (
+                "connection",
+                "connectionclosed",
+                "closed",
+                "websocket",
+                "keepalive",
+                "broken pipe",
+                "disconnect",
+                "1011",
+            )
+        )
+    )
+
+
+async def reset_db_client() -> None:
+    """Reset cached database connection on error or shutdown."""
+    global _global_db_client
+    lock = _get_db_lock()
+    async with lock:
+        if _global_db_client is not None:
+            try:
+                await _global_db_client.close()
+            except Exception:
+                pass
+            _global_db_client = None
+
+
+async def get_db_client() -> AsyncSurreal:
+    """Get or create reusable AsyncSurreal connection."""
+    global _global_db_client
+    if _global_db_client is not None:
+        return _global_db_client
+    lock = _get_db_lock()
+    async with lock:
+        if _global_db_client is not None:
+            return _global_db_client
+        url = get_database_url()
+        client = AsyncSurreal(url)
+        await client.signin(
+            {
+                "username": os.environ.get("SURREAL_USER") or "root",
+                "password": get_database_password(),
+            }
+        )
+        await client.use(
+            os.environ.get("SURREAL_NAMESPACE") or "open_notebook",
+            os.environ.get("SURREAL_DATABASE") or "open_notebook",
+        )
+        _global_db_client = client
+        return _global_db_client
+
+
 @asynccontextmanager
 async def db_connection():
-    db = AsyncSurreal(get_database_url())
-    await db.signin(
-        {
-            "username": os.environ.get("SURREAL_USER") or "root",
-            "password": get_database_password(),
-        }
-    )
-    await db.use(
-        os.environ.get("SURREAL_NAMESPACE") or "open_notebook",
-        os.environ.get("SURREAL_DATABASE") or "open_notebook",
-    )
     try:
+        db = await get_db_client()
         yield db
-    finally:
-        await db.close()
+    except Exception as exc:
+        err_msg = str(exc).lower()
+        if any(kw in err_msg for kw in ("connection", "closed", "websocket", "broken pipe", "disconnect")):
+            await reset_db_client()
+        raise
+
 
 
 async def repo_query(
@@ -94,19 +167,26 @@ async def repo_query(
 ) -> List[Dict[str, Any]]:
     """Execute a SurrealQL query and return the results"""
 
-    async with db_connection() as connection:
-        try:
-            result = parse_record_ids(await connection.query(query_str, vars))
-            if isinstance(result, str):
-                raise RuntimeError(result)
-            return result
-        except RuntimeError as e:
-            # RuntimeError is raised for retriable transaction conflicts - log at debug to avoid noise
-            logger.debug(str(e))
-            raise
-        except Exception as e:
-            logger.exception(e)
-            raise
+    async with _get_db_operation_lock():
+        for attempt in range(2):
+            try:
+                async with db_connection() as connection:
+                    result = parse_record_ids(await connection.query(query_str, vars))
+                    if isinstance(result, str):
+                        raise RuntimeError(result)
+                    return result
+            except RuntimeError as exc:
+                # RuntimeError is raised for retriable transaction conflicts - log at debug to avoid noise.
+                logger.debug(str(exc))
+                raise
+            except Exception as exc:
+                if attempt == 0 and _is_connection_failure(exc):
+                    logger.warning("SurrealDB connection failed; resetting shared client before retry")
+                    await reset_db_client()
+                    continue
+                logger.exception(exc)
+                raise
+        raise RuntimeError("SurrealDB query retry exhausted")
 
 
 async def repo_create(table: str, data: Dict[str, Any]) -> Dict[str, Any]:

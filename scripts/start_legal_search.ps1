@@ -47,27 +47,49 @@ function Invoke-PythonPreflight {
     if (-not $Executable) {
         return $null
     }
-    $probeCode = @'
+$probeCode = @'
 import json
+import importlib.util
+import os
 import platform
 import sys
 
 try:
-    import chromadb
-    import fastapi
-    import numpy
-    import pydantic
-    import sqlalchemy
-    import torch
-    import transformers
-    import uvicorn
-    from dotenv import dotenv_values
-
-    requested = __import__("os").environ["LEGAL_RETRIEVAL_PROBE_DEVICE"]
-    cuda_available = bool(torch.cuda.is_available())
-    eligible = (
+    requested = os.environ["LEGAL_RETRIEVAL_PROBE_DEVICE"]
+    python_compatible = (
         sys.version_info[:2] == (3, 12)
         and platform.architecture()[0] == "64bit"
+    )
+    # CPU preflight is intentionally lightweight. Importing torch, transformers
+    # and Chroma just to select an explicit CPU runtime can exceed the launcher
+    # probe timeout on Windows. Runtime startup still performs the real imports.
+    if requested == "cpu":
+        required_modules = (
+            "chromadb",
+            "fastapi",
+            "numpy",
+            "pydantic",
+            "sqlalchemy",
+            "transformers",
+            "uvicorn",
+            "dotenv",
+        )
+        dependencies_present = all(
+            importlib.util.find_spec(module) is not None
+            for module in required_modules
+        )
+        eligible = python_compatible and dependencies_present
+        print(json.dumps({
+            "eligible": eligible,
+            "cuda_available": False,
+        }))
+        raise SystemExit(0 if eligible else 2)
+
+    import torch
+
+    cuda_available = bool(torch.cuda.is_available())
+    eligible = (
+        python_compatible
         and (requested != "cuda" or cuda_available)
     )
     print(json.dumps({
@@ -225,8 +247,13 @@ try {
         return
     }
 
+    $repoReleaseData = Join-Path $projectRoot "release-data\legal"
     $dataRoot = if ($env:LEGAL_DATA_ROOT) {
         $env:LEGAL_DATA_ROOT
+    } elseif (Test-Path -LiteralPath (Join-Path $repoReleaseData "chroma_store") -PathType Container) {
+        $repoReleaseData
+    } elseif (Test-Path -LiteralPath "D:\legal-chatbot-data" -PathType Container) {
+        "D:\legal-chatbot-data"
     } else {
         "J:\legal-chatbot-data"
     }
@@ -237,6 +264,10 @@ try {
     }
     $modelPath = if ($env:VNLEGAL_LAL_MODEL_PATH) {
         $env:VNLEGAL_LAL_MODEL_PATH
+    } elseif (Test-Path -LiteralPath (Join-Path $dataRoot "vnlegal-lal-model") -PathType Container) {
+        Join-Path $dataRoot "vnlegal-lal-model"
+    } elseif (Test-Path -LiteralPath (Join-Path $repoReleaseData "vnlegal-lal-model") -PathType Container) {
+        Join-Path $repoReleaseData "vnlegal-lal-model"
     } else {
         $modelRoot = Join-Path $dataRoot "sentence_transformers\models--darklethelong--vnlegal-lal\snapshots"
         $snapshot = if (Test-Path -LiteralPath $modelRoot -PathType Container) {
@@ -253,6 +284,11 @@ try {
     } else {
         "J:\ChatBot\legal-chatbot\backend\.env"
     }
+    $servingManifestPointer = if ($env:LEGAL_SERVING_MANIFEST_POINTER) {
+        $env:LEGAL_SERVING_MANIFEST_POINTER
+    } else {
+        Join-Path $dataRoot "serving_manifests\active_serving_manifest.json"
+    }
     $logDir = Join-Path $projectRoot "logs"
 
     if (-not (Test-Path -LiteralPath $chromaPath -PathType Container)) {
@@ -263,10 +299,18 @@ try {
         $reasonCode = "model_missing"
         throw "VNLegal-LAL model is missing"
     }
+    if (-not (Test-Path -LiteralPath $servingManifestPointer -PathType Leaf)) {
+        $reasonCode = "serving_manifest_missing"
+        throw "serving manifest pointer is missing"
+    }
 
     try {
         $health = Invoke-RestMethod -Uri "http://127.0.0.1:8765/health" -TimeoutSec 3
         if ($health.status -eq "healthy") {
+            if ($health.serving_manifest.schema_version -ne "legal-serving-manifest-v2") {
+                $reasonCode = "existing_service_manifest_missing"
+                throw "running retrieval service is not manifest-bound"
+            }
             if (
                 ($requestedDevice -eq "cuda" -and $health.embedding_device -ne "cuda") -or
                 ($requestedDevice -eq "cpu" -and $health.embedding_device -ne "cpu")
@@ -278,7 +322,7 @@ try {
             return
         }
     } catch {
-        if ($reasonCode -eq "existing_service_device_mismatch") {
+        if ($reasonCode -in @("existing_service_device_mismatch", "existing_service_manifest_missing")) {
             throw
         }
         # Start the service below when the health endpoint is absent.
@@ -291,6 +335,20 @@ try {
     $env:VNLEGAL_LAL_MODEL_PATH = $modelPath
     $env:LEGAL_OLD_ENV_PATH = $oldEnvPath
     $env:LEGAL_EMBED_DEVICE = $requestedDevice
+    $env:LEGAL_SERVING_MANIFEST_POINTER = $servingManifestPointer
+    $env:LEGAL_SERVING_MANIFEST_REQUIRED = "true"
+    # The Docker web/API container reaches this Windows-hosted service through
+    # host.docker.internal. Binding only to loopback makes that route fail with
+    # LEGAL_RETRIEVAL_UNAVAILABLE even though the local health check succeeds.
+    $env:LEGAL_SEARCH_HOST = if ($env:LEGAL_SEARCH_HOST) {
+        $env:LEGAL_SEARCH_HOST
+    } else {
+        "0.0.0.0"
+    }
+    # A desktop session may inherit the isolated staging test database. The
+    # retrieval runtime must resolve the reviewed release database from the
+    # repository .env instead of silently starting against that test schema.
+    Remove-Item Env:LEGAL_DATABASE_URL -ErrorAction SilentlyContinue
 
     $process = Start-Process `
         -FilePath $selectedPython `

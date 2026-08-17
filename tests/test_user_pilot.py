@@ -1,5 +1,9 @@
 from datetime import datetime, timedelta, timezone
 
+import pytest
+from fastapi import HTTPException
+
+from api import user_service
 from api.user_service import (
     DEPARTMENT_TO_DOMAINS,
     _profile_payload,
@@ -77,3 +81,30 @@ def test_session_touch_is_debounced(monkeypatch):
     assert _session_touch_due(now - timedelta(minutes=11), now=now) is True
     assert _session_touch_due(now - timedelta(minutes=2), now=now) is False
     assert _session_touch_due("invalid", now=now) is True
+
+
+@pytest.mark.asyncio
+async def test_last_active_admin_cannot_be_locked_or_demoted(monkeypatch):
+    async def one_active_admin(*_args, **_kwargs):
+        return [{"count": 1}]
+
+    monkeypatch.setattr(user_service, "repo_query", one_active_admin)
+    current_admin = {"role": "admin", "is_active": True}
+
+    with pytest.raises(HTTPException, match="quản trị viên cuối cùng"):
+        await user_service._ensure_active_admin_remains(current_admin, {"is_active": False})
+
+    with pytest.raises(HTTPException, match="quản trị viên cuối cùng"):
+        await user_service._ensure_active_admin_remains(current_admin, {"role": "officer"})
+
+
+@pytest.mark.asyncio
+async def test_active_admin_can_be_changed_when_another_admin_remains(monkeypatch):
+    async def two_active_admins(*_args, **_kwargs):
+        return [{"count": 2}]
+
+    monkeypatch.setattr(user_service, "repo_query", two_active_admins)
+    await user_service._ensure_active_admin_remains(
+        {"role": "admin", "is_active": True},
+        {"is_active": False},
+    )

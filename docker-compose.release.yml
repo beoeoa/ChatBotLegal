@@ -1,6 +1,39 @@
 services:
+  gateway:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    ports:
+      - "443:443"
+    environment:
+      PILOT_HOSTNAME: ${PILOT_HOSTNAME:-chatbotlegal.local}
+      GATEWAY_RATE_LIMIT_TOKEN: ${GATEWAY_RATE_LIMIT_TOKEN}
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - pilot_edge
+      - backend
+    depends_on:
+      frontend:
+        condition: service_healthy
+      frontend_replica:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+      api_replica:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
   legal_postgres:
     image: postgres:18-alpine
+    restart: unless-stopped
+    expose:
+      - "5432"
     environment:
       POSTGRES_DB: legal_chatbot
       POSTGRES_USER: postgres
@@ -9,42 +42,64 @@ services:
       - ./release-data/postgres:/var/lib/postgresql/data
       - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
       - ./release-data/legal-corpus:/seed:ro
+    networks:
+      - backend
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d legal_chatbot"]
       interval: 5s
       timeout: 3s
       retries: 36
       start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
 
   surrealdb:
-    image: surrealdb/surrealdb:v2
+    image: surrealdb/surrealdb:v2.6.5
+    restart: unless-stopped
     command: start --log info --user root --pass ${SURREAL_PASSWORD} rocksdb:/mydata/mydatabase.db
-    ports:
-      - "8000:8000"
+    expose:
+      - "8000"
     volumes:
-      - ./release-data/surreal_data:/mydata
+      - surreal_data:/mydata
+    networks:
+      - backend
     healthcheck:
       test: ["CMD", "/surreal", "is-ready", "--endpoint", "http://localhost:8000"]
       interval: 5s
       timeout: 3s
       retries: 24
       start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
 
-  legal_retrieval:
+  legal_retrieval: &legal_retrieval_service
     build:
       context: .
       dockerfile: Dockerfile.retrieval
+      target: retrieval-cpu
     image: chatbotlegal-retrieval:release
-    ports:
-      - "8765:8765"
+    restart: unless-stopped
+    expose:
+      - "8765"
     environment:
       LEGAL_DATA_ROOT: /data/legal
       LEGAL_CHROMA_PATH: /data/legal/chroma_store
       LEGAL_EMBED_DEVICE: ${LEGAL_EMBED_DEVICE:-cpu}
-      VNLEGAL_LAL_MODEL_PATH: /data/legal/vnlegal-lal-model
+      VNLEGAL_LAL_MODEL_PATH: ${VNLEGAL_LAL_MODEL_PATH:-/data/legal/vnlegal-lal-model}
+      VNLEGAL_LAL_MODEL_FINGERPRINT: ${VNLEGAL_LAL_MODEL_FINGERPRINT:?Set the attested VNLegal-LAL fingerprint}
+      LEGAL_SERVING_MANIFEST_POINTER: /data/legal/serving_manifests/active_serving_manifest.json
+      LEGAL_SERVING_MANIFEST_REQUIRED: "true"
       LEGAL_DATABASE_URL: postgresql+psycopg2://postgres:${LEGAL_POSTGRES_PASSWORD}@legal_postgres:5432/legal_chatbot
     volumes:
       - ./release-data/legal:/data/legal:ro
+    networks:
+      - backend
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8765/health"]
       interval: 15s
@@ -54,37 +109,65 @@ services:
     depends_on:
       legal_postgres:
         condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
 
-  app:
+  legal_retrieval_replica:
+    <<: *legal_retrieval_service
+
+  api: &api_service
     build:
       context: .
-      dockerfile: Dockerfile
-      args:
-        NEXT_PUBLIC_ASK_SSE_ENABLED: ${NEXT_PUBLIC_ASK_SSE_ENABLED:-false}
-    image: chatbotlegal-app:release
-    ports:
-      - "3000:8502"
-      - "5055:5055"
+      dockerfile: deploy/Dockerfile.api
+    image: chatbotlegal-api:release
+    restart: unless-stopped
+    expose:
+      - "5055"
     environment:
-      OPEN_NOTEBOOK_PASSWORD: ${OPEN_NOTEBOOK_PASSWORD}
+      PRODUCTION_MODE: "true"
+      OPEN_NOTEBOOK_ADMIN_PASSWORD: ${OPEN_NOTEBOOK_ADMIN_PASSWORD}
       OPEN_NOTEBOOK_ENCRYPTION_KEY: ${OPEN_NOTEBOOK_ENCRYPTION_KEY}
+      OPEN_NOTEBOOK_RETURN_RESET_TOKEN: "false"
+      OPEN_NOTEBOOK_DATA_DIR: /app/data
+      CORS_ORIGINS: https://${PILOT_HOSTNAME:-chatbotlegal.local}
+      TRUSTED_HOSTS: ${PILOT_HOSTNAME:-chatbotlegal.local},api
       SURREAL_URL: ws://surrealdb:8000/rpc
       SURREAL_USER: root
       SURREAL_PASSWORD: ${SURREAL_PASSWORD}
       SURREAL_NAMESPACE: open_notebook
       SURREAL_DATABASE: open_notebook
       LEGAL_SEARCH_URL: http://legal_retrieval:8765
+      LEGAL_SEARCH_URLS: http://legal_retrieval:8765,http://legal_retrieval_replica:8765
+      LEGAL_RETRIEVAL_MAX_CONCURRENCY: ${LEGAL_RETRIEVAL_MAX_CONCURRENCY:-100}
       LEGAL_LLM_TIMEOUT_SECONDS: ${LEGAL_LLM_TIMEOUT_SECONDS:-90}
+      LEGAL_STRUCTURED_GENERATION_TIMEOUT_SECONDS: ${LEGAL_STRUCTURED_GENERATION_TIMEOUT_SECONDS:-60}
+      LEGAL_STRUCTURED_HARD_GENERATION_TIMEOUT_SECONDS: ${LEGAL_STRUCTURED_HARD_GENERATION_TIMEOUT_SECONDS:-120}
+      LEGAL_STRUCTURED_TOTAL_TIMEOUT_SECONDS: ${LEGAL_STRUCTURED_TOTAL_TIMEOUT_SECONDS:-90}
+      LEGAL_STRUCTURED_HARD_TOTAL_TIMEOUT_SECONDS: ${LEGAL_STRUCTURED_HARD_TOTAL_TIMEOUT_SECONDS:-180}
+      LEGAL_STRUCTURED_MAX_OUTPUT_TOKENS: ${LEGAL_STRUCTURED_MAX_OUTPUT_TOKENS:-2048}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       LEGAL_SECTION_GROUNDING_ENABLED: ${LEGAL_SECTION_GROUNDING_ENABLED:-false}
+      FORM_GOVERNANCE_SOURCE: ${FORM_GOVERNANCE_SOURCE:-json_compat}
+      FORM_GOVERNANCE_ROUTER_MODE: ${FORM_GOVERNANCE_ROUTER_MODE:-disabled}
+      FORM_RELEASE_VERIFY_REMOTE_SOURCES: ${FORM_RELEASE_VERIFY_REMOTE_SOURCES:-false}
+      FORM_RELEASE_ASSET_ROOT: /app/release-data
+      GATEWAY_RATE_LIMIT_TOKEN: ${GATEWAY_RATE_LIMIT_TOKEN}
     volumes:
       - ./release-data/notebook_data:/app/data
       - ./release-data/forms:/app/data/uploads/forms:ro
+      - ./release-data/feature017:/app/release-data/feature017:ro
+    networks:
+      - backend
     depends_on:
       surrealdb:
         condition: service_healthy
       legal_retrieval:
+        condition: service_healthy
+      legal_retrieval_replica:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "http://localhost:5055/ready"]
@@ -92,3 +175,57 @@ services:
       timeout: 5s
       retries: 12
       start_period: 45s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  api_replica:
+    <<: *api_service
+
+  frontend: &frontend_service
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.frontend
+      args:
+        NEXT_PUBLIC_ASK_SSE_ENABLED: ${NEXT_PUBLIC_ASK_SSE_ENABLED:-false}
+        INTERNAL_API_URL: http://api:5055
+    image: chatbotlegal-frontend:release
+    restart: unless-stopped
+    expose:
+      - "8502"
+    environment:
+      NODE_ENV: production
+      HOSTNAME: 0.0.0.0
+      PORT: "8502"
+      INTERNAL_API_URL: http://api:5055
+    networks:
+      - backend
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8502/').then(r=>{if(r.status>=500)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  frontend_replica:
+    <<: *frontend_service
+
+networks:
+  pilot_edge:
+  backend:
+    internal: true
+
+volumes:
+  caddy_data:
+  caddy_config:
+  surreal_data:

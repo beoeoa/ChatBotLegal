@@ -1,0 +1,28 @@
+FROM node:20-bookworm-slim AS frontend-builder
+WORKDIR /app/frontend
+ARG NEXT_PUBLIC_ASK_SSE_ENABLED=false
+ARG INTERNAL_API_URL=http://api:5055
+ENV NEXT_PUBLIC_ASK_SSE_ENABLED=${NEXT_PUBLIC_ASK_SSE_ENABLED} \
+    INTERNAL_API_URL=${INTERNAL_API_URL}
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
+FROM node:20-bookworm-slim AS frontend-runtime
+WORKDIR /app/frontend
+ENV NODE_ENV=production HOSTNAME=0.0.0.0 PORT=8502 INTERNAL_API_URL=http://api:5055
+RUN apt-get update \
+    && apt-get upgrade -y \
+    && rm -rf /var/lib/apt/lists/* \
+       /usr/local/lib/node_modules/npm \
+       /usr/local/bin/npm \
+       /usr/local/bin/npx \
+       /usr/local/bin/corepack
+COPY --from=frontend-builder --chown=node:node /app/frontend/.next/standalone ./
+COPY --from=frontend-builder --chown=node:node /app/frontend/.next/static ./.next/static
+COPY --from=frontend-builder --chown=node:node /app/frontend/public ./public
+COPY --from=frontend-builder --chown=node:node /app/frontend/start-server.js ./start-server.js
+USER node
+EXPOSE 8502
+CMD ["node", "start-server.js"]

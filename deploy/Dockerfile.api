@@ -1,0 +1,60 @@
+FROM python:3.12-slim-bookworm AS api-builder
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
+ENV TIKTOKEN_CACHE_DIR=/app/tiktoken-cache
+WORKDIR /app
+COPY pyproject.toml uv.lock ./
+COPY open_notebook/__init__.py ./open_notebook/__init__.py
+COPY scripts/patch_moviepy_pillow_metadata.py /tmp/patch_moviepy_pillow_metadata.py
+RUN uv sync --frozen --no-dev --extra ocr \
+    && .venv/bin/python /tmp/patch_moviepy_pillow_metadata.py \
+       --site-packages /app/.venv/lib/python3.12/site-packages \
+    && .venv/bin/python -m pip check \
+    && mkdir -p /app/tiktoken-cache \
+    && .venv/bin/python -c "import tiktoken; tiktoken.get_encoding('o200k_base')"
+
+FROM python:3.12-slim-bookworm AS api-runtime
+RUN echo 'Acquire::Check-Date "false";' > /etc/apt/apt.conf.d/99ignore-release-date \
+    && apt-get update \
+    && apt-get upgrade -y \
+    && apt-get install -y --no-install-recommends \
+       curl ffmpeg tesseract-ocr tesseract-ocr-eng tesseract-ocr-vie \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system app \
+    && useradd --system --gid app --home /app app
+WORKDIR /app
+COPY --from=api-builder /app/.venv /app/.venv
+COPY --from=api-builder /app/tiktoken-cache /app/tiktoken-cache
+# pytubefix needs the bundled Node executable, not npm/corepack or the C/C++
+# headers shipped in nodejs-wheel. Removing those build/package-manager assets
+# prevents unused npm dependency trees from entering the API attack surface.
+RUN rm -rf \
+       /app/.venv/lib/python3.12/site-packages/nodejs_wheel/lib/node_modules \
+       /app/.venv/lib/python3.12/site-packages/nodejs_wheel/include \
+       /app/.venv/lib/python3.12/site-packages/nodejs_wheel/share \
+       /app/.venv/lib/python3.12/site-packages/nodejs_wheel/bin/npm \
+       /app/.venv/lib/python3.12/site-packages/nodejs_wheel/bin/npx \
+       /app/.venv/lib/python3.12/site-packages/nodejs_wheel/bin/corepack
+# Copy only runtime code and deterministic manifests. In particular, never
+# copy developer worktrees, package locks, tests, reports or local .env files.
+COPY api /app/api
+COPY open_notebook /app/open_notebook
+COPY commands /app/commands
+COPY scripts /app/scripts
+COPY config /app/config
+COPY prompts /app/prompts
+COPY assets /app/assets
+COPY frontend/src/app /app/frontend/src/app
+COPY pyproject.toml /app/pyproject.toml
+RUN mkdir -p /app/data /app/tiktoken-cache \
+    && chown -R app:app /app/data /app/tiktoken-cache
+ENV PATH=/app/.venv/bin:$PATH \
+    VIRTUAL_ENV=/app/.venv \
+    UV_NO_SYNC=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    TIKTOKEN_CACHE_DIR=/app/tiktoken-cache
+USER app
+EXPOSE 5055
+CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "5055", "--proxy-headers", "--forwarded-allow-ips", "*"]

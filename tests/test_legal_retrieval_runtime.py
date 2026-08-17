@@ -82,6 +82,47 @@ def test_query_vector_cache_reuses_embedding_across_retrieval_tiers(
     assert retriever._query_vector_cache.stats()["hits"] == 1
 
 
+def test_explicit_exact_law_and_article_skips_redundant_ann(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retriever = legal_search.LegalRetriever()
+    collection = MagicMock()
+    retriever._collection = collection
+    retriever._source_collection = collection
+    row = _row(1, 10, "Nội dung Điều 16 Luật Hộ tịch.")
+    row.update(
+        {
+            "chunk_index": 0,
+            "article_content": row["content"],
+            "exact_article_chunk_count": 1,
+            # An explicit law+article remains authoritative when the current
+            # document has not yet been assigned a reviewed domain.
+            "domain_slug": None,
+        }
+    )
+    monkeypatch.setattr(retriever, "_fetch_exact_chunks", lambda *args, **kwargs: [row])
+    monkeypatch.setattr(retriever, "_fetch_chunks", lambda *args, **kwargs: [row])
+    monkeypatch.setattr(retriever, "_fetch_neighbor_chunk_ids", lambda *args, **kwargs: [])
+    monkeypatch.setattr(retriever, "_fetch_relationships", lambda *args, **kwargs: {})
+    encode = MagicMock(return_value=np.zeros(2, dtype=np.float32))
+    monkeypatch.setattr(retriever, "encode_query", encode)
+
+    result = retriever.search(
+        legal_search.SearchRequest(
+            query="Theo 60/2014/QH13, Điều 16 quy định gì?",
+            domain="ho_tich_chung_thuc",
+            as_of=date(2026, 7, 28),
+            limit=2,
+            include_trace=True,
+            allow_broad_fallback=False,
+        )
+    )
+
+    encode.assert_not_called()
+    collection.query.assert_not_called()
+    assert result["results"][0]["chunk_id"] == 1
+    assert result["trace"]["reranker"]["mode"] == "exact_article_bypass"
+    assert result["trace"]["pipeline_counts"]["ann_skipped_for_exact_provision"] is True
 def test_cuda_oom_in_auto_mode_switches_to_cpu_and_retries_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -113,18 +154,30 @@ def test_cuda_oom_in_auto_mode_switches_to_cpu_and_retries_once(
     assert retriever._embedding_fallback_reason == "cuda_oom"
 
 
-def test_prewarm_marks_retriever_ready_only_after_embedding(
+def test_prewarm_marks_retriever_ready_only_after_both_indexes_are_warm(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     retriever = legal_search.LegalRetriever()
     monkeypatch.setattr(retriever, "_load", MagicMock())
     encode = MagicMock(return_value=np.zeros(2, dtype=np.float32))
     monkeypatch.setattr(retriever, "encode_query", encode)
+    retriever._collection = MagicMock()
+    retriever._source_collection = MagicMock()
+    for collection in (retriever._collection, retriever._source_collection):
+        collection.query.return_value = {
+            "ids": [[]],
+            "metadatas": [[]],
+            "distances": [[]],
+        }
 
     retriever.prewarm()
 
     assert retriever._ready is True
     encode.assert_called_once()
+    retriever._collection.query.assert_called_once()
+    retriever._source_collection.query.assert_called_once()
+    assert retriever._collection.query.call_args.kwargs["n_results"] == 1
+    assert retriever._source_collection.query.call_args.kwargs["n_results"] == 1
 
 
 def test_health_reports_device_readiness_and_sanitized_cache_stats(
@@ -170,6 +223,7 @@ def test_search_rewrites_once_and_computes_bm25_scores_once(
     retriever._source_collection = collection
     encode = MagicMock(return_value=np.zeros(2, dtype=np.float32))
     monkeypatch.setattr(retriever, "encode_query", encode)
+    monkeypatch.setattr(retriever, "_fetch_exact_chunks", lambda *args, **kwargs: [])
     monkeypatch.setattr(retriever, "_fetch_lexical_chunks", lambda *args, **kwargs: [])
     monkeypatch.setattr(retriever, "_fetch_fallback_chunks", lambda *args, **kwargs: [])
     monkeypatch.setattr(
@@ -181,6 +235,7 @@ def test_search_rewrites_once_and_computes_bm25_scores_once(
         ],
     )
     monkeypatch.setattr(retriever, "_fetch_relationships", lambda *args, **kwargs: {})
+    monkeypatch.setattr(retriever, "_fetch_neighbor_chunk_ids", lambda *args, **kwargs: [])
     scores = MagicMock(return_value=np.array([2.0, 1.0]))
     bm25_instance = MagicMock()
     bm25_instance.get_scores = scores
@@ -212,6 +267,7 @@ def test_evidence_dedupe_keeps_two_complementary_chunks_when_needed(
     retriever._collection = collection
     retriever._source_collection = collection
     monkeypatch.setattr(retriever, "encode_query", lambda _query: np.zeros(2, dtype=np.float32))
+    monkeypatch.setattr(retriever, "_fetch_exact_chunks", lambda *args, **kwargs: [])
     monkeypatch.setattr(retriever, "_fetch_lexical_chunks", lambda *args, **kwargs: [])
     monkeypatch.setattr(retriever, "_fetch_fallback_chunks", lambda *args, **kwargs: [])
     monkeypatch.setattr(
@@ -224,6 +280,7 @@ def test_evidence_dedupe_keeps_two_complementary_chunks_when_needed(
         ],
     )
     monkeypatch.setattr(retriever, "_fetch_relationships", lambda *args, **kwargs: {})
+    monkeypatch.setattr(retriever, "_fetch_neighbor_chunk_ids", lambda *args, **kwargs: [])
 
     result = retriever.search(
         legal_search.SearchRequest(

@@ -1,8 +1,18 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { getApiUrl } from '@/lib/config'
+import { sessionSecurityHeaders } from '@/lib/api/session-security'
 
 export type UserRole = 'officer' | 'citizen' | 'admin'
+export type MfaChallenge =
+  | { type: 'code' }
+  | { type: 'setup'; setupToken: string }
+
+export type TotpSetup = {
+  secret: string
+  provisioningUri: string
+  confirmToken: string
+}
 
 interface AuthState {
   isAuthenticated: boolean
@@ -11,7 +21,7 @@ interface AuthState {
   userId: string | null
   username: string | null
   email: string | null
-  authMode: 'legacy_password' | 'user_session' | null
+  authMode: 'legacy_password' | 'user_session' | 'cookie_session' | null
   isLoading: boolean
   error: string | null
   lastAuthCheck: number | null
@@ -20,11 +30,14 @@ interface AuthState {
   authRequired: boolean | null
   availableRoles: UserRole[]
   mustChangePassword: boolean
+  mfaChallenge: MfaChallenge | null
   setHasHydrated: (state: boolean) => void
   checkAuthRequired: () => Promise<boolean>
-  login: (identifier: string, password: string) => Promise<boolean>
+  login: (identifier: string, password: string, totpCode?: string) => Promise<boolean>
+  setupTotp: (setupToken: string) => Promise<TotpSetup | null>
+  confirmTotp: (confirmToken: string, code: string) => Promise<boolean>
   selectRole: (role: UserRole) => void
-  logout: () => void
+  logout: () => Promise<void>
   checkAuth: () => Promise<boolean>
 }
 
@@ -38,6 +51,7 @@ function clearSessionState() {
     email: null,
     authMode: null,
     mustChangePassword: false,
+    mfaChallenge: null,
   }
 }
 
@@ -86,6 +100,7 @@ export const useAuthStore = create<AuthState>()(
       authRequired: null,
       availableRoles: ['citizen'],
       mustChangePassword: false,
+      mfaChallenge: null,
 
       setHasHydrated: (state: boolean) => {
         set({ hasHydrated: state })
@@ -96,6 +111,7 @@ export const useAuthStore = create<AuthState>()(
           const apiUrl = await getApiUrl()
           const response = await fetch(`${apiUrl}/api/auth/status`, {
             cache: 'no-store',
+            credentials: 'include',
           })
 
           if (!response.ok) {
@@ -134,35 +150,83 @@ export const useAuthStore = create<AuthState>()(
         set({ role })
       },
 
-      login: async (identifier: string, password: string) => {
+      login: async (identifier: string, password: string, totpCode?: string) => {
         set({ isLoading: true, error: null })
         try {
           const apiUrl = await getApiUrl()
 
           const response = await fetch(`${apiUrl}/api/auth/login`, {
             method: 'POST',
+            credentials: 'include',
             headers: {
               'Content-Type': 'application/json',
             },
-            body: JSON.stringify({ identifier: identifier.trim() || null, password }),
+            body: JSON.stringify({
+              identifier: identifier.trim() || null,
+              password,
+              ...(totpCode?.trim() ? { totp_code: totpCode.trim() } : {}),
+            }),
           })
 
           if (response.ok) {
             const data = await response.json()
             set({
               isAuthenticated: true,
-              token: data.token,
+              token: data.token || null,
               role: data.role,
               userId: data.user_id || null,
               username: data.username || null,
               email: data.email || null,
               authMode: data.auth_mode || 'legacy_password',
               mustChangePassword: Boolean(data.must_change_password),
+              mfaChallenge: null,
               isLoading: false,
               lastAuthCheck: Date.now(),
               error: null,
             })
             return true
+          }
+
+          let responseBody: Record<string, unknown> = {}
+          try {
+            responseBody = (await response.json()) as Record<string, unknown>
+          } catch {
+            responseBody = {}
+          }
+          const detail = responseBody.detail
+          const detailRecord = detail && typeof detail === 'object'
+            ? detail as Record<string, unknown>
+            : {}
+          const mfaCode = typeof detailRecord.code === 'string' ? detailRecord.code : ''
+          if (
+            response.status === 428
+            && mfaCode === 'MFA_SETUP_REQUIRED'
+            && typeof detailRecord.setup_token === 'string'
+          ) {
+            set({
+              ...clearSessionState(),
+              mfaChallenge: {
+                type: 'setup',
+                setupToken: detailRecord.setup_token,
+              },
+              error: null,
+              isLoading: false,
+            })
+            return false
+          }
+          if (
+            response.status === 401
+            && (mfaCode === 'MFA_CODE_REQUIRED' || mfaCode === 'MFA_CODE_INVALID')
+          ) {
+            set({
+              ...clearSessionState(),
+              mfaChallenge: { type: 'code' },
+              error: mfaCode === 'MFA_CODE_INVALID'
+                ? 'Mã xác thực không đúng hoặc đã hết hạn.'
+                : null,
+              isLoading: false,
+            })
+            return false
           }
 
           let errorMessage = 'Đăng nhập thất bại'
@@ -173,15 +237,10 @@ export const useAuthStore = create<AuthState>()(
           } else if (response.status >= 500) {
             errorMessage = 'Lỗi máy chủ. Vui lòng thử lại sau.'
           } else {
-            try {
-              const body = (await response.json()) as Record<string, unknown>
-              errorMessage = apiErrorMessage(
-                body?.detail ?? body?.message,
-                `Đăng nhập thất bại (${response.status})`,
-              )
-            } catch {
-              errorMessage = `Đăng nhập thất bại (${response.status})`
-            }
+            errorMessage = apiErrorMessage(
+              responseBody?.detail ?? responseBody?.message,
+              `Đăng nhập thất bại (${response.status})`,
+            )
           }
 
           set({
@@ -210,22 +269,123 @@ export const useAuthStore = create<AuthState>()(
         }
       },
 
-      logout: () => {
-        set({
-          ...clearSessionState(),
-          error: null,
-        })
+      setupTotp: async (setupToken: string) => {
+        set({ isLoading: true, error: null })
+        try {
+          const apiUrl = await getApiUrl()
+          const response = await fetch(`${apiUrl}/api/auth/totp/setup`, {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ setup_token: setupToken }),
+          })
+          if (!response.ok) {
+            throw new Error('TOTP_SETUP_FAILED')
+          }
+          const data = await response.json()
+          set({ isLoading: false })
+          return {
+            secret: data.secret,
+            provisioningUri: data.provisioning_uri,
+            confirmToken: data.confirm_token,
+          }
+        } catch {
+          set({
+            isLoading: false,
+            error: 'Không thể tạo cấu hình xác thực hai lớp. Hãy đăng nhập lại.',
+            mfaChallenge: null,
+          })
+          return null
+        }
+      },
+
+      confirmTotp: async (confirmToken: string, code: string) => {
+        set({ isLoading: true, error: null })
+        try {
+          const apiUrl = await getApiUrl()
+          const response = await fetch(`${apiUrl}/api/auth/totp/confirm`, {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              confirm_token: confirmToken,
+              code: code.trim(),
+            }),
+          })
+          if (!response.ok) {
+            set({
+              isLoading: false,
+              error: 'Mã xác thực không đúng hoặc đã hết hạn.',
+            })
+            return false
+          }
+          const data = await response.json()
+          set({
+            isAuthenticated: true,
+            token: data.token || null,
+            role: data.role,
+            userId: data.user_id || null,
+            username: data.username || null,
+            email: data.email || null,
+            authMode: data.auth_mode || 'cookie_session',
+            mustChangePassword: Boolean(data.must_change_password),
+            mfaChallenge: null,
+            isLoading: false,
+            lastAuthCheck: Date.now(),
+            error: null,
+          })
+          return true
+        } catch {
+          set({
+            isLoading: false,
+            error: 'Không kết nối được dịch vụ xác thực hai lớp.',
+          })
+          return false
+        }
+      },
+
+      logout: async () => {
+        const state = get()
+        const controller = new AbortController()
+        const timeout = window.setTimeout(() => controller.abort(), 5000)
+        try {
+          const apiUrl = await getApiUrl()
+          await fetch(`${apiUrl}/api/auth/logout`, {
+            method: 'POST',
+            credentials: 'include',
+            signal: controller.signal,
+            headers: {
+              ...(state.token ? { Authorization: `Bearer ${state.token}` } : {}),
+              ...sessionSecurityHeaders('POST'),
+            },
+          })
+        } catch {
+          // Local session state must still be cleared when the server is
+          // temporarily unreachable.
+        } finally {
+          window.clearTimeout(timeout)
+          set({
+            ...clearSessionState(),
+            error: null,
+          })
+        }
       },
 
       checkAuth: async () => {
         const state = get()
-        const { token, lastAuthCheck, isCheckingAuth, isAuthenticated } = state
+        const {
+          token,
+          authMode,
+          lastAuthCheck,
+          isCheckingAuth,
+          isAuthenticated,
+        } = state
 
         if (isCheckingAuth) {
           return isAuthenticated
         }
 
-        if (!token) {
+        if (!token && authMode !== 'cookie_session') {
           return false
         }
 
@@ -241,8 +401,9 @@ export const useAuthStore = create<AuthState>()(
 
           const response = await fetch(`${apiUrl}/api/users/me`, {
             method: 'GET',
+            credentials: 'include',
             headers: {
-              Authorization: `Bearer ${token}`,
+              ...(token ? { Authorization: `Bearer ${token}` } : {}),
               'X-User-Role': state.role || 'citizen',
               'Content-Type': 'application/json',
             },

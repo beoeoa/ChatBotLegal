@@ -3,9 +3,7 @@
 import { Control, Controller } from "react-hook-form"
 import { useTranslation } from "@/lib/hooks/use-translation"
 import { FormSection } from "@/components/ui/form-section"
-import { CheckboxList } from "@/components/ui/checkbox-list"
 import { Checkbox } from "@/components/ui/checkbox"
-import { Transformation } from "@/lib/types/transformations"
 import { SettingsResponse } from "@/lib/types/api"
 
 interface CreateSourceFormData {
@@ -15,56 +13,39 @@ interface CreateSourceFormData {
   content?: string
   file?: FileList | File
   notebooks?: string[]
-  transformations?: string[]
   embed: boolean
   async_processing: boolean
 }
 
 interface ProcessingStepProps {
   control: Control<CreateSourceFormData>
-  transformations: Transformation[]
-  selectedTransformations: string[]
-  onToggleTransformation: (transformationId: string) => void
-  loading?: boolean
   settings?: SettingsResponse
+  disableEmbedding?: boolean
 }
 
 export function ProcessingStep({
   control,
-  transformations,
-  selectedTransformations,
-  onToggleTransformation,
-  loading = false,
-  settings
+  settings,
+  disableEmbedding = false,
 }: ProcessingStepProps) {
   const { t } = useTranslation()
-  const transformationItems = transformations.map((transformation) => ({
-    id: transformation.id,
-    title: transformation.title,
-    description: transformation.description
-  }))
-
   return (
     <div className="space-y-8">
-      <FormSection
-        title={`${t('navigation.transformations')} (${t('common.optional')})`}
-        description={t('sources.processDescription')}
-      >
-        <CheckboxList
-          items={transformationItems}
-          selectedIds={selectedTransformations}
-          onToggle={onToggleTransformation}
-          loading={loading}
-          emptyMessage={t('common.noMatches')}
-        />
-      </FormSection>
-
       <FormSection
         title={t('navigation.settings')}
         description={t('sources.processDescription')}
       >
         <div className="space-y-4">
-          {settings?.default_embedding_option === 'ask' && (
+          {disableEmbedding && (
+            <div className="p-3 rounded-md bg-muted border border-border">
+              <p className="text-sm font-medium">Không tự động nhúng văn bản</p>
+              <p className="text-xs text-muted-foreground mt-1">
+                Nội dung sẽ được trích xuất để hỏi đáp và chỉnh sửa độc lập. Chỉ nhúng khi bạn chủ động thực hiện sau.
+              </p>
+            </div>
+          )}
+
+          {!disableEmbedding && settings?.default_embedding_option === 'ask' && (
             <Controller
               control={control}
               name="embed"
@@ -90,7 +71,7 @@ export function ProcessingStep({
             />
           )}
 
-          {settings?.default_embedding_option === 'always' && (
+          {!disableEmbedding && settings?.default_embedding_option === 'always' && (
             <div className="p-3 rounded-md bg-primary/10 border border-primary/30">
               <div className="flex items-start gap-3">
                 <div className="w-4 h-4 bg-primary rounded-full mt-0.5 flex-shrink-0"></div>
@@ -105,7 +86,7 @@ export function ProcessingStep({
             </div>
           )}
 
-          {settings?.default_embedding_option === 'never' && (
+          {!disableEmbedding && settings?.default_embedding_option === 'never' && (
             <div className="p-3 rounded-md bg-muted border border-border">
               <div className="flex items-start gap-3">
                 <div className="w-4 h-4 bg-muted-foreground rounded-full mt-0.5 flex-shrink-0"></div>

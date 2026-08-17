@@ -1,0 +1,7 @@
+-- Isolated rehearsal rollback only. The runner refuses the live/default database.
+REMOVE TABLE IF EXISTS legal_lifecycle_idempotency;
+REMOVE TABLE IF EXISTS legal_activation_manifest;
+REMOVE TABLE IF EXISTS legal_document_approval;
+REMOVE TABLE IF EXISTS legal_document_version;
+REMOVE TABLE IF EXISTS legal_document_draft;
+

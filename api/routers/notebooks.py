@@ -112,7 +112,11 @@ async def create_notebook(notebook: NotebookCreate, request: Request):
         owner_user = get_request_user_id(request)
         if owner_user:
             await repo_query(
-                "UPDATE $notebook_id SET owner_user = type::record($owner_user);",
+                """
+                UPDATE $notebook_id SET
+                    owner_user = type::record($owner_user),
+                    ownership_status = 'resolved';
+                """,
                 {"notebook_id": ensure_record_id(new_notebook.id), "owner_user": owner_user},
             )
 
@@ -126,6 +130,8 @@ async def create_notebook(notebook: NotebookCreate, request: Request):
             source_count=0,  # New notebook has no sources
             note_count=0,  # New notebook has no notes
         )
+    except HTTPException:
+        raise
     except InvalidInputError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -260,6 +266,153 @@ async def update_notebook(notebook_id: str, notebook_update: NotebookUpdate, req
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Error updating notebook {notebook_id}: {str(e)}")
+
+        return NotebookResponse(
+            id=new_notebook.id or "",
+            name=new_notebook.name,
+            description=new_notebook.description,
+            archived=new_notebook.archived or False,
+            created=str(new_notebook.created),
+            updated=str(new_notebook.updated),
+            source_count=0,  # New notebook has no sources
+            note_count=0,  # New notebook has no notes
+        )
+    except HTTPException:
+        raise
+    except InvalidInputError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error creating notebook: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error creating notebook: {str(e)}"
+        )
+
+
+@router.get(
+    "/notebooks/{notebook_id}/delete-preview", response_model=NotebookDeletePreview
+)
+async def get_notebook_delete_preview(notebook_id: str, request: Request):
+    """Get a preview of what will be deleted when this notebook is deleted."""
+    try:
+        await _assert_notebook_access(notebook_id, request, action="view")
+        notebook = await Notebook.get(notebook_id)
+        if not notebook:
+            raise HTTPException(status_code=404, detail="Notebook not found")
+
+        preview = await notebook.get_delete_preview()
+
+        return NotebookDeletePreview(
+            notebook_id=str(notebook.id),
+            notebook_name=notebook.name,
+            note_count=preview["note_count"],
+            exclusive_source_count=preview["exclusive_source_count"],
+            shared_source_count=preview["shared_source_count"],
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting delete preview for notebook {notebook_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error fetching notebook deletion preview: {str(e)}",
+        )
+
+
+@router.get("/notebooks/{notebook_id}", response_model=NotebookResponse)
+async def get_notebook(notebook_id: str, request: Request):
+    """Get a specific notebook by ID."""
+    try:
+        await _assert_notebook_access(notebook_id, request, action="view")
+        # Query with counts for single notebook
+        query = """
+            SELECT *,
+            count(<-reference.in) as source_count,
+            count(<-artifact.in) as note_count
+            FROM $notebook_id
+        """
+        result = await repo_query(query, {"notebook_id": ensure_record_id(notebook_id)})
+
+        if not result:
+            raise HTTPException(status_code=404, detail="Notebook not found")
+
+        nb = result[0]
+        return NotebookResponse(
+            id=str(nb.get("id", "")),
+            name=nb.get("name", ""),
+            description=nb.get("description", ""),
+            archived=nb.get("archived", False),
+            created=str(nb.get("created", "")),
+            updated=str(nb.get("updated", "")),
+            source_count=nb.get("source_count", 0),
+            note_count=nb.get("note_count", 0),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching notebook {notebook_id}: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error fetching notebook: {str(e)}"
+        )
+
+
+@router.put("/notebooks/{notebook_id}", response_model=NotebookResponse)
+async def update_notebook(notebook_id: str, notebook_update: NotebookUpdate, request: Request):
+    """Update a notebook."""
+    try:
+        await _assert_notebook_access(notebook_id, request, action="write")
+        notebook = await Notebook.get(notebook_id)
+        if not notebook:
+            raise HTTPException(status_code=404, detail="Notebook not found")
+
+        # Update only provided fields
+        if notebook_update.name is not None:
+            notebook.name = notebook_update.name
+        if notebook_update.description is not None:
+            notebook.description = notebook_update.description
+        if notebook_update.archived is not None:
+            notebook.archived = notebook_update.archived
+
+        await notebook.save()
+
+        # Query with counts after update
+        query = """
+            SELECT *,
+            count(<-reference.in) as source_count,
+            count(<-artifact.in) as note_count
+            FROM $notebook_id
+        """
+        result = await repo_query(query, {"notebook_id": ensure_record_id(notebook_id)})
+
+        if result:
+            nb = result[0]
+            return NotebookResponse(
+                id=str(nb.get("id", "")),
+                name=nb.get("name", ""),
+                description=nb.get("description", ""),
+                archived=nb.get("archived", False),
+                created=str(nb.get("created", "")),
+                updated=str(nb.get("updated", "")),
+                source_count=nb.get("source_count", 0),
+                note_count=nb.get("note_count", 0),
+            )
+
+        # Fallback if query fails
+        return NotebookResponse(
+            id=notebook.id or "",
+            name=notebook.name,
+            description=notebook.description,
+            archived=notebook.archived or False,
+            created=str(notebook.created),
+            updated=str(notebook.updated),
+            source_count=0,
+            note_count=0,
+        )
+    except HTTPException:
+        raise
+    except InvalidInputError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error updating notebook {notebook_id}: {str(e)}")
         raise HTTPException(
             status_code=500, detail=f"Error updating notebook: {str(e)}"
         )
@@ -275,15 +428,15 @@ async def add_source_to_notebook(notebook_id: str, source_id: str, request: Requ
         if not notebook:
             raise HTTPException(status_code=404, detail="Notebook not found")
 
-        # Check source ownership before linking it.
-        await assert_source_access(source_id, request, action="write")
+        # Check source view access before linking it.
+        await assert_source_access(source_id, request, action="view")
         source = await Source.get(source_id)
         if not source:
             raise HTTPException(status_code=404, detail="Source not found")
 
         # Check if reference already exists (idempotency)
         existing_ref = await repo_query(
-            "SELECT * FROM reference WHERE out = $source_id AND in = $notebook_id",
+            "SELECT * FROM reference WHERE (out = $source_id AND in = $notebook_id) OR (out = $notebook_id AND in = $source_id)",
             {
                 "notebook_id": ensure_record_id(notebook_id),
                 "source_id": ensure_record_id(source_id),
@@ -322,9 +475,9 @@ async def remove_source_from_notebook(notebook_id: str, source_id: str, request:
         if not notebook:
             raise HTTPException(status_code=404, detail="Notebook not found")
 
-        # Delete the reference record linking source to notebook
+        # Delete the reference record linking source to notebook (check both directions)
         await repo_query(
-            "DELETE FROM reference WHERE out = $notebook_id AND in = $source_id",
+            "DELETE FROM reference WHERE (out = $notebook_id AND in = $source_id) OR (out = $source_id AND in = $notebook_id)",
             {
                 "notebook_id": ensure_record_id(notebook_id),
                 "source_id": ensure_record_id(source_id),

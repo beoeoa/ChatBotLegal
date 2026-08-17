@@ -97,7 +97,6 @@ async function fetchConfig(): Promise<AppConfig> {
   // This allows API_URL to be set at runtime (not baked into build)
   // Note: Endpoint is at /config (not /api/config) to avoid reverse proxy conflicts
   let runtimeApiUrl: string | null = null
-  let apiUrlSource: 'runtime' | 'environment' | 'fallback' | 'override' = 'fallback'
   try {
     if (isDev) console.log('?? [Config] Attempting to fetch runtime config from /config endpoint...')
     const runtimeResponse = await fetch('/config', {
@@ -128,38 +127,49 @@ async function fetchConfig(): Promise<AppConfig> {
       console.log('?? [Config] Using relative path (rewrites) as default')
   }
 
-  // Priority: Runtime config > Build-time env var > Smart default
-  // Note: runtimeApiUrl must be checked against null explicitly as empty string might be valid if intended (though we treat '' as null above)
-  const baseUrl = overrideApiUrl || (runtimeApiUrl !== null && runtimeApiUrl !== undefined ? runtimeApiUrl : (envApiUrl || defaultApiUrl))
-  if (overrideApiUrl) {
-    apiUrlSource = 'override'
-  } else if (runtimeApiUrl !== null && runtimeApiUrl !== undefined) {
-    apiUrlSource = 'runtime'
-  } else if (envApiUrl) {
-    apiUrlSource = 'environment'
-  } else {
-    apiUrlSource = 'fallback'
+  // Priority: Runtime config > Build-time env var > Smart default. An old
+  // browser override may point at a retired port, so keep the priority but
+  // try the remaining candidates when that endpoint is unreachable.
+  type ApiUrlSource = 'runtime' | 'environment' | 'fallback' | 'override'
+  const candidates: Array<{ url: string; source: ApiUrlSource }> = []
+  const addCandidate = (url: string | null | undefined, source: ApiUrlSource) => {
+    if (url === null || url === undefined) return
+    if (candidates.some((candidate) => candidate.url === url)) return
+    candidates.push({ url, source })
+  }
+  addCandidate(overrideApiUrl, 'override')
+  addCandidate(runtimeApiUrl, 'runtime')
+  addCandidate(envApiUrl, 'environment')
+  addCandidate(defaultApiUrl, 'fallback')
+
+  if (candidates.length === 0) {
+    throw new Error('No API URL candidate is configured')
   }
   if (isDev) {
-    console.log('?? [Config] Final base URL to try:', baseUrl)
+    console.log('?? [Config] API URL candidates:', candidates.map((candidate) => candidate.url))
     console.log('?? [Config] Selection priority: runtime=' + (runtimeApiUrl ? '?' : '?') +
                 ', build-time=' + (envApiUrl ? '?' : '?') +
                 ', override=' + (overrideApiUrl ? '?' : '?') +
                 ', smart-default=' + (!runtimeApiUrl && !envApiUrl && !overrideApiUrl ? '?' : '?'))
   }
 
-  try {
-    if (isDev) console.log('?? [Config] Fetching backend config from:', `${baseUrl}/api/config`)
-    // Try to fetch runtime config from backend API
-    const response = await fetch(`${baseUrl}/api/config`, {
-      cache: 'no-store',
-    })
+  let lastError: unknown = null
+  for (const candidate of candidates) {
+    try {
+      if (isDev) console.log('?? [Config] Fetching backend config from:', `${candidate.url}/api/config`)
+      const response = await fetch(`${candidate.url}/api/config`, {
+        cache: 'no-store',
+      })
 
-    if (response.ok) {
+      if (!response.ok) {
+        lastError = new Error(`API config endpoint returned status ${response.status}`)
+        continue
+      }
+
       const data: BackendConfigResponse = await response.json()
       config = {
-        apiUrl: baseUrl, // Use baseUrl from runtime-config (Python no longer returns this)
-        apiUrlSource,
+        apiUrl: candidate.url, // Use the first reachable candidate.
+        apiUrlSource: candidate.source,
         deploymentMode,
         version: data.version || 'unknown',
         buildTime: BUILD_TIME,
@@ -169,14 +179,14 @@ async function fetchConfig(): Promise<AppConfig> {
       }
       if (isDev) console.log('? [Config] Successfully loaded API config:', config)
       return config
-    } else {
-      // Don't log error here - ConnectionGuard will display it
-      throw new Error(`API config endpoint returned status ${response.status}`)
+    } catch (error) {
+      lastError = error
+      if (isDev) console.warn('[Config] API candidate failed, trying next candidate:', candidate.url)
     }
-  } catch (error) {
-    // Don't log error here - ConnectionGuard will display it with proper UI
-    throw error
   }
+
+  // Don't log error here - ConnectionGuard will display it with proper UI.
+  throw lastError instanceof Error ? lastError : new Error('Unable to connect to API')
 }
 
 /**

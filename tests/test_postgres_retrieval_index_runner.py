@@ -56,7 +56,7 @@ def test_plan_only_never_resolves_url_or_opens_database(monkeypatch, tmp_path):
     assert '"mode": "plan-only"' in report
     assert '"database_connection_opened": false' in report
     assert '"executed": false' in report
-    assert '"planned_statements": 8' in report
+    assert '"planned_statements": 12' in report
     assert '"migration": "001_retrieval_indexes_down.sql"' in report
     assert '"validated": true' in report
 

@@ -32,12 +32,17 @@ def test_text_pdf_fixture_uses_pymupdf_and_persists_review_evidence():
 
 
 def test_scan_pdf_fixture_calls_ocr_adapter_and_keeps_text_when_success(monkeypatch):
-    def fake_ocr(_data: bytes, max_pages: int):
-        assert max_pages == 50
+    def fake_ocr(_data: bytes, max_pages: int | None):
+        assert max_pages is None
         return {
             "status": "ok",
             "text": "Van ban scan da OCR duoc noi dung.",
             "page_count": 1,
+            "processed_pages": 1,
+            "total_pages": 1,
+            "failed_pages": [],
+            "complete": True,
+            "truncated": False,
             "ocr_confidence": 88.5,
             "language": "vie+eng",
             "reason": "",
@@ -52,6 +57,8 @@ def test_scan_pdf_fixture_calls_ocr_adapter_and_keeps_text_when_success(monkeypa
     assert result["ocr_confidence"] == 88.5
     assert result["text"] == "Van ban scan da OCR duoc noi dung."
     assert result["text_fingerprint"]
+    assert result["processed_pages"] == result["total_pages"] == 1
+    assert result["complete"] is True
 
 
 def test_scan_pdf_ocr_unavailable_is_soft_failure_without_fabricated_text(monkeypatch):
@@ -77,3 +84,26 @@ def test_ocr_candidate_requires_manual_completion_before_import():
     })
 
     assert any("OCR/trích xuất" in error for error in errors)
+
+
+def test_partial_page_extraction_cannot_be_imported():
+    errors = LegalCrawlService.validate_candidate_for_import({
+        "title": "Văn bản thử nghiệm",
+        "law_number": "01/2026/NĐ-CP",
+        "source_url": "https://example.gov.vn/document.pdf",
+        "scope": "central",
+        "review_status": "approved",
+        "content": "Nội dung đã trích xuất. " * 20,
+        "raw_metadata": {
+            "confirmed_official_source": True,
+            "effective_date": "2026-01-01",
+        },
+        "extraction_result": {
+            "ocr_status": "partial",
+            "processed_pages": 50,
+            "total_pages": 94,
+            "complete": False,
+        },
+    })
+
+    assert any("đủ toàn bộ số trang" in error for error in errors)

@@ -192,64 +192,6 @@ class APIClient:
         """Update default model assignments."""
         return self._make_request("PUT", "/api/models/defaults", json=defaults)
 
-    # Transformations API methods
-    def get_transformations(self) -> List[Dict[Any, Any]]:
-        """Get all transformations."""
-        result = self._make_request("GET", "/api/transformations")
-        return result if isinstance(result, list) else [result]
-
-    def create_transformation(
-        self,
-        name: str,
-        title: str,
-        description: str,
-        prompt: str,
-        apply_default: bool = False,
-    ) -> Union[Dict[Any, Any], List[Dict[Any, Any]]]:
-        """Create a new transformation."""
-        data = {
-            "name": name,
-            "title": title,
-            "description": description,
-            "prompt": prompt,
-            "apply_default": apply_default,
-        }
-        return self._make_request("POST", "/api/transformations", json=data)
-
-    def get_transformation(
-        self, transformation_id: str
-    ) -> Union[Dict[Any, Any], List[Dict[Any, Any]]]:
-        """Get a specific transformation."""
-        return self._make_request("GET", f"/api/transformations/{transformation_id}")
-
-    def update_transformation(
-        self, transformation_id: str, **updates
-    ) -> Union[Dict[Any, Any], List[Dict[Any, Any]]]:
-        """Update a transformation."""
-        return self._make_request(
-            "PUT", f"/api/transformations/{transformation_id}", json=updates
-        )
-
-    def delete_transformation(
-        self, transformation_id: str
-    ) -> Union[Dict[Any, Any], List[Dict[Any, Any]]]:
-        """Delete a transformation."""
-        return self._make_request("DELETE", f"/api/transformations/{transformation_id}")
-
-    def execute_transformation(
-        self, transformation_id: str, input_text: str, model_id: str
-    ) -> Union[Dict[Any, Any], List[Dict[Any, Any]]]:
-        """Execute a transformation on input text."""
-        data = {
-            "transformation_id": transformation_id,
-            "input_text": input_text,
-            "model_id": model_id,
-        }
-        # Use configured timeout for transformation operations
-        return self._make_request(
-            "POST", "/api/transformations/execute", json=data, timeout=self.timeout
-        )
-
     # Notes API methods
     def get_notes(self, notebook_id: Optional[str] = None) -> List[Dict[Any, Any]]:
         """Get all notes with optional notebook filtering."""
@@ -376,7 +318,6 @@ class APIClient:
         file_path: Optional[str] = None,
         content: Optional[str] = None,
         title: Optional[str] = None,
-        transformations: Optional[List[str]] = None,
         embed: bool = False,
         delete_source: bool = False,
         async_processing: bool = False,
@@ -410,9 +351,6 @@ class APIClient:
             data["content"] = content
         if title:
             data["title"] = title
-        if transformations:
-            data["transformations"] = transformations
-
         # Use configured timeout for source creation (especially PDF processing with OCR)
         return self._make_request(
             "POST", "/api/sources/json", json=data, timeout=self.timeout
@@ -468,69 +406,6 @@ class APIClient:
         return self._make_request(
             "POST", f"/api/insights/{insight_id}/save-as-note", json=data
         )
-
-    def create_source_insight(
-        self, source_id: str, transformation_id: str, model_id: Optional[str] = None
-    ) -> Union[Dict[Any, Any], List[Dict[Any, Any]]]:
-        """Create a new insight for a source by running a transformation."""
-        data = {"transformation_id": transformation_id}
-        if model_id:
-            data["model_id"] = model_id
-        return self._make_request(
-            "POST", f"/api/sources/{source_id}/insights", json=data
-        )
-
-    # Episode Profiles API methods
-    def get_episode_profiles(self) -> List[Dict[Any, Any]]:
-        """Get all episode profiles."""
-        result = self._make_request("GET", "/api/episode-profiles")
-        return result if isinstance(result, list) else [result]
-
-    def get_episode_profile(
-        self, profile_name: str
-    ) -> Union[Dict[Any, Any], List[Dict[Any, Any]]]:
-        """Get a specific episode profile by name."""
-        return self._make_request("GET", f"/api/episode-profiles/{profile_name}")
-
-    def create_episode_profile(
-        self,
-        name: str,
-        description: str = "",
-        speaker_config: str = "",
-        outline_provider: str = "",
-        outline_model: str = "",
-        transcript_provider: str = "",
-        transcript_model: str = "",
-        default_briefing: str = "",
-        num_segments: int = 5,
-    ) -> Union[Dict[Any, Any], List[Dict[Any, Any]]]:
-        """Create a new episode profile."""
-        data = {
-            "name": name,
-            "description": description,
-            "speaker_config": speaker_config,
-            "outline_provider": outline_provider,
-            "outline_model": outline_model,
-            "transcript_provider": transcript_provider,
-            "transcript_model": transcript_model,
-            "default_briefing": default_briefing,
-            "num_segments": num_segments,
-        }
-        return self._make_request("POST", "/api/episode-profiles", json=data)
-
-    def update_episode_profile(
-        self, profile_id: str, **updates
-    ) -> Union[Dict[Any, Any], List[Dict[Any, Any]]]:
-        """Update an episode profile."""
-        return self._make_request(
-            "PUT", f"/api/episode-profiles/{profile_id}", json=updates
-        )
-
-    def delete_episode_profile(
-        self, profile_id: str
-    ) -> Union[Dict[Any, Any], List[Dict[Any, Any]]]:
-        """Delete an episode profile."""
-        return self._make_request("DELETE", f"/api/episode-profiles/{profile_id}")
 
 
 # Global client instance

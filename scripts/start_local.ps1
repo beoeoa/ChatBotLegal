@@ -12,6 +12,80 @@ $logDir = Join-Path $projectRoot "logs"
 $statePath = Join-Path $logDir "local-services.json"
 $surrealExe = Join-Path $projectRoot "tools\surrealdb\surreal-v2.6.5.exe"
 $surrealData = (Join-Path $projectRoot "surreal_data\mydatabase.db").Replace("\", "/")
+$projectPython = Join-Path $projectRoot ".venv\Scripts\python.exe"
+
+if (-not (Test-Path -LiteralPath $projectPython -PathType Leaf)) {
+    throw "Repository Python runtime is missing: $projectPython"
+}
+
+function Import-LocalRuntimeEnv {
+    param([string]$ProjectRoot)
+
+    $envPath = Join-Path $ProjectRoot ".env"
+    if (-not (Test-Path -LiteralPath $envPath)) {
+        return
+    }
+    $allowedKeys = @(
+        "OPEN_NOTEBOOK_PASSWORD",
+        "OPEN_NOTEBOOK_ENCRYPTION_KEY",
+        "OPEN_NOTEBOOK_CITIZEN_PASSWORD",
+        "OPEN_NOTEBOOK_OFFICER_PASSWORD",
+        "OPEN_NOTEBOOK_ADMIN_PASSWORD",
+        "LEGAL_SECTION_GROUNDING_ENABLED",
+        "LEGAL_ANSWER_PIPELINE_V2_ENABLED",
+        "LEGAL_ANSWER_PIPELINE_V2_ROLES",
+        "LEGAL_PROBLEM_MAP_LLM_ENABLED",
+        "LEGAL_LOCAL_FALLBACK_ENABLED",
+        "LEGAL_ASK_PROGRESS_ENABLED",
+        "LEGAL_STRUCTURED_PROVIDER_JSON_MODE",
+        "LEGAL_FORM_COMPLETION_ENABLED",
+        "LEGAL_VALIDITY_SYNC_ENABLED",
+        "LEGAL_CRAWLER_ENABLED",
+        "LEGAL_CRAWL_DETAIL_FETCH_ENABLED",
+        "LEGAL_SOURCE_GAP_ENABLED",
+        "LEGAL_IMPORT_WORKER_ENABLED",
+        "LEGAL_ALLOW_LEGACY_DIRECT_IMPORT",
+        "NEXT_PUBLIC_ASK_SSE_ENABLED",
+        "LEGAL_STRUCTURED_CONTEXT_MAX_CHARS",
+        "LEGAL_STRUCTURED_HARD_CONTEXT_MAX_CHARS",
+        "LEGAL_STRUCTURED_GENERATION_TIMEOUT_SECONDS",
+        "LEGAL_STRUCTURED_HARD_GENERATION_TIMEOUT_SECONDS",
+        "LEGAL_STRUCTURED_TOTAL_TIMEOUT_SECONDS",
+        "LEGAL_STRUCTURED_HARD_TOTAL_TIMEOUT_SECONDS",
+        "LEGAL_STRUCTURED_MAX_OUTPUT_TOKENS",
+        "LEGAL_ANSWER_OPTIMIZED_PROFILE_ENABLED",
+        "LEGAL_ANSWER_OPTIMIZED_PROFILE_ROLES",
+        "LEGAL_ANSWER_OPTIMIZED_PROFILE_CONTEXT_BENCHMARK",
+        "LEGAL_ANSWER_OPTIMIZED_PROFILE_ENFORCED",
+        "LEGAL_ANSWER_OPTIMIZED_PROFILE_STATE_PATH",
+        "READINESS_MODEL_PROBE_ENABLED",
+        "READINESS_MODEL_PROBE_TIMEOUT_SECONDS",
+        "LEGAL_RELEASE_DATABASE_URL",
+        "FORM_GOVERNANCE_SOURCE",
+        "FORM_GOVERNANCE_ROUTER_MODE",
+        "FORM_GOVERNANCE_SHADOW_RELEASE_ID",
+        "FORM_GOVERNANCE_ROLLOUT_ROLES",
+        "FORM_RELEASE_VERIFY_REMOTE_SOURCES",
+        "FORM_RELEASE_ASSET_ROOT"
+    )
+    foreach ($line in Get-Content -LiteralPath $envPath) {
+        $trimmed = $line.Trim()
+        if (-not $trimmed -or $trimmed.StartsWith("#") -or -not $trimmed.Contains("=")) {
+            continue
+        }
+        $key, $value = $trimmed.Split("=", 2)
+        $key = $key.Trim()
+        if ($allowedKeys -notcontains $key) {
+            continue
+        }
+        $value = $value.Trim()
+        if (($value.StartsWith('"') -and $value.EndsWith('"')) -or
+            ($value.StartsWith("'") -and $value.EndsWith("'"))) {
+            $value = $value.Substring(1, $value.Length - 2)
+        }
+        [Environment]::SetEnvironmentVariable($key, $value, "Process")
+    }
+}
 
 function Test-HttpService {
     param([string]$Url, [int]$TimeoutSeconds = 3)
@@ -27,11 +101,12 @@ function Wait-HttpService {
     param(
         [string]$Name,
         [string]$Url,
-        [int]$TimeoutSeconds = 120
+        [int]$TimeoutSeconds = 120,
+        [int]$ProbeTimeoutSeconds = 3
     )
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     do {
-        if (Test-HttpService -Url $Url) {
+        if (Test-HttpService -Url $Url -TimeoutSeconds $ProbeTimeoutSeconds) {
             Write-Host "$Name ready: $Url"
             return
         }
@@ -231,19 +306,38 @@ New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
 Write-Host "Starting the local-only test runtime (Docker and ngrok are not used)."
 
+Import-LocalRuntimeEnv -ProjectRoot $projectRoot
+if (
+    -not $env:OPEN_NOTEBOOK_ENCRYPTION_KEY -or
+    $env:OPEN_NOTEBOOK_ENCRYPTION_KEY -eq "change-me-to-a-secret-string"
+) {
+    throw "OPEN_NOTEBOOK_ENCRYPTION_KEY must be configured with a non-default value."
+}
+
 $env:SURREAL_URL = "ws://127.0.0.1:8000/rpc"
 $env:SURREAL_USER = "root"
 $env:SURREAL_PASSWORD = "root"
 $env:SURREAL_NAMESPACE = "open_notebook"
 $env:SURREAL_DATABASE = "open_notebook"
-$env:OPEN_NOTEBOOK_ENCRYPTION_KEY = "change-me-to-a-secret-string"
 $env:OPEN_NOTEBOOK_DATA_DIR = Join-Path $projectRoot "notebook_data"
 $env:LEGAL_SEARCH_URL = "http://127.0.0.1:8765"
+$env:LEGAL_SEARCH_HOST = "127.0.0.1"
+# The API runs directly on the Windows host in this launcher.  Do not retain
+# the container-only default (`host.docker.internal`) for its local Ollama
+# fallback, otherwise a transient cloud-model failure becomes a misleading 503.
+$env:OLLAMA_URL = "http://127.0.0.1:11434"
 # The local test runtime must use the existing reviewed corpus configured by
 # LEGAL_OLD_ENV_PATH. Do not inherit a staging URL from the desktop session:
 # that database may intentionally have no imported legal tables.
-Remove-Item Env:LEGAL_DATABASE_URL -ErrorAction SilentlyContinue
-$env:LEGAL_LLM_TIMEOUT_SECONDS = "90"
+if ($env:LEGAL_RELEASE_DATABASE_URL) {
+    $env:LEGAL_DATABASE_URL = $env:LEGAL_RELEASE_DATABASE_URL.Replace(
+        "@host.docker.internal:",
+        "@127.0.0.1:"
+    )
+} else {
+    Remove-Item Env:LEGAL_DATABASE_URL -ErrorAction SilentlyContinue
+}
+$env:LEGAL_LLM_TIMEOUT_SECONDS = "60"
 $env:LEGAL_EMBED_DEVICE = if ($env:LEGAL_EMBED_DEVICE) {
     $env:LEGAL_EMBED_DEVICE
 } else {
@@ -280,7 +374,7 @@ Wait-HttpService -Name "Legal retrieval" -Url "http://127.0.0.1:8765/health" -Ti
 # Windows, leaving the frontend available while the API is not actually ready.
 $backendArgs = @("-m", "uvicorn", "api.main:app", "--host", "127.0.0.1", "--port", "5055")
 $backendProcess = Start-Process `
-    -FilePath "python" `
+    -FilePath $projectPython `
     -ArgumentList $backendArgs `
     -WorkingDirectory $projectRoot `
     -WindowStyle Hidden `
@@ -290,8 +384,9 @@ $backendProcess = Start-Process `
 
 Wait-HttpService `
     -Name "Backend readiness" `
-    -Url "http://127.0.0.1:5055/ready" `
-    -TimeoutSeconds 240
+    -Url "http://127.0.0.1:5055/ready/import" `
+    -TimeoutSeconds 240 `
+    -ProbeTimeoutSeconds 15
 
 $frontendProcess = $null
 if (-not (Test-HttpService -Url "http://127.0.0.1:3000/login" -TimeoutSeconds 5)) {

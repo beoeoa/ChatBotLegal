@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "retrieval-serving-manifest-v3.schema.json",
+  "title": "Legal Retrieval Release V2 serving pointer",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "kind",
+    "manifest_version",
+    "dataset_version",
+    "release_id",
+    "source_snapshot_sha256",
+    "chunk_manifest_sha256",
+    "chunk_manifest_file_sha256",
+    "legal_as_of",
+    "inventory_document_count",
+    "document_state_counts",
+    "current_collection",
+    "temporal_collection",
+    "exact_lexical_index",
+    "provenance",
+    "documents",
+    "generated_at",
+    "activation_performed",
+    "active_pointer_changed",
+    "provisional_staging",
+    "release_eligible",
+    "manifest_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "legal-serving-manifest-v3"},
+    "kind": {"const": "release_pointer"},
+    "manifest_version": {"type": "string", "minLength": 1},
+    "dataset_version": {"type": "string", "minLength": 1},
+    "release_id": {"type": "string", "minLength": 1},
+    "source_snapshot_sha256": {"$ref": "#/$defs/sha256"},
+    "chunk_manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "chunk_manifest_file_sha256": {"$ref": "#/$defs/sha256"},
+    "chunk_manifest_path": {"type": "string", "minLength": 1},
+    "source_inventory_file_sha256": {"$ref": "#/$defs/sha256"},
+    "legal_as_of": {"type": "string", "format": "date"},
+    "inventory_document_count": {"const": 12236},
+    "document_state_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["current_retrievable", "historical_only", "future_effective", "quarantined"],
+      "properties": {
+        "current_retrievable": {"type": "integer", "minimum": 0},
+        "historical_only": {"type": "integer", "minimum": 0},
+        "future_effective": {"type": "integer", "minimum": 0},
+        "quarantined": {"type": "integer", "minimum": 0}
+      }
+    },
+    "current_collection": {"$ref": "#/$defs/artifact"},
+    "temporal_collection": {"$ref": "#/$defs/artifact"},
+    "exact_lexical_index": {"$ref": "#/$defs/artifact"},
+    "quality_policy_version": {"const": "legal-chunk-quality-v2"},
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model_artifact_fingerprint",
+        "tokenizer_fingerprint",
+        "embedding_recipe_fingerprint",
+        "passage_recipe_fingerprint",
+        "splitter_fingerprint",
+        "dependency_lock_fingerprint",
+        "quality_policy_version"
+      ],
+      "properties": {
+        "model_artifact_fingerprint": {"$ref": "#/$defs/sha256"},
+        "tokenizer_fingerprint": {"$ref": "#/$defs/sha256"},
+        "embedding_recipe_fingerprint": {"$ref": "#/$defs/sha256"},
+        "passage_recipe_fingerprint": {"$ref": "#/$defs/sha256"},
+        "splitter_fingerprint": {"$ref": "#/$defs/sha256"},
+        "dependency_lock_fingerprint": {"$ref": "#/$defs/sha256"},
+        "quality_policy_version": {"const": "legal-chunk-quality-v2"}
+      }
+    },
+    "documents": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "document_id",
+          "serving_state",
+          "chunk_count",
+          "chunk_ids_sha256"
+        ],
+        "properties": {
+          "document_id": {"type": "integer", "minimum": 1},
+          "serving_state": {
+            "enum": ["current_retrievable", "historical_only", "future_effective", "quarantined"]
+          },
+          "chunk_count": {"type": "integer", "minimum": 0},
+          "chunk_ids_sha256": {"$ref": "#/$defs/sha256"}
+        }
+      }
+    },
+    "generated_at": {"type": "string", "format": "date-time"},
+    "activation_performed": {"const": false},
+    "active_pointer_changed": {"const": false},
+    "provisional_staging": {"type": "boolean"},
+    "release_eligible": {"type": "boolean"},
+    "source_inventory_path": {"type": "string", "minLength": 1},
+    "vector_reports": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["current", "temporal"],
+      "properties": {
+        "current": {"type": "string", "minLength": 1},
+        "temporal": {"type": "string", "minLength": 1}
+      }
+    },
+    "vector_report_checksums": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["current", "temporal"],
+      "properties": {
+        "current": {"$ref": "#/$defs/sha256"},
+        "temporal": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "lexical_report_path": {"type": "string", "minLength": 1},
+    "lexical_report_sha256": {"$ref": "#/$defs/sha256"},
+    "manifest_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "path", "sha256", "release_id", "source_snapshot_sha256", "count"],
+      "properties": {
+        "kind": {"type": "string", "minLength": 1},
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "release_id": {"type": "string", "minLength": 1},
+        "source_snapshot_sha256": {"$ref": "#/$defs/sha256"},
+        "count": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}

@@ -30,8 +30,8 @@ load_dotenv(PROJECT_ROOT / ".env")
 WARD_SCOPE = "Phường Lê Chân, Hải Phòng"
 CREDENTIAL_FILE = PROJECT_ROOT / "data" / "private" / "bootstrap_officer_credentials.json"
 LEGACY_USERNAME_MAP = {
-    "officer_cutru": "officer_hanhchinh",
-    "officer_khieunai": "officer_trattu",
+    "officer_hanhchinh": "officer_cutru",
+    "officer_trattu": "officer_khieunai",
 }
 
 OFFICERS: tuple[dict[str, str], ...] = (
@@ -60,20 +60,20 @@ OFFICERS: tuple[dict[str, str], ...] = (
         "domain": "an_sinh_y_te_giao_duc",
     },
     {
-        "username": "officer_hanhchinh",
-        "email": "officer_hanhchinh@lechan.local",
-        "full_name": "Cán bộ Hành chính công",
-        "department": "Hành chính công",
-        "job_title": "Cán bộ phụ trách Hành chính công",
-        "domain": "hanh_chinh_cong",
+        "username": "officer_cutru",
+        "email": "officer_cutru@lechan.local",
+        "full_name": "Cán bộ Cư trú - An ninh",
+        "department": "Cư trú - An ninh",
+        "job_title": "Cán bộ phụ trách Cư trú - An ninh",
+        "domain": "cu_tru_an_ninh",
     },
     {
-        "username": "officer_trattu",
-        "email": "officer_trattu@lechan.local",
-        "full_name": "Cán bộ Trật tự đô thị",
-        "department": "Trật tự đô thị",
-        "job_title": "Cán bộ phụ trách Trật tự đô thị",
-        "domain": "trat_tu_do_thi",
+        "username": "officer_khieunai",
+        "email": "officer_khieunai@lechan.local",
+        "full_name": "Cán bộ Khiếu nại - Tố cáo - Xử phạt",
+        "department": "Khiếu nại - Tố cáo - Xử phạt",
+        "job_title": "Cán bộ phụ trách Khiếu nại - Tố cáo - Xử phạt",
+        "domain": "khieu_nai_to_cao_xu_phat",
     },
 )
 

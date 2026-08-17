@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "legal-m5-hybrid-experiments-v1.schema.json",
+  "title": "M5 hybrid retrieval experiment summary",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "status", "generated_at", "protocol",
+    "experiment_count", "experiments", "stage_winners",
+    "recommended_config", "selection_rule", "active_pointer_before",
+    "active_pointer_after", "active_pointer_changed", "activation_performed"
+  ],
+  "properties": {
+    "schema_version": {"const": "legal-m5-hybrid-experiments-v1"},
+    "status": {"enum": ["pass", "fail"]},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "protocol": {
+      "type": "object",
+      "required": [
+        "schema_version", "golden_sha256", "candidate_manifest_file_sha256",
+        "candidate_manifest_sha256", "candidate_collection", "document_count",
+        "chunk_vector_count", "case_count", "legal_as_of",
+        "embedding_fingerprint", "source_hashes", "frozen", "protocol_sha256"
+      ]
+    },
+    "experiment_count": {"const": 13},
+    "experiments": {
+      "type": "array",
+      "minItems": 13,
+      "maxItems": 13,
+      "items": {"$ref": "#/$defs/experiment"}
+    },
+    "stage_winners": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["vector_top_k", "lexical_top_k", "fusion"],
+      "properties": {
+        "vector_top_k": {"type": "string", "minLength": 1},
+        "lexical_top_k": {"type": "string", "minLength": 1},
+        "fusion": {"type": "string", "minLength": 1}
+      }
+    },
+    "recommended_config": {"$ref": "#/$defs/search_config"},
+    "selection_rule": {
+      "type": "array",
+      "minItems": 5,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "active_pointer_before": {"type": "string", "minLength": 1},
+    "active_pointer_after": {"type": "string", "minLength": 1},
+    "active_pointer_changed": {"const": false},
+    "activation_performed": {"const": false}
+  },
+  "$defs": {
+    "search_config": {
+      "type": "object",
+      "required": [
+        "candidate_count", "lexical_candidate_count", "fusion_strategy",
+        "vector_weight", "lexical_weight", "ranking_strategy",
+        "enable_learned_reranker", "result_limit", "allow_broad_fallback",
+        "retrieval_tier", "parent_expansion", "neighbor_expansion"
+      ],
+      "properties": {
+        "candidate_count": {"type": "integer", "minimum": 10},
+        "lexical_candidate_count": {"type": "integer", "minimum": 10},
+        "fusion_strategy": {"enum": ["legacy_stack", "rrf", "weighted"]},
+        "vector_weight": {"type": "number", "minimum": 0, "maximum": 1},
+        "lexical_weight": {"type": "number", "minimum": 0, "maximum": 1},
+        "ranking_strategy": {"const": "legacy_stack"},
+        "enable_learned_reranker": {"const": false},
+        "result_limit": {"const": 10},
+        "allow_broad_fallback": {"const": true},
+        "retrieval_tier": {"const": "core"},
+        "parent_expansion": {"const": "baseline_enabled"},
+        "neighbor_expansion": {"const": "baseline_enabled"}
+      }
+    },
+    "experiment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "experiment_id", "stage", "parent_experiment_id", "changed_variable",
+        "search_config", "case_count", "recall_at_10", "mrr",
+        "direct_source_top5", "p50_retrieval_ms", "p95_retrieval_ms",
+        "errors", "wrong_scope_result_count", "outside_manifest_result_count"
+      ],
+      "properties": {
+        "experiment_id": {"type": "string", "minLength": 1},
+        "stage": {"enum": ["control", "vector_top_k", "lexical_top_k", "fusion"]},
+        "parent_experiment_id": {"type": ["string", "null"]},
+        "changed_variable": {"enum": ["none", "candidate_count", "lexical_candidate_count", "fusion_strategy", "fusion_weights"]},
+        "search_config": {"$ref": "#/$defs/search_config"},
+        "case_count": {"const": 1000},
+        "recall_at_10": {"type": "number", "minimum": 0, "maximum": 1},
+        "mrr": {"type": "number", "minimum": 0, "maximum": 1},
+        "direct_source_top5": {"type": "number", "minimum": 0, "maximum": 1},
+        "p50_retrieval_ms": {"type": "number", "minimum": 0},
+        "p95_retrieval_ms": {"type": "number", "minimum": 0},
+        "errors": {"const": 0},
+        "wrong_scope_result_count": {"type": "integer", "minimum": 0},
+        "outside_manifest_result_count": {"const": 0}
+      }
+    }
+  }
+}

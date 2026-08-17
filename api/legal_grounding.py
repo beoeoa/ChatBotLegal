@@ -61,6 +61,8 @@ def _source_text(source: dict) -> str:
             "article_title",
             "chunk_heading",
             "content",
+            "matched_child_content",
+            "parent_context",
         )
     )
 

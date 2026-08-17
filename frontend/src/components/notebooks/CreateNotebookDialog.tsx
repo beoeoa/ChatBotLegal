@@ -21,7 +21,7 @@ import { useCreateNotebook } from '@/lib/hooks/use-notebooks'
 import { useTranslation } from '@/lib/hooks/use-translation'
 
 const createNotebookSchema = z.object({
-  name: z.string().min(1, 'Name is required'),
+  name: z.string().trim().min(1, 'Vui lòng nhập tên hồ sơ.'),
   description: z.string().optional(),
 })
 

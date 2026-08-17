@@ -1,0 +1,5 @@
+-- Isolated rehearsal rollback only. The runner refuses live/default databases.
+REMOVE TABLE IF EXISTS legal_audit_checkpoint;
+REMOVE TABLE IF EXISTS legal_audit_chain;
+REMOVE TABLE IF EXISTS legal_chunk_provenance;
+

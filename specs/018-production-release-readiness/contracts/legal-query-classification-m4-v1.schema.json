@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "legal-query-classification-m4-v1.schema.json",
+  "title": "M4 legal query classification",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "raw_query", "normalized_query", "domain", "intent",
+    "secondary_intents", "scope", "temporal_scope", "temporal_reference",
+    "temporal_precision", "answer_type", "retrieval_allowed",
+    "retrieval_as_of", "temporal_error_code", "classification_method",
+    "confidence", "signals"
+  ],
+  "properties": {
+    "schema_version": {"const": "legal-query-classification-m4-v1"},
+    "raw_query": {"type": "string", "minLength": 1},
+    "normalized_query": {"type": "string", "minLength": 1},
+    "domain": {"type": "string", "minLength": 1},
+    "intent": {"$ref": "#/$defs/intent"},
+    "secondary_intents": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/intent"}
+    },
+    "scope": {"enum": ["commune", "district", "province", "unknown"]},
+    "temporal_scope": {"enum": ["current", "historical", "unknown"]},
+    "temporal_reference": {"type": ["string", "null"], "format": "date"},
+    "temporal_precision": {"enum": ["day", "year", "unknown"]},
+    "answer_type": {
+      "enum": [
+        "instructional", "eligibility", "authority", "factual", "form",
+        "legal_basis", "validity", "document", "historical", "comparison",
+        "complaint", "refusal", "clarification"
+      ]
+    },
+    "retrieval_allowed": {"type": "boolean"},
+    "retrieval_as_of": {"type": ["string", "null"], "format": "date"},
+    "temporal_error_code": {
+      "type": ["string", "null"],
+      "enum": [
+        null, "HISTORICAL_AS_OF_REQUIRED",
+        "TEMPORAL_SCOPE_CLARIFICATION_REQUIRED", "TEMPORAL_DATE_IN_FUTURE",
+        "TEMPORAL_AS_OF_CONFLICT", "TEMPORAL_DATE_INVALID"
+      ]
+    },
+    "classification_method": {"const": "deterministic_rules_v1"},
+    "confidence": {"const": "rule_based"},
+    "signals": {
+      "type": "object",
+      "required": [
+        "current_marker", "ambiguous_past", "explicit_request_as_of",
+        "temporal_reason"
+      ],
+      "properties": {
+        "current_marker": {"type": "boolean"},
+        "ambiguous_past": {"type": "boolean"},
+        "explicit_request_as_of": {"type": "boolean"},
+        "temporal_reason": {"type": "string", "minLength": 1}
+      }
+    }
+  },
+  "$defs": {
+    "intent": {
+      "enum": [
+        "PROCEDURE", "ELIGIBILITY", "REQUIRED_DOCUMENTS", "AUTHORITY",
+        "PROCESS", "DEADLINE", "FEE", "FORM", "LEGAL_BASIS", "VALIDITY",
+        "SPECIFIC_DOCUMENT", "HISTORICAL", "COMPARISON", "COMPLAINT",
+        "OUT_OF_SCOPE", "UNKNOWN"
+      ]
+    }
+  }
+}

@@ -39,6 +39,31 @@ def test_rejects_expired_legal_basis():
     )
 
 
+def test_expired_recital_does_not_invalidate_active_national_instrument():
+    relationships = [
+        {
+            "relationship_type": "Văn bản căn cứ",
+            "related_status": "expired",
+            "related_expired_date": date(2025, 6, 16),
+        }
+    ]
+
+    assert not _has_expired_legal_basis(
+        relationships,
+        date(2026, 8, 8),
+        candidate_scope="Toàn quốc",
+        candidate_document_type="Nghị định",
+        candidate_issuing_agency="Chính phủ",
+    )
+    assert _has_expired_legal_basis(
+        relationships,
+        date(2026, 8, 8),
+        candidate_scope="Hải Phòng",
+        candidate_document_type="Quyết định",
+        candidate_issuing_agency="Ủy ban nhân dân thành phố Hải Phòng",
+    )
+
+
 def test_accepts_grounded_answer_without_changing_style():
     answer = (
         "Yêu cầu được giải quyết ngay trong ngày theo Điều 24 "
@@ -87,6 +112,44 @@ def test_formats_evidence_as_readable_legal_source():
     assert "- Văn bản: 23/2015/NĐ-CP" in prompt_text
     assert "- Nguyên văn đoạn nguồn:" in prompt_text
     assert "'law_number':" not in prompt_text
+
+
+def test_formats_one_parent_context_for_multiple_matched_children():
+    parent = "1. Điều kiện áp dụng.\n2. Trình tự thực hiện.\n3. Thời hạn 3 ngày."
+    evidence = [
+        {
+            **EVIDENCE[0],
+            "chunk_id": 101,
+            "article_id": 24,
+            "parent_context_ref": "article:24",
+            "parent_context_heading": "Điều 24. Thủ tục",
+            "parent_context": parent,
+            "parent_context_reason": "complete",
+            "parent_context_primary": True,
+            "matched_child_heading": "Điều 24 > Khoản 1",
+            "matched_child_content": "1. Điều kiện áp dụng.",
+        },
+        {
+            **EVIDENCE[0],
+            "id": "legal:102",
+            "chunk_id": 102,
+            "article_id": 24,
+            "parent_context_ref": "article:24",
+            "parent_context_heading": "Điều 24. Thủ tục",
+            "parent_context": None,
+            "parent_context_reason": "complete",
+            "parent_context_primary": False,
+            "matched_child_heading": "Điều 24 > Khoản 2",
+            "matched_child_content": "2. Trình tự thực hiện.",
+        },
+    ]
+
+    prompt_text = _format_evidence_for_prompt(evidence)
+
+    assert prompt_text.count("## Nguồn") == 1
+    assert prompt_text.count(parent) == 1
+    assert "Điều 24 > Khoản 1" in prompt_text
+    assert "Điều 24 > Khoản 2" in prompt_text
 
 
 def test_normalizes_broken_citation_markup():

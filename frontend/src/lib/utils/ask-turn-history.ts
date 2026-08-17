@@ -25,6 +25,23 @@ export function completeAskTurn(
   )
 }
 
+/**
+ * Marks the local completed snapshot as durable without replacing it with a
+ * separately fetched history object. The Ask response can contain richer
+ * Admin-only trace data than the privacy-reduced history representation; a
+ * refresh racing with an open trace panel must not remount or collapse it.
+ */
+export function markCompletedAskTurnPersisted(
+  history: AskMessage[],
+  assistantId: string,
+): AskMessage[] {
+  return history.map((message) =>
+    message.id === assistantId && message.role === 'assistant' && message.status === 'complete'
+      ? { ...message, persisted: true }
+      : message,
+  )
+}
+
 /** Replaces a pending placeholder with a recoverable error in the same turn. */
 export function failAskTurn(
   history: AskMessage[],

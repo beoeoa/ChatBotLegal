@@ -1,7 +1,6 @@
 import { useState } from "react"
 import { ChevronDown, ChevronUp, HelpCircle } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
 import type { FaqItem } from "@/lib/types/faq"
 
 interface FAQAccordionProps {

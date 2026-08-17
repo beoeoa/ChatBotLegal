@@ -25,9 +25,13 @@ def test_legacy_ask_response_keeps_answer_sections_omitted():
         "source_gap": [],
         "evidence_coverage": {},
         "claim_validation": [],
+        "reason_codes": [],
         "authority_status": "not_applicable",
         "clarifying_questions": [],
         "quality_flags": [],
+        "answer_status": "source_gap",
+        "evidence_count": 0,
+        "fallback_tier": "support",
     }
 
 

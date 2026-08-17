@@ -60,6 +60,8 @@ _CITIZEN_PROCEDURE_HEADING_BY_SECTION = {
     "fee": ["## Thời hạn, lệ phí hoặc mức phạt"],
     "penalty": ["## Thời hạn, lệ phí hoặc mức phạt"],
     "steps": ["## Bạn cần làm gì ngay", "## Các bước thực hiện"],
+    "verification_duties": ["## Nội dung cơ quan cần kiểm tra, xác minh"],
+    "recorded_content": ["## Nội dung được ghi nhận"],
     "official_forms": ["## Biểu mẫu và căn cứ pháp lý"],
     "legal_basis_links": ["## Biểu mẫu và căn cứ pháp lý"],
 }
@@ -96,6 +98,9 @@ _HEADING_ALIASES = {
 def _fold(value: str) -> str:
     text = unicodedata.normalize("NFD", value or "").casefold()
     text = "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
+    # Vietnamese đ/Đ is not decomposed by Unicode NFD. Normalize it explicitly
+    # so the classifier uses the same accent-insensitive vocabulary as search.
+    text = text.replace("đ", "d")
     return _FOLD_RE.sub(" ", text).strip()
 
 
@@ -224,19 +229,49 @@ def classify_question(question: str, detected_domain: str | None = None) -> dict
     Domain-specific types take precedence over generic procedure/explanation
     labels so the answer engine can choose the right checklist.
     """
-    text = _fold(question)
+    # Source-oriented questions can quote a legal provision in a
+    # parenthetical, e.g. “phần 8: Khiếu nại...”, while the citizen is asking
+    # about residence rights. Do not let those quoted source words change the
+    # response contract into a complaint workflow. The quoted text remains in
+    # the retrieval query; this only controls deterministic routing facets.
+    classification_text = re.sub(r"\([^()]*\)", " ", str(question or ""))
+    text = _fold(classification_text)
     form_request = _has_any(text, (
         "bieu mau", "mau don", "to khai", "tai mau", "mau de nghi",
         "mau dang ky", "download mau", "mau giay", "mau nao", "bieu mau nao",
+        "cho toi mau", "can mau", "xin mau",
     ))
-    procedure = _has_any(text, (
+    asks_specific_provision = bool(re.search(r"\bdieu\s+\d+", text))
+    direct_content_request = not asks_specific_provision and _has_any(text, (
+        "noi dung gom", "gom nhung thong tin", "gom thong tin gi",
+        "nhung noi dung chinh", "noi dung chinh nao", "noi dung gi",
+        "ghi nhung noi dung", "noi dung can ghi", "noi dung ghi nhan",
+        "ghi nhan ra sao", "thong tin nao", "thong tin gi",
+        "the hien cac thong tin", "bao gom nhung noi dung",
+        "duoc ghi", "se ghi", "ghi theo", "ghi ra sao", "ghi the nao",
+    ))
+    explicit_procedure_request = _has_any(text, (
         "thu tuc", "ho so", "nop o dau", "noi nop", "thoi han",
-        "le phi", "lam the nao", "can chuan bi", "dang ky", "xin cap",
-        "thuc hien the nao", "quy trinh",
+        "le phi", "lam the nao", "can chuan bi",
+        "thuc hien the nao", "quy trinh", "xac minh the nao",
+        "cach xac minh", "lap bien ban", "ngan chan", "buoc khac phuc",
+        "trinh tu", "xu ly the nao", "xu ly ra sao", "tiep nhan ho so",
+    ))
+    generic_action_request = _has_any(text, ("dang ky", "xin cap", "de nghi cap"))
+    procedure = explicit_procedure_request or generic_action_request
+    verification_request = _has_any(text, (
+        "trach nhiem xac minh", "trach nhiem kiem tra", "phai xac minh",
+        "noi dung xac minh", "kiem tra xac minh", "co quan xac minh",
+    ))
+    authority_request = _has_any(text, (
+        "co quan nao", "ai giai quyet", "tham quyen", "lien he co quan",
+        "cap nao giai quyet", "don vi nao", "nop cho ai",
     ))
     land = _has_any(text, (
         "dat dai", "so do", "giay chung nhan quyen su dung dat", "xay dung",
-        "giay phep xay dung", "chuyen nhuong dat", "tach thua", "quy hoach",
+        "giay phep xay dung", "chuyen nhuong dat", "tach thua", "thua dat",
+        "ranh gioi dat", "quy hoach", "khu dat", "dat xen ket",
+        "thu hoi dat", "dien tich dat",
     ))
     complaint = _has_any(text, (
         "khieu nai", "to cao", "xu phat", "phat hanh chinh", "bien ban",
@@ -265,6 +300,8 @@ def classify_question(question: str, detected_domain: str | None = None) -> dict
         question_type = "residence_security"
     elif social:
         question_type = "social_support"
+    elif direct_content_request and not explicit_procedure_request:
+        question_type = "legal_explanation"
     elif procedure:
         question_type = "procedure"
     elif explanation:
@@ -274,7 +311,16 @@ def classify_question(question: str, detected_domain: str | None = None) -> dict
     else:
         question_type = "out_of_scope"
 
-    procedural_intent = procedure or form_request
+    # An authority-only question is a targeted request, not a broad legal
+    # explanation. Treating it as an explanation used to invent condition and
+    # exception facets that the user never asked for, depressing coverage even
+    # when the authority evidence was fully grounded.
+    procedural_intent = bool(
+        form_request
+        or authority_request
+        or explicit_procedure_request
+        or (generic_action_request and not direct_content_request)
+    )
     if procedural_intent:
         # Ask only for sections the citizen actually requested.  A broad
         # procedure template made a documents-only question look incomplete
@@ -287,7 +333,8 @@ def classify_question(question: str, detected_domain: str | None = None) -> dict
             sections.append("documents")
         if _has_any(text, (
             "nop o dau", "noi nop", "nop tai dau", "co quan nao",
-            "bo phan nao", "tham quyen nao",
+            "bo phan nao", "tham quyen nao", "tham quyen",
+            "ai giai quyet", "nop cho ai", "co quan xac minh", "cap xa", "cap phuong",
         )):
             sections.append("submission_place")
         if _has_any(text, (
@@ -295,16 +342,38 @@ def classify_question(question: str, detected_domain: str | None = None) -> dict
             "ngay lam viec",
         )):
             sections.append("processing_time")
-        if _has_any(text, ("le phi", "muc phi", "phi bao nhieu", "mien phi")):
-            sections.append("fee")
         if _has_any(text, (
-            "thu tuc", "lam the nao", "thuc hien the nao", "quy trinh",
-            "cac buoc", "dang ky nhu the nao", "xin cap nhu the nao",
+            "le phi", "muc phi", "phi bao nhieu", "mien phi",
+            "thue phi", "phi ra sao", "chi phi",
         )):
+            sections.append("fee")
+        step_request = _has_any(text, (
+            "lam the nao", "thuc hien the nao", "quy trinh",
+            "cac buoc", "dang ky nhu the nao", "xin cap nhu the nao",
+            "xac minh the nao", "cach xac minh", "lap bien ban",
+            "ngan chan", "buoc khac phuc", "trinh tu", "trinh tu nao",
+            "xu ly theo trinh tu", "xu ly the nao", "xu ly ra sao",
+        ))
+        # "Thủ tục có mã X cần biểu mẫu nào?" identifies a procedure; it does
+        # not ask for the procedure steps. Requiring steps here made an exact
+        # form lookup look incomplete even when the approved form was returned.
+        if _has_any(text, ("thu tuc",)) and not form_request:
+            step_request = True
+        if step_request:
             sections.append("steps")
+        if verification_request:
+            sections.append("verification_duties")
+        if direct_content_request:
+            sections.append("recorded_content")
+        if _has_any(text, (
+            "dieu kien", "truong hop nao", "hop phap",
+            "duoc phep khi nao", "khi nao duoc", "dien tich toi thieu",
+            "ty le dat", "ty le toi da", "muc toi da",
+        )):
+            sections.append("conditions_or_rights")
         if form_request:
             sections.append("official_forms")
-        if len(sections) == 1:
+        if len(sections) == 1 and generic_action_request:
             # A vague "đăng ký/xin cấp" request still benefits from a concise
             # action path, without inventing demands for every procedure field.
             sections.append("steps")
@@ -317,10 +386,35 @@ def classify_question(question: str, detected_domain: str | None = None) -> dict
             "trich dan", "co so phap ly", "quy dinh nao",
         )):
             sections.append("legal_basis_links")
+    elif direct_content_request:
+        sections = ["recorded_content"]
+        if _has_any(text, (
+            "can cu", "dieu luat", "theo dieu", "van ban", "nguon",
+            "trich dan", "co so phap ly", "quy dinh nao",
+        )):
+            sections.append("legal_basis_links")
     elif question_type in {"complaint_sanction"}:
         sections = ["conclusion", "authority", "rights_or_explanation", "documents", "deadline", "legal_basis_links"]
     else:
-        sections = ["applicable_rule", "conditions_or_rights", "exceptions", "legal_basis_links"]
+        # A direct request to explain one provision needs the governing rule,
+        # not synthetic condition and exception sections. Add those facets only
+        # when the user explicitly asks for them; otherwise a perfectly
+        # retrievable article can be rendered as two unrelated evidence gaps.
+        sections = ["applicable_rule"]
+        if _has_any(text, (
+            "dieu kien", "truong hop nao", "khi nao", "quyen va nghia vu",
+            "duoc phep khi nao", "ap dung trong truong hop",
+        )):
+            sections.append("conditions_or_rights")
+        if _has_any(text, (
+            "ngoai le", "khong ap dung", "tru truong hop", "loai tru",
+        )):
+            sections.append("exceptions")
+        if _has_any(text, (
+            "can cu", "dieu luat", "theo dieu", "van ban", "nguon",
+            "trich dan", "co so phap ly", "quy dinh nao",
+        )):
+            sections.append("legal_basis_links")
 
     return {
         "question_type": question_type,

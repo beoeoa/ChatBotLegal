@@ -7,12 +7,14 @@ interface ForbiddenStateProps {
   title?: string
   description?: string
   onBack?: () => void
+  backLabel?: string
 }
 
 export function ForbiddenState({
   title = 'Bạn không có quyền truy cập',
   description = 'Nội dung này chỉ hiển thị cho người dùng được phân quyền.',
   onBack,
+  backLabel = 'Về trang Hỏi đáp',
 }: ForbiddenStateProps) {
   return (
     <div className="flex min-h-[360px] items-center justify-center p-6">
@@ -22,7 +24,7 @@ export function ForbiddenState({
         <p className="mt-2 text-sm text-muted-foreground">{description}</p>
         {onBack && (
           <Button className="mt-6" onClick={onBack}>
-            Về trang Hỏi đáp
+            {backLabel}
           </Button>
         )}
       </div>

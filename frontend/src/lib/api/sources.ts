@@ -49,10 +49,6 @@ export const sourcesApi = {
     if (data.content) {
       formData.append('content', data.content)
     }
-    if (data.transformations !== undefined) {
-      formData.append('transformations', JSON.stringify(data.transformations))
-    }
-    
     const dataWithFile = data as CreateSourceRequest & { file?: File }
     if (dataWithFile.file instanceof File) {
       formData.append('file', dataWithFile.file)

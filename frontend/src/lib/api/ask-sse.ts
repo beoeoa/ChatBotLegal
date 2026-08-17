@@ -3,6 +3,34 @@ import type { AskResponse } from '@/lib/types/search'
 
 type LegalCitation = NonNullable<AskResponse['citations']>[number]
 
+const PUBLIC_CITATION_FIELDS = new Set([
+  'law_number',
+  'document_title',
+  'article_number',
+  'article_title',
+  'effective_status',
+  'effective_date',
+  'issuing_agency',
+  'scope',
+  'source_url',
+  'url',
+  'title',
+  'label',
+  'authority_level',
+  'authority_label',
+  'validity_sync',
+])
+
+const PUBLIC_VALIDITY_FIELDS = new Set([
+  'status',
+  'serving_action',
+  'verified_at',
+  'source_url',
+  'effective_from',
+  'effective_to',
+  'warning_code',
+])
+
 export type AskSseEvent =
   | { type: 'accepted'; turnId?: string; traceId?: string }
   | { type: 'status'; stage: string }
@@ -38,6 +66,20 @@ function stripInternalMarkerSyntax(value: string): string {
     .trim()
 }
 
+function sanitizePublicCitation(candidate: Record<string, unknown>): LegalCitation {
+  const sanitized = Object.fromEntries(
+    Object.entries(candidate).filter(([key, value]) => (
+      PUBLIC_CITATION_FIELDS.has(key) && value !== null && value !== undefined
+    )),
+  )
+  if (isRecord(candidate.validity_sync)) {
+    sanitized.validity_sync = Object.fromEntries(
+      Object.entries(candidate.validity_sync).filter(([key]) => PUBLIC_VALIDITY_FIELDS.has(key)),
+    )
+  }
+  return sanitized as unknown as LegalCitation
+}
+
 function sanitizeFinalCandidate(candidate: Record<string, unknown>): AskResponse {
   const sections = Array.isArray(candidate.answer_sections)
     ? candidate.answer_sections.filter(isRecord).map((section) => ({
@@ -48,13 +90,20 @@ function sanitizeFinalCandidate(candidate: Record<string, unknown>): AskResponse
       clarifying_question: typeof section.clarifying_question === 'string'
         ? stripInternalMarkerSyntax(section.clarifying_question)
         : section.clarifying_question,
+      citations: Array.isArray(section.citations)
+        ? section.citations.filter(isRecord).map(sanitizePublicCitation)
+        : section.citations,
     }))
     : candidate.answer_sections
+  const citations = Array.isArray(candidate.citations)
+    ? candidate.citations.filter(isRecord).map(sanitizePublicCitation)
+    : candidate.citations
   return {
     ...candidate,
     answer: stripInternalMarkerSyntax(String(candidate.answer || '')),
     question: typeof candidate.question === 'string' ? candidate.question : '',
     answer_sections: sections,
+    citations,
   } as AskResponse
 }
 
@@ -80,7 +129,7 @@ function normalizeEvent(value: unknown): AskSseEvent | null {
           : []
       return {
         type: 'sources',
-        citations: rawCitations.filter(isRecord) as LegalCitation[],
+        citations: rawCitations.filter(isRecord).map(sanitizePublicCitation),
       }
     }
     case 'final': {
@@ -127,16 +176,30 @@ export interface AskSseParser {
 export function createAskSseParser(): AskSseParser {
   let lineBuffer = ''
   let dataLines: string[] = []
+  let eventName = ''
 
   const dispatch = (): AskSseEvent[] => {
-    if (dataLines.length === 0) return []
+    if (dataLines.length === 0) {
+      eventName = ''
+      return []
+    }
     const data = dataLines.join('\n')
     dataLines = []
     try {
-      const event = normalizeEvent(JSON.parse(data))
+      const parsed = JSON.parse(data)
+      const candidate = (
+        eventName
+        && isRecord(parsed)
+        && typeof parsed.type !== 'string'
+      )
+        ? { type: eventName, ...parsed }
+        : parsed
+      const event = normalizeEvent(candidate)
       return event ? [event] : []
     } catch {
       return []
+    } finally {
+      eventName = ''
     }
   }
 
@@ -144,7 +207,9 @@ export function createAskSseParser(): AskSseParser {
     const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine
     if (!line) return dispatch()
     if (line.startsWith(':')) return []
-    if (line === 'data') {
+    if (line.startsWith('event:')) {
+      eventName = line.slice(6).replace(/^ /, '').trim()
+    } else if (line === 'data') {
       dataLines.push('')
     } else if (line.startsWith('data:')) {
       dataLines.push(line.slice(5).replace(/^ /, ''))
