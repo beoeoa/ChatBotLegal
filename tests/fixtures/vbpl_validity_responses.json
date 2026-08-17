@@ -1,0 +1,109 @@
+{
+  "schema_version": "vbpl-validity-fixtures-v1",
+  "cases": [
+    {
+      "name": "active",
+      "instrument": "31/2024/QH15",
+      "items": [{
+        "id": "doc-active",
+        "docNum": "31/2024/QH15",
+        "title": "Luật Đất đai",
+        "publisher": "Quốc hội",
+        "issueDate": "2024-01-18",
+        "effFrom": "2024-08-01",
+        "effTo": null,
+        "effStatus": {"name": "Còn hiệu lực"},
+        "updatedAt": "2026-08-08T00:00:00Z"
+      }]
+    },
+    {
+      "name": "future",
+      "instrument": "99/2026/NĐ-CP",
+      "items": [{
+        "id": "doc-future",
+        "docNum": "99/2026/NĐ-CP",
+        "title": "Nghị định có hiệu lực trong tương lai",
+        "publisher": "Chính phủ",
+        "issueDate": "2026-08-01",
+        "effFrom": "2026-09-01",
+        "effTo": null,
+        "effStatus": "Chờ hiệu lực"
+      }]
+    },
+    {
+      "name": "expired",
+      "instrument": "10/2020/NĐ-CP",
+      "items": [{
+        "id": "doc-expired",
+        "docNum": "10/2020/NĐ-CP",
+        "title": "Nghị định đã hết hiệu lực",
+        "publisher": "Chính phủ",
+        "issueDate": "2020-01-01",
+        "effFrom": "2020-02-01",
+        "effTo": "2026-08-01",
+        "effStatus": {"name": "Hết hiệu lực"},
+        "affectingDocumentNumber": "55/2026/NĐ-CP"
+      }]
+    },
+    {
+      "name": "suspended",
+      "instrument": "11/2020/TT-BTP",
+      "items": [{
+        "id": "doc-suspended",
+        "docNum": "11/2020/TT-BTP",
+        "title": "Thông tư bị ngưng hiệu lực",
+        "publisher": "Bộ Tư pháp",
+        "issueDate": "2020-02-01",
+        "effFrom": "2020-03-01",
+        "effTo": null,
+        "effStatus": "Ngưng hiệu lực"
+      }]
+    },
+    {
+      "name": "partial_exact",
+      "instrument": "12/2020/NĐ-CP",
+      "items": [{
+        "id": "doc-partial-exact",
+        "docNum": "12/2020/NĐ-CP",
+        "title": "Nghị định hết hiệu lực một phần",
+        "publisher": "Chính phủ",
+        "issueDate": "2020-02-02",
+        "effFrom": "2020-03-02",
+        "effTo": null,
+        "effStatus": "Hết hiệu lực một phần",
+        "affectedProvisions": [
+          {"article": "5", "clause": "2", "point": "a"},
+          {"article": "7"}
+        ],
+        "affectingDocumentNumber": "56/2026/NĐ-CP"
+      }]
+    },
+    {
+      "name": "partial_unresolved",
+      "instrument": "13/2020/NĐ-CP",
+      "items": [{
+        "id": "doc-partial-unresolved",
+        "docNum": "13/2020/NĐ-CP",
+        "title": "Nghị định hết hiệu lực một phần chưa rõ phạm vi",
+        "publisher": "Chính phủ",
+        "issueDate": "2020-02-03",
+        "effFrom": "2020-03-03",
+        "effTo": null,
+        "effStatus": "Hết hiệu lực một phần"
+      }]
+    },
+    {
+      "name": "ambiguous",
+      "instrument": "14/2020/NĐ-CP",
+      "items": [
+        {"id": "doc-a", "docNum": "14/2020/NĐ-CP", "publisher": "Chính phủ", "effStatus": "Còn hiệu lực"},
+        {"id": "doc-b", "docNum": "14/2020/NĐ-CP", "publisher": "Chính phủ", "effStatus": "Hết hiệu lực"}
+      ]
+    },
+    {
+      "name": "malformed",
+      "instrument": "15/2020/NĐ-CP",
+      "items": "not-a-list"
+    }
+  ]
+}

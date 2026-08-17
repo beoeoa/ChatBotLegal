@@ -1,0 +1,6 @@
+-- Roll back only Feature 009 operational state; never touch the legal corpus.
+REMOVE TABLE IF EXISTS legal_validity_sync_lease;
+REMOVE TABLE IF EXISTS legal_validity_sync_run;
+REMOVE TABLE IF EXISTS legal_validity_decision;
+REMOVE TABLE IF EXISTS legal_validity_event;
+REMOVE TABLE IF EXISTS legal_validity_observation;

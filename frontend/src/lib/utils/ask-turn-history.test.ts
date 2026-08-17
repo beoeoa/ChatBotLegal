@@ -1,6 +1,12 @@
 ﻿import { describe, expect, it } from 'vitest'
 import type { AskMessage } from '@/lib/types/search'
-import { appendPendingAskTurn, cancelAskTurn, completeAskTurn, failAskTurn } from './ask-turn-history'
+import {
+  appendPendingAskTurn,
+  cancelAskTurn,
+  completeAskTurn,
+  failAskTurn,
+  markCompletedAskTurnPersisted,
+} from './ask-turn-history'
 
 const at = '2026-07-11T12:00:00.000Z'
 
@@ -62,6 +68,35 @@ describe('Ask turn history', () => {
       role: 'assistant',
       status: 'error',
       content: 'Yêu cầu quá thời gian 60 giây.',
+    })
+  })
+
+  it('marks persistence without dropping the current Admin trace snapshot', () => {
+    const assistantPending = pending('assistant-pending-trace')
+    const completed = {
+      ...complete('assistant-trace', 'Câu trả lời có trace'),
+      rag_trace: {
+        evidence_coverage: { authority: { status: 'verified' } },
+        form_provenance: { requested: true },
+      } as AskMessage['rag_trace'],
+    }
+    let history = appendPendingAskTurn(
+      [],
+      user('user-trace', 'Câu hỏi Admin'),
+      assistantPending,
+    )
+    history = completeAskTurn(history, assistantPending.id, completed)
+
+    const persisted = markCompletedAskTurnPersisted(
+      history,
+      assistantPending.id,
+    )
+
+    expect(persisted[1]).toMatchObject({
+      id: assistantPending.id,
+      status: 'complete',
+      persisted: true,
+      rag_trace: completed.rag_trace,
     })
   })
 

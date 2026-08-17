@@ -10,6 +10,7 @@ __pycache__
 *.pyd
 .venv
 .venv-retrieval-cu126
+.venv-kaggle-cli
 venv
 ENV
 env
@@ -19,7 +20,7 @@ env
 
 # Frontend
 frontend/node_modules
-frontend/.next
+frontend/.next*
 frontend/dist
 frontend/out
 frontend/.env*
@@ -30,11 +31,24 @@ frontend/*.log
 .gemini
 .agents
 .codex
+.claude
 .tmp
 tmp
 scratch
+outputs
+tools
+.codex-tmp
 reports
 logs
+backups
+release-data
+release-data.zip
+kaggle/retrieval-v2/input
+kaggle/retrieval-v2/output
+kaggle/retrieval-v2/model-dataset
+kaggle/retrieval-v2/kernel-bundle
+**/kaggle.json
+**/.kaggle/access_token
 tests
 examples
 agent-skills-temp
@@ -42,6 +56,7 @@ ngrok-v3-stable-windows-amd64
 legal-chatbot-datachroma_store
 surreal_data_backup_*
 external/agent-skills
+external/crawl4ai
 external/legal-ai-agent
 external/VN-Law-Advisor
 external/LawKnowledge
@@ -56,6 +71,7 @@ surreal_single_data
 *.log
 docker.env
 .env
+.env.release
 docker-compose*
 
 # Documentation & CI (not needed in image)

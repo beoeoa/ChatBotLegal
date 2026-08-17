@@ -3,10 +3,13 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
+import copy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from time import perf_counter
+from threading import Lock
+from time import perf_counter, monotonic
 from typing import Any, Literal, Optional
 
 from fastapi import HTTPException, Request
@@ -14,7 +17,7 @@ from loguru import logger
 
 from api.observability import telemetry
 from open_notebook.database.repository import ensure_record_id, repo_create, repo_query, repo_update
-from open_notebook.utils.encryption import get_secret_from_env
+from open_notebook.utils.encryption import decrypt_value, encrypt_value, get_secret_from_env
 
 UserRole = Literal["citizen", "officer", "admin"]
 ALLOWED_ROLES: tuple[UserRole, ...] = ("citizen", "officer", "admin")
@@ -22,6 +25,59 @@ DEFAULT_WARD_SCOPE = "Phường Lê Chân, Hải Phòng"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PRIVATE_DATA_DIR = PROJECT_ROOT / "data" / "private"
 PASSWORD_RESET_STORE = PRIVATE_DATA_DIR / "password_reset_tokens.json"
+
+_SESSION_L1_TTL_SECONDS = 5.0
+_SESSION_L1_LOCK = Lock()
+_SESSION_L1_CACHE: dict[str, tuple[float, str, dict[str, Any]]] = {}
+
+
+def clear_session_l1_cache(*, user_id: str | None = None) -> None:
+    """Clear compact session projections without ever handling a raw token."""
+
+    with _SESSION_L1_LOCK:
+        if user_id is None:
+            _SESSION_L1_CACHE.clear()
+            return
+        for key, (_, cached_user_id, _) in list(_SESSION_L1_CACHE.items()):
+            if cached_user_id == user_id:
+                _SESSION_L1_CACHE.pop(key, None)
+
+
+def session_l1_cache_keys() -> tuple[str, ...]:
+    """Test/diagnostic projection; keys are SHA-256 token hashes only."""
+
+    with _SESSION_L1_LOCK:
+        return tuple(sorted(_SESSION_L1_CACHE))
+
+
+def _session_l1_cache_put(
+    token_hash: str,
+    user_id: str,
+    payload: dict[str, Any],
+) -> None:
+    with _SESSION_L1_LOCK:
+        _SESSION_L1_CACHE[token_hash] = (
+            monotonic() + _SESSION_L1_TTL_SECONDS,
+            user_id,
+            copy.deepcopy(payload),
+        )
+
+
+def _session_l1_cache_get(token_hash: str) -> dict[str, Any] | None:
+    with _SESSION_L1_LOCK:
+        cached = _SESSION_L1_CACHE.get(token_hash)
+        if cached is None:
+            return None
+        expires_at, _, payload = cached
+        if monotonic() >= expires_at:
+            _SESSION_L1_CACHE.pop(token_hash, None)
+            return None
+        return copy.deepcopy(payload)
+
+
+def _session_l1_cache_drop_token_hash(token_hash: str) -> None:
+    with _SESSION_L1_LOCK:
+        _SESSION_L1_CACHE.pop(token_hash, None)
 
 # Override any legacy mojibake default that may exist above after old imports.
 DEFAULT_WARD_SCOPE = "Phường Lê Chân, Hải Phòng"
@@ -31,6 +87,35 @@ def normalize_user_role(value: str | None) -> UserRole:
     if value in ALLOWED_ROLES:
         return value
     return "citizen"
+
+
+_ACCOUNT_EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+_ACCOUNT_PHONE_RE = re.compile(r"^\+?[0-9().\-\s]+$")
+
+
+def validate_account_contacts(
+    *, email: str | None = None, phone: str | None = None
+) -> None:
+    """Validate editable contact fields without changing their display format."""
+
+    if email is not None:
+        normalized_email = email.strip().lower()
+        if not _ACCOUNT_EMAIL_RE.fullmatch(normalized_email):
+            raise HTTPException(status_code=400, detail="Email không hợp lệ")
+
+    if phone is not None:
+        normalized_phone = phone.strip()
+        if not normalized_phone:
+            return
+        digits = re.sub(r"\D", "", normalized_phone)
+        if (
+            not _ACCOUNT_PHONE_RE.fullmatch(normalized_phone)
+            or not 8 <= len(digits) <= 15
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Số điện thoại không hợp lệ; cần từ 8 đến 15 chữ số",
+            )
 
 
 def _utcnow() -> datetime:
@@ -209,9 +294,14 @@ def _sanitize_profile_record(row: dict[str, Any] | None) -> dict[str, Any]:
 def merge_user_profile(
     user_row: dict[str, Any], profile_row: dict[str, Any] | None = None
 ) -> dict[str, Any]:
+    profile = _sanitize_profile_record(profile_row)
+    lifecycle = dict((profile.get("preferences") or {}).get("account_lifecycle") or {})
+    deleted_at = lifecycle.get("deleted_at")
     return {
         **_sanitize_user_record(user_row),
-        "profile": _sanitize_profile_record(profile_row),
+        "profile": profile,
+        "is_deleted": bool(deleted_at),
+        "deleted_at": str(deleted_at) if deleted_at else None,
     }
 
 
@@ -299,21 +389,26 @@ async def ensure_bootstrap_admin_user() -> Optional[dict[str, Any]]:
 
 
 
-async def authenticate_user_account(
+async def verify_user_credentials(
     identifier: str,
     password: str,
     requested_role: str | None = None,
 ) -> dict[str, Any]:
+    """Verify password and account role without issuing a session."""
+
     await ensure_bootstrap_admin_user()
     user = await get_user_by_identifier(identifier)
     if not user or not verify_password(password, user.get("password_hash")):
+        await record_failed_login(identifier, requested_role, "invalid_credentials")
         raise HTTPException(status_code=401, detail="Sai tên đăng nhập/email hoặc mật khẩu")
     if not user.get("is_active", True):
+        await record_failed_login(identifier, requested_role, "account_locked")
         raise HTTPException(status_code=403, detail="Tài khoản đã bị khóa")
 
     actual_role = normalize_user_role(user.get("role"))
     normalized_requested_role = normalize_user_role(requested_role)
     if requested_role and normalized_requested_role != actual_role:
+        await record_failed_login(identifier, requested_role, "role_mismatch")
         raise HTTPException(
             status_code=403,
             detail="Role đăng nhập không khớp với tài khoản",
@@ -332,14 +427,48 @@ async def authenticate_user_account(
     refreshed = await get_user_with_profile(str(user["id"]))
     if not refreshed:
         raise HTTPException(status_code=500, detail="Không đọc lại được tài khoản sau đăng nhập")
+    return refreshed
 
+
+async def record_failed_login(
+    identifier: str,
+    requested_role: str | None,
+    failure_reason: str,
+    *,
+    request: Request | None = None,
+) -> None:
+    """Record a content-free failed-login event without changing auth outcome."""
+
+    identifier_hash = hashlib.sha256(identifier.strip().casefold().encode("utf-8")).hexdigest()[:16]
+    try:
+        await write_audit_log(
+            action="auth.login.failed",
+            entity_type="user_account",
+            entity_id=f"login:{identifier_hash}",
+            actor_user_id=None,
+            actor_role=normalize_user_role(requested_role) if requested_role else None,
+            details={
+                "result": "failed",
+                "failure_reason": failure_reason,
+                "requested_role": normalize_user_role(requested_role) if requested_role else None,
+            },
+            request=request,
+        )
+    except Exception as exc:
+        logger.warning("Could not persist failed-login audit event: {}", exc.__class__.__name__)
+
+
+async def issue_user_session(user: dict[str, Any]) -> dict[str, Any]:
+    """Issue a server-side session after all authentication factors pass."""
+
+    now = _utcnow()
     token = secrets.token_urlsafe(48)
     expires_at = now + timedelta(hours=_session_ttl_hours())
     await repo_create(
         "user_session",
         {
-            "user": _record_ref(refreshed["id"]),
-            "role": refreshed["role"],
+            "user": _record_ref(user["id"]),
+            "role": user["role"],
             "session_token_hash": _hash_session_token(token),
             "expires_at": expires_at,
             "revoked_at": None,
@@ -348,10 +477,53 @@ async def authenticate_user_account(
     )
     return {
         "token": token,
-        "user": refreshed,
-        "role": refreshed["role"],
+        "user": user,
+        "role": user["role"],
         "expires_at": expires_at.isoformat(),
     }
+
+
+async def authenticate_user_account(
+    identifier: str,
+    password: str,
+    requested_role: str | None = None,
+) -> dict[str, Any]:
+    user = await verify_user_credentials(identifier, password, requested_role)
+    return await issue_user_session(user)
+
+
+async def get_user_totp_secret(user_id: str) -> str | None:
+    """Return the decrypted TOTP secret only when enrollment is complete."""
+
+    profile = await get_user_profile(user_id)
+    preferences = dict((profile or {}).get("preferences") or {})
+    mfa = dict(preferences.get("mfa") or {})
+    encrypted = str(mfa.get("totp_secret_encrypted") or "").strip()
+    if not bool(mfa.get("totp_enabled")) or not encrypted:
+        return None
+    return decrypt_value(encrypted)
+
+
+async def enable_user_totp(user_id: str, secret: str) -> None:
+    """Persist an encrypted TOTP secret in the existing flexible preferences field."""
+
+    profile = await get_user_profile(user_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Không tìm thấy hồ sơ người dùng")
+    preferences = dict(profile.get("preferences") or {})
+    preferences["mfa"] = {
+        "totp_enabled": True,
+        "totp_secret_encrypted": encrypt_value(secret),
+        "enabled_at": _utcnow().isoformat(),
+    }
+    await repo_update(
+        "user_profile",
+        str(profile["id"]),
+        {
+            "preferences": preferences,
+            "updated": _utcnow(),
+        },
+    )
 
 
 async def _revoke_active_sessions(user_id: str) -> None:
@@ -362,6 +534,7 @@ async def _revoke_active_sessions(user_id: str) -> None:
     now = _utcnow()
     for session in sessions:
         await repo_update("user_session", str(session["id"]), {"revoked_at": now})
+    clear_session_l1_cache(user_id=user_id)
 
 
 async def change_own_password(
@@ -427,6 +600,9 @@ async def admin_reset_user_password(
 
 async def get_user_from_session_token(token: str) -> Optional[dict[str, Any]]:
     token_hash = _hash_session_token(token)
+    cached = _session_l1_cache_get(token_hash)
+    if cached is not None:
+        return cached
     result = await repo_query(
         """
         SELECT * FROM user_session
@@ -464,11 +640,49 @@ async def get_user_from_session_token(token: str) -> Optional[dict[str, Any]]:
                 exc,
             )
 
-    return {
+    compact_user = {
+        "id": user.get("id"),
+        "username": user.get("username"),
+        "role": normalize_user_role(user.get("role")),
+        "is_active": bool(user.get("is_active", True)),
+        "profile": {
+            "must_change_password": bool(
+                (user.get("profile") or {}).get("must_change_password")
+            )
+        },
+    }
+    payload = {
         "session_id": _record_id_str(session.get("id")),
         "role": normalize_user_role(session.get("role") or user.get("role")),
-        "user": user,
+        "session_version": str(session.get("updated") or session.get("id") or "1"),
+        "user": compact_user,
     }
+    _session_l1_cache_put(token_hash, user_id, payload)
+    return payload
+
+
+async def revoke_session_token(token: str) -> bool:
+    """Revoke exactly one session represented by an opaque raw token."""
+
+    token_hash = _hash_session_token(token)
+    result = await repo_query(
+        """
+        SELECT * FROM user_session
+        WHERE session_token_hash = $token_hash
+          AND revoked_at = NONE
+        LIMIT 1;
+        """,
+        {"token_hash": token_hash},
+    )
+    if not result:
+        return False
+    await repo_update(
+        "user_session",
+        str(result[0]["id"]),
+        {"revoked_at": _utcnow()},
+    )
+    _session_l1_cache_drop_token_hash(token_hash)
+    return True
 
 
 def _profile_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -526,6 +740,19 @@ async def write_audit_log(
     details: dict[str, Any] | None = None,
     request: Request | None = None,
 ) -> None:
+    # Feature 016: critical legal mutations become chain-required only after the
+    # additive sidecar migration and explicit rollout flag are enabled.  The
+    # append happens first so an integrity failure prevents an untraceable write.
+    from api.legal_audit_chain import append_critical_audit_event
+
+    await append_critical_audit_event(
+        action=action,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        actor_user_id=actor_user_id,
+        actor_role=actor_role,
+        details=details,
+    )
     meta = _request_meta(request)
     await repo_create(
         "user_audit_log",
@@ -554,6 +781,32 @@ async def list_users_with_profiles() -> list[dict[str, Any]]:
     ]
 
 
+async def _ensure_active_admin_remains(
+    existing: dict[str, Any],
+    payload: dict[str, Any],
+) -> None:
+    """Prevent an account-management action from removing the last active admin."""
+
+    is_active_admin = (
+        normalize_user_role(existing.get("role")) == "admin"
+        and bool(existing.get("is_active", True))
+    )
+    next_role = normalize_user_role(payload.get("role") or existing.get("role"))
+    next_active = bool(payload.get("is_active", existing.get("is_active", True)))
+    if not is_active_admin or (next_role == "admin" and next_active):
+        return
+
+    rows = await repo_query(
+        "SELECT count() AS count FROM user_account WHERE role = 'admin' AND is_active = true GROUP ALL;"
+    )
+    active_admins = int((rows[0] if rows else {}).get("count", 0) or 0)
+    if active_admins <= 1:
+        raise HTTPException(
+            status_code=400,
+            detail="Không thể khóa hoặc hạ quyền quản trị viên cuối cùng đang hoạt động",
+        )
+
+
 async def create_user_account(
     payload: dict[str, Any],
     *,
@@ -565,13 +818,12 @@ async def create_user_account(
     email = (payload.get("email") or "").strip().lower()
     password = payload.get("password") or ""
     role = normalize_user_role(payload.get("role"))
+    validate_account_contacts(email=email, phone=payload.get("phone"))
 
     if len(username) < 3:
         raise HTTPException(status_code=400, detail="Username phải có ít nhất 3 ký tự")
-    if "@" not in email:
-        raise HTTPException(status_code=400, detail="Email không hợp lệ")
-    if len(password) < 6:
-        raise HTTPException(status_code=400, detail="Mật khẩu phải có ít nhất 6 ký tự")
+    if len(password) < 12:
+        raise HTTPException(status_code=400, detail="Mật khẩu phải có ít nhất 12 ký tự")
     if await get_user_by_identifier(username):
         raise HTTPException(status_code=409, detail="Username đã tồn tại")
     existing_email = await get_user_by_identifier(email)
@@ -757,6 +1009,18 @@ async def update_user_account(
     existing = await get_user_with_profile(user_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Không tìm thấy tài khoản")
+    if existing.get("is_deleted"):
+        raise HTTPException(
+            status_code=409,
+            detail="Tài khoản đã được xóa mềm và không thể cập nhật hoặc mở khóa",
+        )
+
+    validate_account_contacts(
+        email=payload.get("email"),
+        phone=payload.get("phone"),
+    )
+
+    await _ensure_active_admin_remains(existing, payload)
 
     update_data: dict[str, Any] = {}
     if payload.get("username") is not None:
@@ -769,8 +1033,6 @@ async def update_user_account(
         update_data["username"] = username
     if payload.get("email") is not None:
         email = payload["email"].strip().lower()
-        if "@" not in email:
-            raise HTTPException(status_code=400, detail="Email không hợp lệ")
         other = await get_user_by_identifier(email)
         if other and _record_id_str(other.get("id")) != user_id:
             raise HTTPException(status_code=409, detail="Email đã tồn tại")
@@ -780,16 +1042,26 @@ async def update_user_account(
     if payload.get("is_active") is not None:
         update_data["is_active"] = bool(payload["is_active"])
     if payload.get("password"):
-        if len(payload["password"]) < 6:
-            raise HTTPException(status_code=400, detail="Mật khẩu phải có ít nhất 6 ký tự")
+        if len(payload["password"]) < 12:
+            raise HTTPException(status_code=400, detail="Mật khẩu phải có ít nhất 12 ký tự")
         update_data["password_hash"] = hash_password(payload["password"])
 
     if update_data:
         await repo_update("user_account", user_id, update_data)
+        if {"role", "is_active", "password_hash"}.intersection(update_data):
+            await _revoke_active_sessions(user_id)
 
     await upsert_user_profile(user_id, {**existing.get("profile", {}), **payload})
+    audit_action = "user.update"
+    if payload.get("is_active") is not None:
+        was_active = bool(existing.get("is_active", True))
+        is_active = bool(payload["is_active"])
+        if was_active and not is_active:
+            audit_action = "user.deactivate"
+        elif not was_active and is_active:
+            audit_action = "user.reactivate"
     await write_audit_log(
-        action="user.update",
+        action=audit_action,
         entity_type="user_account",
         entity_id=user_id,
         actor_user_id=actor_user_id,
@@ -818,6 +1090,7 @@ async def deactivate_user_account(
     existing = await get_user_with_profile(user_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Không tìm thấy tài khoản")
+    await _ensure_active_admin_remains(existing, {"is_active": False})
     await repo_update("user_account", user_id, {"is_active": False})
     sessions = await repo_query(
         "SELECT * FROM user_session WHERE user = type::record($user_id) AND revoked_at = NONE;",
@@ -825,6 +1098,7 @@ async def deactivate_user_account(
     )
     for session in sessions:
         await repo_update("user_session", str(session["id"]), {"revoked_at": _utcnow()})
+    clear_session_l1_cache(user_id=user_id)
     await write_audit_log(
         action="user.deactivate",
         entity_type="user_account",
@@ -833,6 +1107,62 @@ async def deactivate_user_account(
         actor_role=actor_role,
         target_user_id=user_id,
         details={"is_active": False, "reason": reason},
+        request=request,
+    )
+
+
+async def soft_delete_user_account(
+    user_id: str,
+    *,
+    actor_user_id: str | None,
+    actor_role: str | None,
+    reason: str,
+    request: Request | None = None,
+) -> None:
+    """Remove an account from use while preserving its audit history."""
+
+    existing = await get_user_with_profile(user_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Không tìm thấy tài khoản")
+    if existing.get("is_deleted"):
+        raise HTTPException(status_code=409, detail="Tài khoản đã được xóa trước đó")
+
+    await _ensure_active_admin_remains(existing, {"is_active": False})
+    deleted_at = _utcnow()
+    profile = await get_user_profile(user_id)
+    preferences = dict((profile or {}).get("preferences") or {})
+    preferences["account_lifecycle"] = {
+        "deleted_at": deleted_at.isoformat(),
+        "deleted_by": actor_user_id,
+        "reason": reason,
+    }
+
+    await repo_update("user_account", user_id, {"is_active": False})
+    if profile:
+        await repo_update(
+            "user_profile",
+            str(profile["id"]),
+            {"preferences": preferences, "updated": deleted_at},
+        )
+    else:
+        await repo_create(
+            "user_profile",
+            {"user": _record_ref(user_id), "preferences": preferences},
+        )
+
+    await _revoke_active_sessions(user_id)
+    await write_audit_log(
+        action="user.soft_delete",
+        entity_type="user_account",
+        entity_id=user_id,
+        actor_user_id=actor_user_id,
+        actor_role=actor_role,
+        target_user_id=user_id,
+        details={
+            "is_active": False,
+            "deleted_at": deleted_at.isoformat(),
+            "reason": reason,
+        },
         request=request,
     )
 
@@ -997,6 +1327,7 @@ async def log_ask_history(
 
 async def list_ask_history(
     limit: int = 100,
+    user_id: str | None = None,
     role: str | None = None,
     domain: str | None = None,
     department: str | None = None,
@@ -1007,12 +1338,21 @@ async def list_ask_history(
 ) -> list[dict[str, Any]]:
     filters: list[str] = []
     params: dict[str, Any] = {"limit": max(1, min(limit, 500))}
+    if user_id:
+        filters.append("owner_user = type::record($owner_user_id)")
+        params["owner_user_id"] = user_id
     if role:
         filters.append("owner_role = $role")
         params["role"] = role
     if domain:
         filters.append("domain = $domain")
         params["domain"] = domain
+    if department:
+        filters.append("department = $department")
+        params["department"] = department
+    if grounding_status:
+        filters.append("grounding_status = $grounding_status")
+        params["grounding_status"] = grounding_status
     if date_from:
         filters.append("created >= <datetime>$date_from")
         params["date_from"] = date_from
@@ -1073,7 +1413,7 @@ async def list_audit_logs(
     date_to: str | None = None,
 ) -> list[dict[str, Any]]:
     filters: list[str] = []
-    params: dict[str, Any] = {"limit": max(1, min(limit, 500))}
+    params: dict[str, Any] = {"limit": max(1, min(limit, 5001))}
     if actor_role:
         filters.append("actor_role = $actor_role")
         params["actor_role"] = actor_role

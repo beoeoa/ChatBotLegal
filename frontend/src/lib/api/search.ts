@@ -5,6 +5,7 @@ import {
   consumeAskSseStream,
   type AskSseHandlers,
 } from './ask-sse'
+import { sessionSecurityHeaders } from './session-security'
 
 const ASK_TIMEOUT_MS = 600_000
 
@@ -26,6 +27,7 @@ function askAuthHeaders(): Record<string, string> {
   return {
     'Content-Type': 'application/json',
     Accept: 'text/event-stream',
+    ...sessionSecurityHeaders('POST'),
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
     'X-User-Role': currentRole,
   }
@@ -78,9 +80,11 @@ export const searchApi = {
     try {
       response = await fetch(url, {
         method: 'POST',
+        credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
           'Accept': 'text/event-stream',
+          ...sessionSecurityHeaders('POST'),
           ...(token && { Authorization: `Bearer ${token}` }),
           'X-User-Role': currentRole,
         },
@@ -142,6 +146,7 @@ export const searchApi = {
       try {
         response = await fetch('/api/search/ask/progress', {
           method: 'POST',
+          credentials: 'include',
           headers: askAuthHeaders(),
           body: JSON.stringify(payload),
           signal: controller.signal,

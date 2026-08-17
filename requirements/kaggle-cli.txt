@@ -1,0 +1,3 @@
+# Isolated operator dependency; do not install into the retrieval runtime.
+kaggle==1.8.4
+ijson==3.4.0.post0

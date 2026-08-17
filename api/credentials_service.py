@@ -488,6 +488,8 @@ async def discover_with_config(provider: str, config: dict) -> List[dict]:
     Returns model names only — no type classification.
     The user chooses the model type when registering.
     """
+    from api.model_modality import infer_discovered_model_modality
+
     api_key = config.get("api_key")
     base_url = config.get("base_url")
 
@@ -529,7 +531,13 @@ async def discover_with_config(provider: str, config: dict) -> List[dict]:
         if not api_key and provider != "ollama":
             return []
         return [
-            {"name": m, "provider": provider}
+            {
+                "name": m,
+                "provider": provider,
+                "model_type": infer_discovered_model_modality(
+                    provider=provider, model_name=m
+                ),
+            }
             for m in STATIC_MODELS[provider]
         ]
 
@@ -581,7 +589,11 @@ async def discover_with_config(provider: str, config: dict) -> List[dict]:
                 response.raise_for_status()
                 data = response.json()
                 return [
-                    {"name": m.get("id", ""), "provider": "openai_compatible"}
+                    {
+                        "name": m.get("id", ""),
+                        "provider": "openai_compatible",
+                        "model_type": "language",
+                    }
                     for m in data.get("data", [])
                     if m.get("id")
                 ]
@@ -602,7 +614,11 @@ async def discover_with_config(provider: str, config: dict) -> List[dict]:
                 response.raise_for_status()
                 data = response.json()
                 return [
-                    {"name": m.get("id", ""), "provider": "azure"}
+                    {
+                        "name": m.get("id", ""),
+                        "provider": "azure",
+                        "model_type": "language",
+                    }
                     for m in data.get("data", [])
                     if m.get("id")
                 ]
@@ -620,7 +636,16 @@ async def discover_with_config(provider: str, config: dict) -> List[dict]:
             "gemini-1.5-flash",
             "text-embedding-005",
         ]
-        return [{"name": m, "provider": "vertex"} for m in VERTEX_MODELS]
+        return [
+            {
+                "name": m,
+                "provider": "vertex",
+                "model_type": infer_discovered_model_modality(
+                    provider="vertex", model_name=m
+                ),
+            }
+            for m in VERTEX_MODELS
+        ]
 
     if provider == "google":
         try:
@@ -637,6 +662,10 @@ async def discover_with_config(provider: str, config: dict) -> List[dict]:
                     {
                         "name": model.get("name", "").replace("models/", ""),
                         "provider": "google",
+                        "model_type": infer_discovered_model_modality(
+                            provider="google",
+                            model_name=model.get("name", "").replace("models/", ""),
+                        ),
                         "description": model.get("displayName"),
                     }
                     for model in data.get("models", [])
@@ -667,6 +696,9 @@ async def discover_with_config(provider: str, config: dict) -> List[dict]:
                 {
                     "name": m.get("id", ""),
                     "provider": provider,
+                    "model_type": infer_discovered_model_modality(
+                        provider=provider, model_name=m.get("id", "")
+                    ),
                     "description": m.get("name"),
                 }
                 for m in data.get("data", [])
@@ -690,6 +722,7 @@ async def register_models(credential_id: str, models_data: list) -> dict:
     """
     cred = await Credential.get(credential_id)
 
+    from api.model_modality import validate_provider_model_modality
     from open_notebook.ai.models import Model
     from open_notebook.database.repository import repo_query
 
@@ -705,6 +738,14 @@ async def register_models(credential_id: str, models_data: list) -> dict:
     existing = 0
 
     for model_data in models_data:
+        effective_provider = model_data.provider or cred.provider
+        if effective_provider.casefold().replace("-", "_") != cred.provider.casefold().replace("-", "_"):
+            raise ValueError("model_provider_credential_mismatch")
+        validate_provider_model_modality(
+            provider=effective_provider,
+            model_name=model_data.name,
+            requested_type=model_data.model_type,
+        )
         key = (model_data.name.lower(), model_data.model_type.lower())
         if key in existing_keys:
             existing += 1
@@ -712,7 +753,7 @@ async def register_models(credential_id: str, models_data: list) -> dict:
 
         new_model = Model(
             name=model_data.name,
-            provider=model_data.provider or cred.provider,
+            provider=effective_provider,
             type=model_data.model_type,
             credential=cred.id,
         )

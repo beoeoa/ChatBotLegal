@@ -77,13 +77,22 @@ def tmp_data(tmp_path):
 @pytest.fixture
 def admin_control_module(monkeypatch, tmp_path):
     from api.routers import admin_control, live_support
+
     async def fake_write_audit_log(**kwargs):
         return {"id": "audit:test", **kwargs}
+
+    async def fake_repo_query(query, params=None):
+        # Admin-control unit tests must not open the developer's runtime
+        # SurrealDB websocket.  Live retention integration is covered by the
+        # isolated integration gate; returning an empty store here keeps the
+        # fixture credential- and resource-safe.
+        return []
 
     monkeypatch.setattr(live_support, "TICKETS_DIR", tmp_path / "tickets")
     monkeypatch.setattr(live_support, "ATTACHMENTS_DIR", tmp_path / "attachments")
     monkeypatch.setattr(admin_control, "LEGAL_CASES_DIR", tmp_path / "cases")
     monkeypatch.setattr(admin_control, "write_audit_log", fake_write_audit_log)
+    monkeypatch.setattr("api.retention_service.repo_query", fake_repo_query)
     return admin_control, live_support
 
 
@@ -232,11 +241,11 @@ def test_idempotent_purge_case_files(tmp_data, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Test 5: Live-support retention -- attachments after close, chat after 12 months
+# Test 5: Live-support content and attachments expire 180 days after close
 # ---------------------------------------------------------------------------
 
 def test_support_ticket_retention_separates_attachments_and_chat(tmp_path, monkeypatch):
-    """Closed-ticket files expire at 180 days; chat payload expires at 365 days."""
+    """Closed-ticket files and chat payload expire together after 180 days."""
     from api.retention_service import (
         _purge_support_ticket_attachments,
         _purge_support_ticket_chats,
@@ -271,7 +280,10 @@ def test_support_ticket_retention_separates_attachments_and_chat(tmp_path, monke
     assert retained["attachments"] == []
     assert retained["messages"][0]["attachments"] == []
     assert not file_dir.exists()
-    assert _purge_support_ticket_chats(now, dry_run=False) == 0
+    assert _purge_support_ticket_chats(now, dry_run=False) == 1
+    retained = json.loads(ticket_path.read_text(encoding="utf-8"))
+    assert retained["status"] == "purged"
+    assert retained["messages"] == []
 
     expired_id = "expired-chat"
     expired_path = tickets_dir / f"{expired_id}.json"
@@ -279,6 +291,7 @@ def test_support_ticket_retention_separates_attachments_and_chat(tmp_path, monke
         "id": expired_id,
         "status": "closed",
         "question": "sensitive question",
+        "closed_at": (now - timedelta(days=366)).isoformat(),
         "updated_at": (now - timedelta(days=366)).isoformat(),
         "messages": [{"content": "sensitive history"}],
         "attachments": [],

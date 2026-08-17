@@ -73,28 +73,5 @@ class InsightsService:
         note.updated = note_data["updated"]
         return note
 
-    def create_source_insight(
-        self, source_id: str, transformation_id: str, model_id: Optional[str] = None
-    ) -> SourceInsight:
-        """Create a new insight for a source by running a transformation."""
-        insight_response = api_client.create_source_insight(
-            source_id, transformation_id, model_id
-        )
-        insight_data = (
-            insight_response
-            if isinstance(insight_response, dict)
-            else insight_response[0]
-        )
-        insight = SourceInsight(
-            insight_type=insight_data["insight_type"],
-            content=insight_data["content"],
-        )
-        insight.id = insight_data["id"]
-        insight.created = insight_data["created"]
-        insight.updated = insight_data["updated"]
-        # Note: source_id from API response is not stored; use await insight.get_source() if needed
-        return insight
-
-
 # Global service instance
 insights_service = InsightsService()

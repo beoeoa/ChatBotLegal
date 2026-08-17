@@ -14,13 +14,6 @@ from open_notebook.domain.notebook import Source
 
 from open_notebook.graphs.prompt import PatternChainState, graph
 from open_notebook.graphs.tools import get_current_timestamp
-from open_notebook.graphs.transformation import (
-    TransformationState,
-    run_transformation,
-)
-from open_notebook.graphs.transformation import (
-    graph as transformation_graph,
-)
 
 # ============================================================================
 # TEST SUITE 1: Graph Tools
@@ -98,64 +91,7 @@ class TestPromptGraph:
 
 
 # ============================================================================
-# TEST SUITE 3: Transformation Graph
-# ============================================================================
-
-
-class TestTransformationGraph:
-    """Test suite for transformation graph workflows."""
-
-    def test_transformation_state_structure(self):
-        """Test TransformationState structure and fields."""
-        from unittest.mock import MagicMock
-
-        from open_notebook.domain.notebook import Source
-        from open_notebook.domain.transformation import Transformation
-
-        mock_source = MagicMock(spec=Source)
-        mock_transformation = MagicMock(spec=Transformation)
-
-        state = TransformationState(
-            input_text="Test text",
-            source=mock_source,
-            transformation=mock_transformation,
-            output="",
-        )
-
-        assert state["input_text"] == "Test text"
-        assert state["source"] == mock_source
-        assert state["transformation"] == mock_transformation
-        assert state["output"] == ""
-
-    @pytest.mark.asyncio
-    async def test_run_transformation_assertion_no_content(self):
-        """Test transformation raises assertion with no content."""
-        from unittest.mock import MagicMock
-
-        from open_notebook.domain.transformation import Transformation
-
-        mock_transformation = MagicMock(spec=Transformation)
-
-        state = {
-            "input_text": None,
-            "transformation": mock_transformation,
-            "source": None,
-        }
-
-        config = {"configurable": {"model_id": None}}
-
-        with pytest.raises(AssertionError, match="No content to transform"):
-            await run_transformation(state, config)
-
-    def test_transformation_graph_compilation(self):
-        """Test that transformation graph compiles correctly."""
-        assert transformation_graph is not None
-        assert hasattr(transformation_graph, "invoke")
-        assert hasattr(transformation_graph, "ainvoke")
-
-
-# ============================================================================
-# TEST SUITE 4: Source Graph - Title Preservation
+# TEST SUITE 3: Source Graph - Title Preservation
 # ============================================================================
 
 

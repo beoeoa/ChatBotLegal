@@ -8,6 +8,9 @@ from scripts.legal_search_server import _domain_matches, _domain_values, app
 
 def test_broad_ui_domain_maps_to_reviewed_legal_scope_domains():
     assert _domain_values("dat_dai_xay_dung") == (
+        "dat_dai_xay_dung",
+        "dat_dai",
+        "xay_dung",
         "dat_dai_moi_truong",
         "xay_dung_do_thi",
     )
@@ -46,11 +49,13 @@ def test_expanded_tier_queries_source_collection_and_reports_trace():
     }
     with (
         patch("scripts.legal_search_server.LegalRetriever.encode_query", return_value=np.zeros(768)),
+        patch("scripts.legal_search_server.LegalRetriever._fetch_exact_chunks", return_value=[]),
         patch("scripts.legal_search_server.LegalRetriever._fetch_lexical_chunks", return_value=[]),
         patch("scripts.legal_search_server.LegalRetriever._fetch_chunks", return_value=[row]),
-        patch("scripts.legal_search_server.LegalRetriever._fetch_fallback_chunks", return_value=[]),
-        patch("scripts.legal_search_server.LegalRetriever._fetch_relationships", return_value={}),
-        patch("scripts.legal_search_server.retriever._source_collection", source_collection),
+            patch("scripts.legal_search_server.LegalRetriever._fetch_fallback_chunks", return_value=[]),
+            patch("scripts.legal_search_server.LegalRetriever._fetch_relationships", return_value={}),
+            patch("scripts.legal_search_server.LegalRetriever._fetch_neighbor_chunk_ids", return_value=[]),
+            patch("scripts.legal_search_server.retriever._source_collection", source_collection),
     ):
         response = client.post(
             "/search",
@@ -61,7 +66,7 @@ def test_expanded_tier_queries_source_collection_and_reports_trace():
             },
         )
 
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     payload = response.json()
     source_collection.query.assert_called_once()
     assert payload["trace"]["retrieval_tier"] == "expanded"

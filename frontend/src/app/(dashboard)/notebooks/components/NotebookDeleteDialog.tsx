@@ -83,7 +83,7 @@ export function NotebookDeleteDialog({
             </div>
           ) : previewError ? (
             <div className="text-sm text-destructive">
-              {t('common.error')}: {previewError.message || 'Failed to load preview'}
+              {t('common.error')}: {t('notebooks.deleteNotebookPreviewError')}
             </div>
           ) : preview ? (
             <>

@@ -9,14 +9,13 @@ import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { useCreateNote, useUpdateNote, useNote } from '@/lib/hooks/use-notes'
 import { QUERY_KEYS } from '@/lib/api/query-client'
-import { MarkdownEditor } from '@/components/ui/markdown-editor'
 import { InlineEdit } from '@/components/common/InlineEdit'
 import { cn } from "@/lib/utils";
 import { useTranslation } from '@/lib/hooks/use-translation'
 
 const createNoteSchema = z.object({
   title: z.string().optional(),
-  content: z.string().min(1, 'Content is required'),
+  content: z.string().trim().min(1, 'Vui lòng nhập nội dung ghi chú.'),
 })
 
 type CreateNoteFormData = z.infer<typeof createNoteSchema>
@@ -154,18 +153,16 @@ export function NoteEditorDialog({ open, onOpenChange, notebookId, note }: NoteE
                   control={control}
                   name="content"
                   render={({ field }) => (
-                    <MarkdownEditor
-                      key={note?.id ?? 'new'}
-                      textareaId="note-content"
-                      value={field.value}
-                      onChange={field.onChange}
-                      height={420}
-                      placeholder={t('sources.writeNotePlaceholder')}
-                      className={cn(
-                          "w-full h-full min-h-[420px] max-h-[500px] overflow-hidden [&_.w-md-editor]:!static [&_.w-md-editor]:!w-full [&_.w-md-editor]:!h-full [&_.w-md-editor-content]:overflow-y-auto",
-                          !isEditorFullscreen && "rounded-md border"
-                      )}
-                    />
+                    <div className="space-y-2">
+                      <textarea
+                        id="note-content"
+                        value={field.value || ''}
+                        onChange={field.onChange}
+                        rows={12}
+                        placeholder={t('sources.writeNotePlaceholder') || 'Nhập nội dung ghi chú pháp lý tại đây...'}
+                        className="w-full rounded-md border border-input bg-background p-3 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      />
+                    </div>
                   )}
                 />
                 {errors.content && (

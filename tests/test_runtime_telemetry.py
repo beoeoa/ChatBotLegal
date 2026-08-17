@@ -143,6 +143,30 @@ class TestRuntimeTelemetry:
             "ask.total",
         }
 
+    def test_legal_orchestration_records_only_bounded_counts(self):
+        t = RuntimeTelemetry()
+
+        t.record_legal_orchestration(
+            duration_ms=321,
+            planner_mode="deterministic_fallback",
+            issue_count=8,
+            query_count=16,
+            candidate_count=24,
+            rejected_count=2,
+            missing_coverage_count=3,
+            supplemental_round=2,
+            removed_noise_count=5,
+            prompt_chars=11_500,
+        )
+
+        event = list(t._events)[0]
+        assert event["category"] == "ask.legal_orchestration"
+        assert event["issue_count"] == 8
+        assert event["query_count"] == 16
+        assert event["prompt_chars"] == 11_500
+        assert "question" not in event
+        assert "content" not in event
+
     def test_repair_and_audit_outcome_counters_are_fixed_and_sanitized(self):
         t = RuntimeTelemetry()
         t.record_ask_outcome("repair", "skipped")

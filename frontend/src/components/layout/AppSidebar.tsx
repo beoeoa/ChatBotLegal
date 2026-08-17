@@ -11,6 +11,7 @@ import { useAuth } from '@/lib/hooks/use-auth'
 import { useAuthStore } from '@/lib/stores/auth-store'
 import { useSidebarStore } from '@/lib/stores/sidebar-store'
 import { useCreateDialogs } from '@/lib/hooks/use-create-dialogs'
+import { createActionsForRole, navigationForRole } from '@/lib/navigation/capabilities'
 import {
   Tooltip,
   TooltipContent,
@@ -26,31 +27,12 @@ import {
 import { ThemeToggle } from '@/components/common/ThemeToggle'
 import { LanguageToggle } from '@/components/common/LanguageToggle'
 import { legalImportApi } from '@/lib/api/legal-import'
-import type { TFunction } from 'i18next'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import { Separator } from '@/components/ui/separator'
-import {
-  Book,
-  Search,
-  Mic,
-  Bot,
-  Shuffle,
-  Settings,
-  LogOut,
-  ChevronLeft,
-  Menu,
-  FileText,
-  DatabaseZap,
-  Plus,
-  Wrench,
-  Command,
-  UserCog,
-  BarChart3,
-  MessageCircleQuestion,
-  FileSearch,
-} from 'lucide-react'
+import { LogOut, ChevronLeft, Menu, Plus, Command } from 'lucide-react'
 
-const getNavigation = (t: TFunction, role: 'officer' | 'citizen' | 'admin' | null) => {
+const getNavigation = (role: 'officer' | 'citizen' | 'admin' | null) => navigationForRole(role)
+/*
   if (role === 'citizen') {
     return [
       {
@@ -81,26 +63,21 @@ const getNavigation = (t: TFunction, role: 'officer' | 'citizen' | 'admin' | nul
     ] as const
   }
 
+  // Admin: focused on Legal Data Management & System Administration
   return [
     {
-      title: t('navigation.collect'),
+      title: 'Dữ liệu pháp lý',
       items: [
-        { name: t('navigation.sources'), href: '/sources', icon: FileText },
         { name: 'Nạp dữ liệu luật', href: '/legal-import', icon: DatabaseZap },
+        { name: t('navigation.sources'), href: '/sources', icon: FileText },
       ],
     },
     {
       title: t('navigation.process'),
       items: [
-        { name: t('navigation.notebooks'), href: '/notebooks', icon: Book },
         { name: t('navigation.askAndSearch'), href: '/search', icon: Search },
         { name: 'Câu hỏi thường gặp', href: '/procedures', icon: MessageCircleQuestion },
-      ],
-    },
-    {
-      title: t('navigation.create'),
-      items: [
-        { name: t('navigation.podcasts'), href: '/podcasts', icon: Mic },
+        { name: t('navigation.notebooks'), href: '/notebooks', icon: Book },
       ],
     },
     {
@@ -108,27 +85,25 @@ const getNavigation = (t: TFunction, role: 'officer' | 'citizen' | 'admin' | nul
       items: [
         { name: 'Tài khoản', href: '/users', icon: UserCog },
         { name: 'Quản lý FAQ', href: '/faq-management', icon: MessageCircleQuestion },
-        { name: 'Chất lượng pháp lý', href: '/legal-quality', icon: BarChart3 },
         { name: t('navigation.models'), href: '/settings/api-keys', icon: Bot },
-        { name: t('navigation.transformations'), href: '/transformations', icon: Shuffle },
         { name: t('navigation.settings'), href: '/settings', icon: Settings },
-        { name: t('navigation.advanced'), href: '/advanced', icon: Wrench },
       ],
     },
   ] as const
-}
+*/
 
-type CreateTarget = 'source' | 'notebook' | 'podcast'
+type CreateTarget = 'source' | 'notebook'
 
-export function AppSidebar() {
+export function AppSidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
   const { t } = useTranslation()
   const role = useAuthStore((state) => state.role)
   const username = useAuthStore((state) => state.username)
-  const navigation = getNavigation(t, role)
+  const navigation = getNavigation(role)
+  const createActions = createActionsForRole(role)
   const pathname = usePathname()
   const { logout } = useAuth()
   const { isCollapsed, toggleCollapse } = useSidebarStore()
-  const { openSourceDialog, openNotebookDialog, openPodcastDialog } = useCreateDialogs()
+  const { openSourceDialog, openNotebookDialog } = useCreateDialogs()
 
   const [createMenuOpen, setCreateMenuOpen] = useState(false)
   const [isMac, setIsMac] = useState(true) // Default to Mac for SSR
@@ -175,8 +150,6 @@ export function AppSidebar() {
       openSourceDialog()
     } else if (target === 'notebook') {
       openNotebookDialog()
-    } else if (target === 'podcast') {
-      openPodcastDialog()
     }
   }
 
@@ -239,7 +212,7 @@ export function AppSidebar() {
             isCollapsed ? 'px-2' : 'px-3'
           )}
         >
-          {role === 'admin' && <div
+          {createActions.length > 0 && <div
             className={cn(
               'mb-4',
               isCollapsed ? 'px-0' : 'px-3'
@@ -261,7 +234,7 @@ export function AppSidebar() {
                       </Button>
                     </DropdownMenuTrigger>
                   </TooltipTrigger>
-                   <TooltipContent side="right">{t('common.create')}</TooltipContent>
+                  <TooltipContent side="right">{t('common.create')}</TooltipContent>
                 </Tooltip>
               ) : (
                 <DropdownMenuTrigger asChild>
@@ -270,7 +243,7 @@ export function AppSidebar() {
                     variant="default"
                     size="sm"
                     className="w-full justify-start bg-primary hover:bg-primary/90 text-primary-foreground border-0"
-                   >
+                  >
                     <Plus className="h-4 w-4 mr-2" />
                     {t('common.create')}
                   </Button>
@@ -282,36 +255,19 @@ export function AppSidebar() {
                 side={isCollapsed ? 'right' : 'bottom'}
                 className="w-48"
               >
-                <DropdownMenuItem
-                  onSelect={(event) => {
-                    event.preventDefault()
-                    handleCreateSelection('source')
-                  }}
-                  className="gap-2"
-                >
-                   <FileText className="h-4 w-4" />
-                  {t('common.source')}
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onSelect={(event) => {
-                    event.preventDefault()
-                    handleCreateSelection('notebook')
-                  }}
-                  className="gap-2"
-                >
-                   <Book className="h-4 w-4" />
-                  {t('common.notebook')}
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onSelect={(event) => {
-                    event.preventDefault()
-                    handleCreateSelection('podcast')
-                  }}
-                  className="gap-2"
-                >
-                   <Mic className="h-4 w-4" />
-                  {t('common.podcast')}
-                </DropdownMenuItem>
+                {createActions.map((action) => (
+                  <DropdownMenuItem
+                    key={action.id}
+                    onSelect={(event) => {
+                      event.preventDefault()
+                      handleCreateSelection(action.id)
+                    }}
+                    className="gap-2"
+                  >
+                    <action.icon className="h-4 w-4" />
+                    {action.name}
+                  </DropdownMenuItem>
+                ))}
               </DropdownMenuContent>
             </DropdownMenu>
           </div>}
@@ -353,7 +309,7 @@ export function AppSidebar() {
                     return (
                       <Tooltip key={item.name}>
                         <TooltipTrigger asChild>
-                          <Link href={item.href}>
+                          <Link href={item.href} prefetch={true} onClick={onNavigate}>
                             {button}
                           </Link>
                         </TooltipTrigger>
@@ -363,7 +319,7 @@ export function AppSidebar() {
                   }
 
                   return (
-                    <Link key={item.name} href={item.href}>
+                    <Link key={item.name} href={item.href} prefetch={true} onClick={onNavigate}>
                       {button}
                     </Link>
                   )
@@ -393,7 +349,7 @@ export function AppSidebar() {
           {!isCollapsed && (
             <div className="px-3 py-1.5 text-xs text-sidebar-foreground/60">
               <div className="flex items-center justify-between">
-                 <span className="flex items-center gap-1.5">
+                <span className="flex items-center gap-1.5">
                   <Command className="h-3 w-3" />
                   {t('common.quickActions')}
                 </span>
@@ -401,13 +357,13 @@ export function AppSidebar() {
                   {isMac ? <span className="text-xs">⌘</span> : <span>Ctrl+</span>}K
                 </kbd>
               </div>
-               <p className="mt-1 text-[10px] text-sidebar-foreground/40">
+              <p className="mt-1 text-[10px] text-sidebar-foreground/40">
                 {t('common.quickActionsDesc')}
               </p>
             </div>
           )}
 
-           <div
+          <div
             className={cn(
               'flex flex-col gap-2',
               isCollapsed ? 'items-center' : 'items-stretch'
@@ -452,7 +408,7 @@ export function AppSidebar() {
                   <LogOut className="h-4 w-4" />
                 </Button>
               </TooltipTrigger>
-               <TooltipContent side="right">{t('common.signOut')}</TooltipContent>
+              <TooltipContent side="right">{t('common.signOut')}</TooltipContent>
             </Tooltip>
           ) : (
             <Button
@@ -460,7 +416,7 @@ export function AppSidebar() {
               className="w-full justify-start gap-3 sidebar-menu-item"
               onClick={logout}
               aria-label={t('common.signOut')}
-             >
+            >
               <LogOut className="h-4 w-4" />
               {t('common.signOut')}
             </Button>

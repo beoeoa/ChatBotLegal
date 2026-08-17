@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 import sys
 import tempfile
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+
+from api.crawlers.legal_document_pipeline import (
+    build_html_extraction_blocks,
+    make_extraction_block,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -67,6 +73,62 @@ def flatten_content_list(content_list: list[dict[str, Any]]) -> str:
     return "\n\n".join(chunks).strip()
 
 
+def normalize_content_list_blocks(
+    content_list: list[dict[str, Any]],
+    *,
+    source_asset_sha256: str,
+) -> list[dict[str, Any]]:
+    """Retain parser block type/page/table paths instead of flattening only."""
+
+    blocks: list[dict[str, Any]] = []
+    for index, item in enumerate(content_list):
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("type") or "text").strip().casefold()
+        if kind not in {"text", "table", "image", "equation"}:
+            kind = "text"
+        page_index = item.get("page_idx")
+        page_number = int(page_index) + 1 if isinstance(page_index, int) else None
+        table_body = str(item.get("table_body") or "").strip()
+        if kind == "table" and "<table" in table_body.casefold():
+            cells = build_html_extraction_blocks(
+                table_body,
+                extractor="rag_anything",
+                extractor_version="mineru-adapter-v1",
+            )
+            for cell in cells:
+                blocks.append(
+                    make_extraction_block(
+                        block_type=str(cell["block_type"]),
+                        text=str(cell["text"]),
+                        extractor="rag_anything",
+                        extractor_version="mineru-adapter-v1",
+                        page_number=page_number,
+                        table_path=f"parser:{index}/{cell.get('table_path')}",
+                        row_index=cell.get("row_index"),
+                        column_index=cell.get("column_index"),
+                        source_asset_sha256=source_asset_sha256,
+                    )
+                )
+            continue
+        text = _flatten_block(item)
+        if not text:
+            continue
+        blocks.append(
+            make_extraction_block(
+                block_type=kind,
+                text=text,
+                extractor="rag_anything",
+                extractor_version="mineru-adapter-v1",
+                page_number=page_number,
+                bounding_box=item.get("bbox") or item.get("bounding_box"),
+                table_path=f"parser:{index}" if kind == "table" else None,
+                source_asset_sha256=source_asset_sha256,
+            )
+        )
+    return blocks
+
+
 @lru_cache(maxsize=1)
 def _load_mineru_parser_class():
     if not RAG_ANYTHING_ROOT.exists():
@@ -103,8 +165,17 @@ def extract_with_rag_anything(filename: str, content: bytes) -> tuple[str, dict[
             raise RagAnythingUnavailable(
                 "RAG-Anything da chay nhung khong trich xuat duoc noi dung van ban."
             )
+        asset_hash = hashlib.sha256(content).hexdigest()
+        extraction_blocks = normalize_content_list_blocks(
+            content_list,
+            source_asset_sha256=asset_hash,
+        )
         return flattened, {
             "extractor_used": "rag_anything",
             "content_blocks": len(content_list),
             "repo_path": str(RAG_ANYTHING_ROOT),
+            "file_fingerprint": asset_hash,
+            "extraction_blocks": extraction_blocks,
+            "layout_status": "available" if extraction_blocks else "fallback",
+            "layout_reason": "" if extraction_blocks else "RAG_ANYTHING_LAYOUT_UNAVAILABLE",
         }

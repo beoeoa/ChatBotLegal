@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "production-holdout-aggregate-receipt-v1.schema.json",
+  "title": "Aggregate-only production holdout acceptance receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "status", "generated_at", "dataset_version",
+    "holdout_content_sha256", "holdout_case_ids_sha256",
+    "source_snapshot_sha256", "manifest_sha256", "candidate_sha256",
+    "quota_policy_sha256", "quota_attestation_sha256",
+    "cross_split_leakage_audit_sha256",
+    "official_source_approval_manifest_sha256",
+    "case_count", "metrics", "gates", "holdout_reusable",
+    "next_holdout_version_required", "per_case_output_included",
+    "active_pointer_changed", "activation_performed", "database_mutated",
+    "vector_collections_mutated"
+  ],
+  "properties": {
+    "schema_version": {"const": "production-holdout-aggregate-receipt-v1"},
+    "status": {"enum": ["PASS", "FAIL"]},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "dataset_version": {"type": "string", "minLength": 1},
+    "holdout_content_sha256": {"$ref": "#/$defs/sha256"},
+    "holdout_case_ids_sha256": {"$ref": "#/$defs/sha256"},
+    "source_snapshot_sha256": {"$ref": "#/$defs/sha256"},
+    "manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "candidate_sha256": {"$ref": "#/$defs/sha256"},
+    "quota_policy_sha256": {"$ref": "#/$defs/sha256"},
+    "quota_attestation_sha256": {"$ref": "#/$defs/sha256"},
+    "cross_split_leakage_audit_sha256": {"$ref": "#/$defs/sha256"},
+    "official_source_approval_manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "case_count": {"const": 500},
+    "metrics": {"type": "object", "additionalProperties": true},
+    "gates": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "boolean"}},
+    "holdout_reusable": {"const": false},
+    "next_holdout_version_required": {"type": "boolean"},
+    "per_case_output_included": {"const": false},
+    "active_pointer_changed": {"const": false},
+    "activation_performed": {"const": false},
+    "database_mutated": {"const": false},
+    "vector_collections_mutated": {"const": false}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  }
+}

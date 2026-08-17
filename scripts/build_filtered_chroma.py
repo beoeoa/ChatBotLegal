@@ -10,6 +10,7 @@ import chromadb
 from sqlalchemy import text
 
 from legal_search_server import CHROMA_PATH, retriever
+from api.retrieval_release_contracts import require_staging_collection_target
 
 
 SOURCE_COLLECTION = os.getenv(
@@ -29,6 +30,9 @@ def main() -> None:
         raise RuntimeError("Source and target collections must be different")
     if not Path(CHROMA_PATH).exists():
         raise RuntimeError(f"Chroma path does not exist: {CHROMA_PATH}")
+    # Retain this legacy scope builder for diagnostics, but never let it
+    # delete/recreate the live collection by accident.
+    require_staging_collection_target(TARGET_COLLECTION, CHROMA_PATH)
 
     client = chromadb.PersistentClient(path=str(CHROMA_PATH))
     source = client.get_collection(SOURCE_COLLECTION)

@@ -4,6 +4,10 @@ The legal Q&A graph requires the VNLegal-LAL retrieval service before it calls
 the selected language model. In the Docker pilot, the API reaches this Windows
 host service through `host.docker.internal:8765`.
 
+The launcher sets `LEGAL_SEARCH_HOST=0.0.0.0` for this mixed Docker/Windows
+runtime. The Python server keeps `127.0.0.1` as its direct-run default, so an
+ad-hoc local invocation remains loopback-only unless the variable is supplied.
+
 Start retrieval with:
 
 ```powershell

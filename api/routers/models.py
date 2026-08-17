@@ -2,7 +2,7 @@ import os
 import traceback
 from typing import Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from loguru import logger
 from pydantic import BaseModel
 
@@ -12,6 +12,10 @@ from api.models import (
     ModelResponse,
     ProviderAvailabilityResponse,
 )
+from api.admin_config_history import record_config_revision
+from api.auth import get_request_role, get_request_user_id
+from api.model_modality import validate_provider_model_modality
+from api.user_service import write_audit_log
 from open_notebook.ai.connection_tester import test_individual_model
 from open_notebook.ai.key_provider import provision_provider_keys
 from open_notebook.ai.model_discovery import (
@@ -25,6 +29,19 @@ from open_notebook.domain.credential import Credential
 from open_notebook.exceptions import InvalidInputError
 
 router = APIRouter()
+
+
+def _require_model_admin(request: Request) -> None:
+    """Fail closed for every endpoint that can inspect or mutate AI setup."""
+
+    if get_request_role(request) != "admin":
+        raise HTTPException(
+            status_code=403,
+            detail="Chỉ Admin được quản lý model và nhà cung cấp AI.",
+        )
+
+
+MODEL_ADMIN_ONLY = [Depends(_require_model_admin)]
 
 
 class _LazyAIFactory:
@@ -94,6 +111,30 @@ class ModelTestResponse(BaseModel):
     success: bool
     message: str
     details: Optional[str] = None
+
+
+async def validate_default_model_modalities(defaults_data) -> None:
+    """Ensure every configured default points to a model with the required output."""
+
+    expected = {
+        "default_chat_model": "language",
+        "large_context_model": "language",
+        "default_tools_model": "language",
+        "default_embedding_model": "embedding",
+        "default_text_to_speech_model": "text_to_speech",
+        "default_speech_to_text_model": "speech_to_text",
+    }
+    for field, required_type in expected.items():
+        model_id = getattr(defaults_data, field, None)
+        if model_id is None:
+            continue
+        model = await Model.get(model_id)
+        if model is None:
+            raise ValueError(f"default_model_not_found:{field}")
+        if str(getattr(model, "type", "")).casefold() != required_type:
+            raise ValueError(
+                f"default_model_modality_mismatch:{field}:{required_type}"
+            )
 
 
 # Provider priority for auto-assignment (higher priority first)
@@ -207,8 +248,10 @@ async def get_models(
         raise HTTPException(status_code=500, detail=f"Error fetching models: {str(e)}")
 
 
-@router.post("/models", response_model=ModelResponse)
-async def create_model(model_data: ModelCreate):
+@router.post(
+    "/models", response_model=ModelResponse, dependencies=MODEL_ADMIN_ONLY
+)
+async def create_model(model_data: ModelCreate, request: Request):
     """Create a new model configuration."""
     try:
         # Validate model type
@@ -218,6 +261,14 @@ async def create_model(model_data: ModelCreate):
                 status_code=400,
                 detail=f"Invalid model type. Must be one of: {valid_types}",
             )
+        try:
+            validate_provider_model_modality(
+                provider=model_data.provider,
+                model_name=model_data.name,
+                requested_type=model_data.type,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         # Check for duplicate model name under the same provider and type (case-insensitive)
         from open_notebook.database.repository import repo_query
@@ -244,6 +295,13 @@ async def create_model(model_data: ModelCreate):
         )
         await new_model.save()
 
+        await write_audit_log(
+            action="admin.model.create", entity_type="model", entity_id=str(new_model.id or model_data.name),
+            actor_user_id=get_request_user_id(request), actor_role="admin",
+            details={"result": "success", "provider": model_data.provider, "model_type": model_data.type},
+            request=request,
+        )
+
         return ModelResponse(
             id=new_model.id or "",
             name=new_model.name,
@@ -262,8 +320,8 @@ async def create_model(model_data: ModelCreate):
         raise HTTPException(status_code=500, detail=f"Error creating model: {str(e)}")
 
 
-@router.delete("/models/{model_id}")
-async def delete_model(model_id: str):
+@router.delete("/models/{model_id}", dependencies=MODEL_ADMIN_ONLY)
+async def delete_model(model_id: str, request: Request):
     """Delete a model configuration."""
     try:
         model = await Model.get(model_id)
@@ -271,6 +329,12 @@ async def delete_model(model_id: str):
             raise HTTPException(status_code=404, detail="Model not found")
 
         await model.delete()
+
+        await write_audit_log(
+            action="admin.model.delete", entity_type="model", entity_id=model_id,
+            actor_user_id=get_request_user_id(request), actor_role="admin",
+            details={"result": "success"}, request=request,
+        )
 
         return {"message": "Model deleted successfully"}
     except HTTPException:
@@ -280,7 +344,11 @@ async def delete_model(model_id: str):
         raise HTTPException(status_code=500, detail=f"Error deleting model: {str(e)}")
 
 
-@router.post("/models/{model_id}/test", response_model=ModelTestResponse)
+@router.post(
+    "/models/{model_id}/test",
+    response_model=ModelTestResponse,
+    dependencies=MODEL_ADMIN_ONLY,
+)
 async def test_model(model_id: str):
     """Test if a specific model is correctly configured and functional."""
     try:
@@ -304,20 +372,23 @@ async def test_model(model_id: str):
 
 
 @router.get("/models/defaults", response_model=DefaultModelsResponse)
-async def get_default_models():
+async def get_default_models(request: Request):
     """Get default model assignments."""
     try:
+        if get_request_role(request) != "admin":
+            raise HTTPException(status_code=403, detail="Chỉ Admin được xem cấu hình model.")
         defaults = await DefaultModels.get_instance()
 
         return DefaultModelsResponse(
             default_chat_model=defaults.default_chat_model,  # type: ignore[attr-defined]
-            default_transformation_model=defaults.default_transformation_model,  # type: ignore[attr-defined]
             large_context_model=defaults.large_context_model,  # type: ignore[attr-defined]
             default_text_to_speech_model=defaults.default_text_to_speech_model,  # type: ignore[attr-defined]
             default_speech_to_text_model=defaults.default_speech_to_text_model,  # type: ignore[attr-defined]
             default_embedding_model=defaults.default_embedding_model,  # type: ignore[attr-defined]
             default_tools_model=defaults.default_tools_model,  # type: ignore[attr-defined]
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error fetching default models: {str(e)}")
         raise HTTPException(
@@ -326,18 +397,28 @@ async def get_default_models():
 
 
 @router.put("/models/defaults", response_model=DefaultModelsResponse)
-async def update_default_models(defaults_data: DefaultModelsResponse):
+async def update_default_models(defaults_data: DefaultModelsResponse, request: Request):
     """Update default model assignments."""
     try:
+        if get_request_role(request) != "admin":
+            raise HTTPException(status_code=403, detail="Chỉ Admin được sửa cấu hình model.")
+        try:
+            await validate_default_model_modalities(defaults_data)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         defaults = await DefaultModels.get_instance()
+        before = DefaultModelsResponse(
+            default_chat_model=defaults.default_chat_model,  # type: ignore[attr-defined]
+            large_context_model=defaults.large_context_model,  # type: ignore[attr-defined]
+            default_text_to_speech_model=defaults.default_text_to_speech_model,  # type: ignore[attr-defined]
+            default_speech_to_text_model=defaults.default_speech_to_text_model,  # type: ignore[attr-defined]
+            default_embedding_model=defaults.default_embedding_model,  # type: ignore[attr-defined]
+            default_tools_model=defaults.default_tools_model,  # type: ignore[attr-defined]
+        ).model_dump()
 
         # Update only provided fields
         if defaults_data.default_chat_model is not None:
             defaults.default_chat_model = defaults_data.default_chat_model  # type: ignore[attr-defined]
-        if defaults_data.default_transformation_model is not None:
-            defaults.default_transformation_model = (
-                defaults_data.default_transformation_model
-            )  # type: ignore[attr-defined]
         if defaults_data.large_context_model is not None:
             defaults.large_context_model = defaults_data.large_context_model  # type: ignore[attr-defined]
         if defaults_data.default_text_to_speech_model is not None:
@@ -357,15 +438,22 @@ async def update_default_models(defaults_data: DefaultModelsResponse):
 
         # No cache refresh needed - next access will fetch fresh data from DB
 
-        return DefaultModelsResponse(
+        response = DefaultModelsResponse(
             default_chat_model=defaults.default_chat_model,  # type: ignore[attr-defined]
-            default_transformation_model=defaults.default_transformation_model,  # type: ignore[attr-defined]
             large_context_model=defaults.large_context_model,  # type: ignore[attr-defined]
             default_text_to_speech_model=defaults.default_text_to_speech_model,  # type: ignore[attr-defined]
             default_speech_to_text_model=defaults.default_speech_to_text_model,  # type: ignore[attr-defined]
             default_embedding_model=defaults.default_embedding_model,  # type: ignore[attr-defined]
             default_tools_model=defaults.default_tools_model,  # type: ignore[attr-defined]
         )
+        await record_config_revision(
+            config_type="model_defaults",
+            before=before,
+            after=response.model_dump(),
+            actor_user_id=get_request_user_id(request),
+            reason=(request.headers.get("X-Business-Reason") or "Cập nhật model mặc định").strip(),
+        )
+        return response
     except HTTPException:
         raise
     except Exception as e:
@@ -375,7 +463,11 @@ async def update_default_models(defaults_data: DefaultModelsResponse):
         )
 
 
-@router.get("/models/providers", response_model=ProviderAvailabilityResponse)
+@router.get(
+    "/models/providers",
+    response_model=ProviderAvailabilityResponse,
+    dependencies=MODEL_ADMIN_ONLY,
+)
 async def get_provider_availability():
     """Get provider availability based on database config and environment variables."""
     try:
@@ -502,7 +594,9 @@ async def get_provider_availability():
 
 
 @router.get(
-    "/models/discover/{provider}", response_model=List[DiscoveredModelResponse]
+    "/models/discover/{provider}",
+    response_model=List[DiscoveredModelResponse],
+    dependencies=MODEL_ADMIN_ONLY,
 )
 async def discover_models(provider: str):
     """
@@ -532,7 +626,11 @@ async def discover_models(provider: str):
         )
 
 
-@router.post("/models/sync/{provider}", response_model=ProviderSyncResponse)
+@router.post(
+    "/models/sync/{provider}",
+    response_model=ProviderSyncResponse,
+    dependencies=MODEL_ADMIN_ONLY,
+)
 async def sync_models(provider: str):
     """
     Sync models for a specific provider.
@@ -559,7 +657,11 @@ async def sync_models(provider: str):
         raise HTTPException(status_code=500, detail="Error syncing models. Check server logs for details.")
 
 
-@router.post("/models/sync", response_model=AllProvidersSyncResponse)
+@router.post(
+    "/models/sync",
+    response_model=AllProvidersSyncResponse,
+    dependencies=MODEL_ADMIN_ONLY,
+)
 async def sync_all_models():
     """
     Sync models for all configured providers.
@@ -597,7 +699,11 @@ async def sync_all_models():
         )
 
 
-@router.get("/models/count/{provider}", response_model=ProviderModelCountResponse)
+@router.get(
+    "/models/count/{provider}",
+    response_model=ProviderModelCountResponse,
+    dependencies=MODEL_ADMIN_ONLY,
+)
 async def get_model_count(provider: str):
     """
     Get count of registered models for a provider, grouped by type.
@@ -620,7 +726,11 @@ async def get_model_count(provider: str):
         )
 
 
-@router.get("/models/by-provider/{provider}", response_model=List[ModelResponse])
+@router.get(
+    "/models/by-provider/{provider}",
+    response_model=List[ModelResponse],
+    dependencies=MODEL_ADMIN_ONLY,
+)
 async def get_models_by_provider(provider: str):
     """
     Get all registered models for a specific provider.
@@ -698,7 +808,11 @@ def _get_preferred_model(
     return models[0] if models else None
 
 
-@router.post("/models/auto-assign", response_model=AutoAssignResult)
+@router.post(
+    "/models/auto-assign",
+    response_model=AutoAssignResult,
+    dependencies=MODEL_ADMIN_ONLY,
+)
 async def auto_assign_defaults():
     """
     Auto-assign default models based on available models.
@@ -741,7 +855,6 @@ async def auto_assign_defaults():
         # Define slot configuration: (slot_name, model_type, current_value)
         slot_configs = [
             ("default_chat_model", "language", defaults.default_chat_model),  # type: ignore[attr-defined]
-            ("default_transformation_model", "language", defaults.default_transformation_model),  # type: ignore[attr-defined]
             ("default_tools_model", "language", defaults.default_tools_model),  # type: ignore[attr-defined]
             ("large_context_model", "language", defaults.large_context_model),  # type: ignore[attr-defined]
             ("default_embedding_model", "embedding", defaults.default_embedding_model),  # type: ignore[attr-defined]

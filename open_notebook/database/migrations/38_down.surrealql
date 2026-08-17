@@ -1,0 +1,3 @@
+-- Roll back only the optional Step 5 history snapshot fields.
+REMOVE FIELD IF EXISTS answer_sections ON TABLE conversation_message;
+REMOVE FIELD IF EXISTS forms_unavailable ON TABLE conversation_message;

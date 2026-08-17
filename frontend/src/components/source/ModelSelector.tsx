@@ -51,7 +51,7 @@ export function ModelSelector({
       return []
     }
     return [...models]
-      .filter((model) => model.type === 'language')
+      .filter((model) => model.type !== 'embedding')
       .sort((a, b) => a.name.localeCompare(b.name))
   }, [models])
 
@@ -104,7 +104,7 @@ export function ModelSelector({
             {t('common.modelConfiguration')}
           </DialogTitle>
           <DialogDescription>
-            {t('transformations.overrideModelDesc')}
+            Chọn mô hình dùng tạm thời cho phiên trao đổi này.
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-4 py-4">
@@ -120,7 +120,7 @@ export function ModelSelector({
                     <span>
                       {defaultModel 
                         ? `${t('common.default')} (${defaultModel.name})` 
-                        : t('transformations.systemDefault')}
+                        : t('common.default')}
                     </span>
                     {defaultModel?.provider && (
                       <span className="text-xs text-muted-foreground ml-2">
@@ -151,10 +151,7 @@ export function ModelSelector({
           {selectedModel && selectedModel !== 'default' && (
             <div className="rounded-lg bg-muted p-3">
               <p className="text-sm text-muted-foreground">
-                {t('transformations.sessionUseReplacement').replace(
-                  '{name}', 
-                  languageModels.find(m => m.id === selectedModel)?.name || selectedModel
-                )}
+                Phiên này đang dùng {languageModels.find(m => m.id === selectedModel)?.name || selectedModel} thay cho mô hình mặc định.
               </p>
             </div>
           )}

@@ -13,6 +13,7 @@ import json
 import os
 import re
 import sys
+import unicodedata
 from collections.abc import Callable, Iterable
 from enum import Enum
 from pathlib import Path
@@ -34,6 +35,8 @@ INDEX_NAMES = (
     "ix_legal_retrieval_documents_law_number_trgm",
     "ix_legal_retrieval_chunks_article_id",
     "ix_legal_retrieval_articles_active_document_id",
+    "ix_legal_retrieval_relationships_source_document_id",
+    "ix_legal_retrieval_relationships_target_document_id",
 )
 
 EXPECTED_INDEX_SIGNATURES = {
@@ -80,6 +83,16 @@ EXPECTED_INDEX_SIGNATURES = {
         "status",
         "active",
     ),
+    "ix_legal_retrieval_relationships_source_document_id": (
+        "legal_document_relationships",
+        "using btree",
+        "source_document_id",
+    ),
+    "ix_legal_retrieval_relationships_target_document_id": (
+        "legal_document_relationships",
+        "using btree",
+        "target_document_id",
+    ),
 }
 
 REQUIRED_COLUMNS = {
@@ -107,17 +120,26 @@ JOIN legal_search_scope search_scope
   ON search_scope.document_id = d.id
  AND search_scope.included = TRUE
 WHERE (
-       LOWER(COALESCE(c.content, '')) LIKE :pattern
-    OR LOWER(COALESCE(c.heading, '')) LIKE :pattern
-    OR LOWER(COALESCE(a.title, '')) LIKE :pattern
-    OR LOWER(COALESCE(d.title, '')) LIKE :pattern
-    OR LOWER(COALESCE(d.law_number, '')) LIKE :pattern
+       legal_normalize_text(c.content) LIKE :pattern
+    OR legal_normalize_text(c.heading) LIKE :pattern
+    OR legal_normalize_text(a.title) LIKE :pattern
+    OR legal_normalize_text(d.title) LIKE :pattern
+    OR legal_normalize_text(d.law_number) LIKE :pattern
 )
   AND d.status = 'active'
   AND a.status = 'active'
 ORDER BY d.effective_date DESC NULLS LAST, c.id DESC
 LIMIT 120
 """.strip()
+
+LEGACY_BENCHMARK_SQL = (
+    BENCHMARK_SQL
+    .replace("legal_normalize_text(c.content)", "LOWER(COALESCE(c.content, ''))")
+    .replace("legal_normalize_text(c.heading)", "LOWER(COALESCE(c.heading, ''))")
+    .replace("legal_normalize_text(a.title)", "LOWER(COALESCE(a.title, ''))")
+    .replace("legal_normalize_text(d.title)", "LOWER(COALESCE(d.title, ''))")
+    .replace("legal_normalize_text(d.law_number)", "LOWER(COALESCE(d.law_number, ''))")
+)
 
 
 class Mode(str, Enum):
@@ -247,7 +269,7 @@ def _index_names_in(statements: Iterable[str], verb: str) -> set[str]:
 def _function_names_in(statements: Iterable[str], verb: str) -> set[str]:
     if verb.casefold() == "create":
         pattern = re.compile(
-            r"\bCREATE\s+FUNCTION\s+([a-z_][a-z0-9_.]*)",
+            r"\bCREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+([a-z_][a-z0-9_.]*)",
             flags=re.IGNORECASE,
         )
     else:
@@ -281,8 +303,10 @@ def load_migration(mode: Mode) -> tuple[Path, list[str]]:
     else:
         allowed = (
             "create extension if not exists pg_trgm",
+            "create extension if not exists unaccent",
             "create index concurrently if not exists ",
             "create function ",
+            "create or replace function ",
         )
         if any(not _statement_head(statement).startswith(allowed) for statement in statements):
             raise ValueError("Up migration contains an unsupported operation.")
@@ -499,8 +523,19 @@ def run_explain_analyze(connection: Any, benchmark_term: str) -> dict[str, Any]:
     if len(cleaned_term) < 3 or len(cleaned_term) > 120:
         raise ValueError("Benchmark term must contain between 3 and 120 characters.")
 
+    normalized_available = bool(
+        connection.execute(
+            _text("SELECT to_regprocedure('legal_normalize_text(text)') IS NOT NULL")
+        ).scalar_one()
+    )
+    if normalized_available:
+        decomposed = unicodedata.normalize("NFD", cleaned_term).replace("đ", "d")
+        cleaned_term = "".join(
+            char for char in decomposed if unicodedata.category(char) != "Mn"
+        )
     payload = connection.execute(
-        _text(BENCHMARK_SQL), {"pattern": f"%{cleaned_term}%"}
+        _text(BENCHMARK_SQL if normalized_available else LEGACY_BENCHMARK_SQL),
+        {"pattern": f"%{cleaned_term}%"},
     ).scalar_one()
     if isinstance(payload, str):
         payload = json.loads(payload)
@@ -578,6 +613,8 @@ def _json_default(value: Any) -> Any:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     args = build_parser().parse_args(argv)
     mode = Mode(args.mode)
     engine = None

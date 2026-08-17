@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "retrieval-eval-suite-v1.schema.json",
+  "title": "Retrieval Release V2 evaluation suite",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "dataset_version",
+    "source_snapshot_sha256",
+    "manifest_sha256",
+    "review_policy",
+    "cases",
+    "suite_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "retrieval-eval-suite-v1"},
+    "dataset_version": {"type": "string", "minLength": 1},
+    "source_snapshot_sha256": {"$ref": "#/$defs/sha256"},
+    "manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "review_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["golden_development_allowed", "hard_negative_development_allowed", "holdout_sealed"],
+      "properties": {
+        "golden_development_allowed": {"type": "boolean"},
+        "hard_negative_development_allowed": {"type": "boolean"},
+        "holdout_sealed": {"type": "boolean"}
+      }
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/case"}
+    },
+    "suite_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["law_number", "article", "official_url", "jurisdiction", "validity_from", "validity_to"],
+      "properties": {
+        "law_number": {"type": "string", "minLength": 1},
+        "article": {"type": ["string", "null"]},
+        "paragraph": {"type": ["string", "null"]},
+        "point": {"type": ["string", "null"]},
+        "official_url": {"type": "string", "format": "uri", "minLength": 1},
+        "jurisdiction": {"type": "string", "minLength": 1},
+        "validity_from": {"type": ["string", "null"], "format": "date"},
+        "validity_to": {"type": ["string", "null"], "format": "date"}
+      }
+    },
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "case_id", "split", "domain", "tags", "question", "legal_as_of",
+        "answer_required", "expected_refusal", "refusal_category",
+        "positive_source_groups", "hard_negative_sources", "issue_groups",
+        "reviewer_approval", "case_sha256"
+      ],
+      "properties": {
+        "case_id": {"type": "string", "minLength": 1},
+        "case_sha256": {"$ref": "#/$defs/sha256"},
+        "split": {"enum": ["golden-regression", "hard-negative", "production-holdout"]},
+        "domain": {"enum": [
+          "Hộ tịch/chứng thực",
+          "Đất đai/xây dựng/môi trường",
+          "Cư trú/căn cước/an ninh",
+          "Khiếu nại/tố cáo/tiếp công dân/xử phạt",
+          "An sinh/y tế/giáo dục"
+        ]},
+        "tags": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+        "question": {"type": "string", "minLength": 1},
+        "query_classification": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "domain": {"type": ["string", "null"]},
+            "intent": {"type": ["string", "null"]},
+            "scope": {"type": ["string", "null"]},
+            "temporal_scope": {"type": ["string", "null"]},
+            "answer_type": {"type": ["string", "null"]},
+            "requires_clarification": {"type": "boolean"}
+          }
+        },
+        "legal_as_of": {"type": "string", "format": "date"},
+        "temporal_scope": {"enum": ["current", "historical", "unknown", "conflict"]},
+        "answer_required": {"type": "boolean"},
+        "expected_refusal": {"type": "boolean"},
+        "refusal_category": {"enum": ["none", "temporal_unknown", "temporal_conflict", "insufficient_facts", "out_of_scope"]},
+        "positive_source_groups": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["group_id", "sources"],
+            "properties": {
+              "group_id": {"type": "string", "minLength": 1},
+              "sources": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/source"}}
+            }
+          }
+        },
+        "hard_negative_sources": {"type": "array", "items": {"$ref": "#/$defs/source"}},
+        "issue_groups": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["issue_id", "required_source_group_ids"],
+            "properties": {
+              "issue_id": {"type": "string", "minLength": 1},
+              "required_source_group_ids": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+            }
+          }
+        },
+        "reviewer_approval": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["reviewer_id", "reviewed_at", "decision", "evidence_sha256"],
+          "properties": {
+            "reviewer_id": {"type": "string", "minLength": 1},
+            "reviewed_at": {"type": "string", "format": "date-time"},
+            "decision": {"const": "approved"},
+            "evidence_sha256": {"$ref": "#/$defs/sha256"}
+          }
+        }
+      }
+    }
+  }
+}

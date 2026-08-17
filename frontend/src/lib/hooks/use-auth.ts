@@ -3,6 +3,7 @@
 import { useAuthStore } from '@/lib/stores/auth-store'
 import { useRouter } from 'next/navigation'
 import { useEffect } from 'react'
+import { ADMIN_LANDING_PATH } from '@/lib/navigation/capabilities'
 
 const ROLE_ALLOWED_PATHS = {
   citizen: ['/search', '/procedures', '/legal-docs', '/legal-documents', '/live-support'],
@@ -18,6 +19,9 @@ export function useAuth() {
     logout,
     checkAuth,
     checkAuthRequired,
+    setupTotp,
+    confirmTotp,
+    mfaChallenge,
     error,
     hasHydrated,
     authRequired,
@@ -40,16 +44,19 @@ export function useAuth() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hasHydrated, authRequired])
 
-  const handleLogin = async (identifier: string, password: string) => {
-    const success = await login(identifier, password)
-    if (!success) return false
-
+  const finishLogin = () => {
     const state = useAuthStore.getState()
     const actualRole = state.role || 'citizen'
 
     if (state.mustChangePassword) {
       router.push('/change-password')
-      return true
+      return
+    }
+
+    if (actualRole === 'admin') {
+      sessionStorage.removeItem('redirectAfterLogin')
+      router.push(ADMIN_LANDING_PATH)
+      return
     }
 
     const redirectPath = sessionStorage.getItem('redirectAfterLogin')
@@ -66,17 +73,28 @@ export function useAuth() {
       } else {
         router.push(redirectPath)
       }
-    } else if (actualRole === 'admin') {
-      router.push('/notebooks')
     } else {
       router.push('/search')
     }
+  }
 
+  const handleLogin = async (identifier: string, password: string, totpCode?: string) => {
+    const success = await login(identifier, password, totpCode)
+    if (!success) return false
+
+    finishLogin()
     return true
   }
 
-  const handleLogout = () => {
-    logout()
+  const handleConfirmTotp = async (confirmToken: string, code: string) => {
+    const success = await confirmTotp(confirmToken, code)
+    if (!success) return false
+    finishLogin()
+    return true
+  }
+
+  const handleLogout = async () => {
+    await logout()
     router.push('/login')
   }
 
@@ -86,7 +104,10 @@ export function useAuth() {
     error,
     role,
     mustChangePassword,
+    mfaChallenge,
     login: handleLogin,
+    setupTotp,
+    confirmTotp: handleConfirmTotp,
     logout: handleLogout,
   }
 }

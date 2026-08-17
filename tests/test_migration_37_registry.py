@@ -6,15 +6,18 @@ from open_notebook.database.async_migrate import AsyncMigrationManager
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_migration_37_is_registered_last_for_up_and_down(monkeypatch):
+def test_migrations_43_and_44_are_registered_in_order_for_up_and_down(monkeypatch):
     monkeypatch.chdir(PROJECT_ROOT)
 
     manager = AsyncMigrationManager()
 
-    assert len(manager.up_migrations) == 37
-    assert len(manager.down_migrations) == 37
-    assert "user_ask_history" in manager.up_migrations[-1].sql
-    assert "user_ask_history" in manager.down_migrations[-1].sql
+    assert len(manager.up_migrations) == 44
+    assert len(manager.down_migrations) == 44
+    assert "legal_validity_observation" in manager.up_migrations[-2].sql
+    assert "legal_validity_sync_lease" in manager.up_migrations[-2].sql
+    assert "legal_validity_observation" in manager.down_migrations[-2].sql
+    assert "form_workflow_notification" in manager.up_migrations[-1].sql
+    assert "form_workflow_notification" in manager.down_migrations[-1].sql
 
 
 def test_migration_37_keeps_legacy_strings_and_structured_snapshots_compatible():

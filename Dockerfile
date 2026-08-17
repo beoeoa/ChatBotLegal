@@ -29,9 +29,13 @@ WORKDIR /app
 # Copy dependency files and minimal package structure first for better layer caching
 COPY pyproject.toml uv.lock ./
 COPY open_notebook/__init__.py ./open_notebook/__init__.py
+COPY scripts/patch_moviepy_pillow_metadata.py /tmp/patch_moviepy_pillow_metadata.py
 
 # Install dependencies with optimizations (this layer will be cached unless dependencies change)
-RUN uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev --extra ocr \
+    && .venv/bin/python /tmp/patch_moviepy_pillow_metadata.py \
+        --site-packages /app/.venv/lib/python3.12/site-packages \
+    && .venv/bin/python -m pip check
 
 # Pre-download tiktoken encoding so the app works offline (issue #264).
 # /app/tiktoken-cache is intentionally outside /app/data/ so that volume mounts
@@ -40,9 +44,6 @@ RUN uv sync --frozen --no-dev
 ENV TIKTOKEN_CACHE_DIR=/app/tiktoken-cache
 RUN mkdir -p /app/tiktoken-cache && \
     .venv/bin/python -c "import tiktoken; tiktoken.get_encoding('o200k_base')"
-
-# Copy the rest of the application code
-COPY . /app
 
 # Install frontend dependencies and build
 WORKDIR /app/frontend
@@ -69,6 +70,11 @@ RUN npm run build
 # Return to app root
 WORKDIR /app
 
+# Copy backend/application source only after the independently cacheable
+# frontend dependency and build layers. Host build artifacts are excluded by
+# .dockerignore, so this does not overwrite the generated Next.js output.
+COPY . /app
+
 # Runtime stage
 FROM python:3.12-slim-bookworm AS runtime
 
@@ -79,6 +85,9 @@ RUN echo 'Acquire::Check-Date "false";' > /etc/apt/apt.conf.d/99ignore-release-d
     ffmpeg \
     supervisor \
     curl \
+    tesseract-ocr \
+    tesseract-ocr-eng \
+    tesseract-ocr-vie \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
@@ -91,6 +100,18 @@ WORKDIR /app
 
 # Copy the virtual environment from builder stage
 COPY --from=builder /app/.venv /app/.venv
+
+# The production frontend executes the prebuilt standalone server with Node
+# only. Neither system npm nor the npm bundled by nodejs-wheel is invoked at
+# runtime. Remove those package-manager trees so their build-time dependency
+# CVEs are not shipped in the pilot image; keep both Node executables intact.
+RUN rm -rf \
+    /usr/lib/node_modules/npm \
+    /usr/bin/npm \
+    /usr/bin/npx \
+    /app/.venv/lib/python3.12/site-packages/nodejs_wheel/lib/node_modules/npm \
+    /app/.venv/lib/python3.12/site-packages/nodejs_wheel/bin/npm \
+    /app/.venv/lib/python3.12/site-packages/nodejs_wheel/bin/npx
 
 # Copy the source code (the rest)
 COPY . /app

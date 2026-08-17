@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "legal-retrieval-trace-m3-v1.schema.json",
+  "title": "M3 legal retrieval trace",
+  "type": "object",
+  "required": [
+    "schema_version", "raw_query", "normalized_query", "query_classification",
+    "vector_candidates", "lexical_candidates", "fusion_candidates",
+    "reranker_candidates", "expanded_evidence", "final_evidence",
+    "stage_latency_ms"
+  ],
+  "properties": {
+    "schema_version": {"const": "legal-retrieval-trace-m3-v1"},
+    "raw_query": {"type": "string", "minLength": 1},
+    "normalized_query": {"type": "string", "minLength": 1},
+    "query_classification": {"type": "object"},
+    "vector_candidates": {"type": "array", "items": {"$ref": "#/$defs/candidate"}},
+    "lexical_candidates": {"type": "array", "items": {"$ref": "#/$defs/candidate"}},
+    "fusion_candidates": {"type": "array", "items": {"$ref": "#/$defs/candidate"}},
+    "reranker_candidates": {
+      "type": "object",
+      "required": ["input", "output", "status"],
+      "properties": {
+        "input": {"type": "array", "items": {"$ref": "#/$defs/candidate"}},
+        "output": {"type": "array", "items": {"$ref": "#/$defs/candidate"}},
+        "status": {"type": "object"}
+      }
+    },
+    "expanded_evidence": {
+      "type": "object",
+      "required": ["neighbor_candidates", "fallback_candidates", "parent_contexts"],
+      "properties": {
+        "neighbor_candidates": {"type": "array", "items": {"$ref": "#/$defs/candidate"}},
+        "fallback_candidates": {"type": "array", "items": {"$ref": "#/$defs/candidate"}},
+        "parent_contexts": {"type": "array", "items": {"$ref": "#/$defs/candidate"}}
+      }
+    },
+    "final_evidence": {"type": "array", "items": {"$ref": "#/$defs/candidate"}},
+    "stage_latency_ms": {
+      "type": "object",
+      "required": [
+        "exact_lookup", "embedding", "ann_search", "lexical_sql",
+        "hydrate_chunks", "neighbors", "relationships", "rank_filter",
+        "validity_overlay", "parent_hydration", "total"
+      ],
+      "additionalProperties": {"type": "number", "minimum": 0}
+    }
+  },
+  "$defs": {
+    "candidate": {
+      "type": "object",
+      "required": ["rank", "chunk_id"],
+      "properties": {
+        "rank": {"type": "integer", "minimum": 1},
+        "chunk_id": {"type": ["integer", "null"]},
+        "document_id": {"type": ["integer", "null"]},
+        "article_id": {"type": ["integer", "null"]},
+        "law_number": {"type": ["string", "null"]},
+        "article_number": {"type": ["string", "integer", "null"]},
+        "domain": {"type": ["string", "null"]},
+        "retrieval_source": {"type": ["string", "null"]},
+        "retrieval_sources": {"type": "array"}
+      }
+    }
+  }
+}

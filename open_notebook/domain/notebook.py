@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from surreal_commands import submit_command
 from surrealdb import RecordID
 
+from api.legal_hierarchy import rank_legal_evidence
 from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.domain.base import ObjectModel
 from open_notebook.exceptions import DatabaseOperationError, InvalidInputError
@@ -586,13 +587,22 @@ class Note(ObjectModel):
 
         # Submit embedding command (fire-and-forget) if note has content
         if self.id and self.content and self.content.strip():
-            command_id = submit_command(
-                "open_notebook",
-                "embed_note",
-                {"note_id": str(self.id)},
-            )
-            logger.debug(f"Submitted embed_note command {command_id} for {self.id}")
-            return command_id
+            try:
+                command_id = submit_command(
+                    "open_notebook",
+                    "embed_note",
+                    {"note_id": str(self.id)},
+                )
+                logger.debug(f"Submitted embed_note command {command_id} for {self.id}")
+                return command_id
+            except Exception as exc:
+                # Embedding is an optional background enhancement. The note has
+                # already been persisted, so a queue/configuration outage must not
+                # turn a successful citizen/officer action into an HTTP 500 (which
+                # can also cause mutation retries to create duplicate notes).
+                logger.warning(
+                    f"Saved note {self.id}, but could not enqueue embedding: {exc}"
+                )
 
         return None
 
@@ -633,38 +643,17 @@ class ChatSession(ObjectModel):
 
 
 
-def _apply_scope_priority(results: list[dict], scope_filter: str, boost_factor: float = 1.2) -> list[dict]:
-    """Apply priority boost to search results matching the scope filter.
-    
-    Args:
-        results: List of search result dictionaries
-        scope_filter: Scope to prioritize ("central", "haiphong", "local")
-        boost_factor: Multiplier for score of matching items (default 1.2)
-    
-    Returns:
-        Re-sorted results with boosted scores for matching scope
+def _apply_scope_priority(results: list[dict], scope_filter: str | None, boost_factor: float = 1.2) -> list[dict]:
+    """Apply legal hierarchy, retaining ``boost_factor`` for API compatibility.
+
+    Scope is only a tie-break after verified legal authority.  Relevance scores
+    are copied unchanged; the former ``score * 1.2`` behavior is intentionally
+    retired because it could move local material above superior law.
     """
-    if not results or not scope_filter:
+    if not results:
         return results
-    
-    # Boost scores for matching scope
-    boosted_results = []
-    for item in results:
-        # Get scope from result metadata
-        result_scope = item.get('scope') or item.get('metadata', {}).get('scope', 'central')
-        
-        # Apply boost if scope matches
-        if result_scope == scope_filter:
-            original_score = item.get('score', 0)
-            item['score'] = original_score * boost_factor
-            item['scope_matched'] = True  # Mark for debugging
-        
-        boosted_results.append(item)
-    
-    # Re-sort by score (descending)
-    boosted_results.sort(key=lambda x: x.get('score', 0), reverse=True)
-    
-    return boosted_results
+    _ = boost_factor
+    return rank_legal_evidence(results, scope_filter=scope_filter)
 
 
 async def text_search(
@@ -680,8 +669,8 @@ async def text_search(
             """,
             {"keyword": keyword, "results": results, "source": source, "note": note},
         )
-        # Apply scope-based priority boost (Week 5-6)
-        if scope_filter and search_results:
+        # Apply deterministic legal-authority order; scope is a tie-breaker.
+        if search_results:
             search_results = _apply_scope_priority(search_results, scope_filter)
         
         return search_results
@@ -718,8 +707,8 @@ async def vector_search(
                 "minimum_score": minimum_score,
             },
         )
-        # Apply scope-based priority boost (Week 5-6)
-        if scope_filter and search_results:
+        # Apply deterministic legal-authority order; scope is a tie-breaker.
+        if search_results:
             search_results = _apply_scope_priority(search_results, scope_filter)
         
         return search_results

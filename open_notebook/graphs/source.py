@@ -1,34 +1,22 @@
-import operator
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from content_core import extract_content
 from content_core.common import ProcessSourceState
-from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import Send
 from loguru import logger
-from typing_extensions import Annotated, TypedDict
+from typing_extensions import TypedDict
 
 from open_notebook.ai.models import Model, ModelManager
 from open_notebook.domain.content_settings import ContentSettings
 from open_notebook.domain.notebook import Asset, Source
-from open_notebook.domain.transformation import Transformation
-from open_notebook.graphs.transformation import graph as transform_graph
 
 
 class SourceState(TypedDict):
     content_state: ProcessSourceState
-    apply_transformations: List[Transformation]
     source_id: str
     notebook_ids: List[str]
     source: Source
-    transformation: Annotated[list, operator.add]
     embed: bool
-
-
-class TransformationState(TypedDict):
-    source: Source
-    transformation: Transformation
 
 
 async def content_process(state: SourceState) -> dict:
@@ -75,39 +63,105 @@ async def content_process(state: SourceState) -> dict:
         logger.warning(f"Failed to retrieve speech-to-text model configuration: {e}")
         # Continue without custom audio model (content-core will use its default)
 
-    # Check if URL is VBPL, route through custom Playwright crawler if so
+    # Check if URL is VBPL, route through multi-stage reliable legal extractors
     url = content_state.get("url") or ""
+    processed_state = None
+
     if url and "vbpl.vn" in url.lower():
+        # 1. First attempt: Instant PostgreSQL local legal repository lookup
         try:
-            logger.info(f"Custom routing VBPL URL through Playwright crawler: {url}")
-            from open_notebook.utils.vbpl_crawler import crawl_vbpl_url
-            crawl_res = await crawl_vbpl_url(url)
-            processed_state = ProcessSourceState(
-                url=url,
-                title=crawl_res["title"],
-                content=crawl_res["content"],
-                file_path="",
-                source_type="url",
-                identified_type="webpage"
+            import os
+            import psycopg2
+            db_url = os.getenv("LEGAL_DATABASE_URL", "postgresql+psycopg2://postgres:123456@127.0.0.1:5432/legal_chatbot").replace("postgresql+psycopg2://", "postgresql://")
+            conn = psycopg2.connect(db_url)
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT id, title, law_number FROM legal_documents WHERE source_url = %s LIMIT 1;",
+                (url,)
             )
+            row = cur.fetchone()
+            if not row:
+                url_clean = url.rstrip("/").split("?")[0]
+                cur.execute(
+                    "SELECT id, title, law_number FROM legal_documents WHERE source_url ILIKE %s LIMIT 1;",
+                    (f"%{url_clean}%",)
+                )
+                row = cur.fetchone()
+            if row:
+                doc_id, doc_title, law_number = row
+                cur.execute(
+                    "SELECT title, content FROM legal_articles WHERE document_id = %s ORDER BY id;",
+                    (doc_id,)
+                )
+                articles = cur.fetchall()
+                if articles:
+                    article_texts = []
+                    for a_title, a_content in articles:
+                        if a_title and a_content:
+                            article_texts.append(f"### {a_title}\n{a_content}")
+                        elif a_content:
+                            article_texts.append(a_content)
+                    full_content = f"# {doc_title}\nSố hiệu: {law_number or 'N/A'}\n\n" + "\n\n".join(article_texts)
+                    logger.info(f"Loaded legal document from local PostgreSQL: {doc_title} ({len(full_content)} chars)")
+                    processed_state = ProcessSourceState(
+                        url=url,
+                        title=doc_title,
+                        content=full_content,
+                        file_path="",
+                        source_type="url",
+                        identified_type="webpage"
+                    )
+            conn.close()
         except Exception as e:
-            logger.error(f"Custom VBPL Playwright crawl failed: {e}. Falling back to standard content_core.")
-            processed_state = await extract_content(content_state)
-    else:
+            logger.warning(f"PostgreSQL local legal lookup failed: {e}")
+
+        # 2. Second attempt: Playwright crawler
+        if not processed_state:
+            try:
+                logger.info(f"Custom routing VBPL URL through Playwright crawler: {url}")
+                from open_notebook.utils.vbpl_crawler import crawl_vbpl_url
+                crawl_res = await crawl_vbpl_url(url)
+                processed_state = ProcessSourceState(
+                    url=url,
+                    title=crawl_res["title"],
+                    content=crawl_res["content"],
+                    file_path="",
+                    source_type="url",
+                    identified_type="webpage"
+                )
+            except Exception as e:
+                logger.error(f"Custom VBPL Playwright crawl failed: {e}")
+
+        # 3. Third attempt: Official HTTP pipeline
+        if not processed_state:
+            try:
+                from api.crawlers.legal_document_pipeline import fetch_normalized_legal_document
+                norm_doc = await fetch_normalized_legal_document(url, scope="Trung ương - toàn quốc")
+                if norm_doc and norm_doc.get("clean_markdown") and len(norm_doc.get("clean_markdown", "")) > 100:
+                    processed_state = ProcessSourceState(
+                        url=url,
+                        title=norm_doc.get("title") or "Văn bản pháp luật",
+                        content=norm_doc.get("clean_markdown"),
+                        file_path="",
+                        source_type="url",
+                        identified_type="webpage"
+                    )
+            except Exception as e:
+                logger.warning(f"Normalized legal document pipeline fallback failed: {e}")
+
+    if not processed_state:
         processed_state = await extract_content(content_state)
 
-    if not processed_state.content or not processed_state.content.strip():
-        url = processed_state.url or ""
-        if url and ("youtube.com" in url or "youtu.be" in url):
+    content_str = (processed_state.content or "").strip()
+    if not content_str or content_str.startswith("Failed to extract content:") or processed_state.title == "Error":
+        url_target = processed_state.url or url or ""
+        if url_target and ("youtube.com" in url_target or "youtu.be" in url_target):
             raise ValueError(
                 "Could not extract content from this YouTube video. "
-                "No transcript or subtitles are available. "
-                "Try configuring a Speech-to-Text model in Settings "
-                "to transcribe the audio instead."
+                "No transcript or subtitles are available."
             )
         raise ValueError(
-            "Could not extract any text content from this source. "
-            "The content may be empty, inaccessible, or in an unsupported format."
+            "Không thể trích xuất nội dung văn bản này từ máy chủ nguồn. Vui lòng kiểm tra lại URL hoặc chọn văn bản từ kho nội bộ."
         )
 
     return {"content_state": processed_state}
@@ -146,61 +200,16 @@ async def save_source(state: SourceState) -> dict:
     return {"source": source}
 
 
-def trigger_transformations(state: SourceState, config: RunnableConfig) -> List[Send]:
-    if len(state["apply_transformations"]) == 0:
-        return []
-
-    to_apply = state["apply_transformations"]
-    logger.debug(f"Applying transformations {to_apply}")
-
-    return [
-        Send(
-            "transform_content",
-            {
-                "source": state["source"],
-                "transformation": t,
-            },
-        )
-        for t in to_apply
-    ]
-
-
-async def transform_content(state: TransformationState) -> Optional[dict]:
-    source = state["source"]
-    content = source.full_text
-    if not content:
-        return None
-    transformation: Transformation = state["transformation"]
-
-    logger.debug(f"Applying transformation {transformation.name}")
-    result = await transform_graph.ainvoke(
-        dict(input_text=content, transformation=transformation)  # type: ignore[arg-type]
-    )
-    await source.add_insight(transformation.title, result["output"])
-    return {
-        "transformation": [
-            {
-                "output": result["output"],
-                "transformation_name": transformation.name,
-            }
-        ]
-    }
-
-
 # Create and compile the workflow
 workflow = StateGraph(SourceState)
 
 # Add nodes
 workflow.add_node("content_process", content_process)
 workflow.add_node("save_source", save_source)
-workflow.add_node("transform_content", transform_content)
 # Define the graph edges
 workflow.add_edge(START, "content_process")
 workflow.add_edge("content_process", "save_source")
-workflow.add_conditional_edges(
-    "save_source", trigger_transformations, ["transform_content"]
-)
-workflow.add_edge("transform_content", END)
+workflow.add_edge("save_source", END)
 
 # Compile the graph
 source_graph = workflow.compile()

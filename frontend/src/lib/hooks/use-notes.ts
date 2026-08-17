@@ -30,6 +30,9 @@ export function useCreateNote() {
 
   return useMutation({
     mutationFn: (data: CreateNoteRequest) => notesApi.create(data),
+    // Creating a note is not idempotent. Retrying a request that failed after
+    // persistence can create duplicate notes even though the UI reported an error.
+    retry: false,
     onSuccess: (_, variables) => {
       queryClient.invalidateQueries({ 
         queryKey: QUERY_KEYS.notes(variables.notebook_id) 

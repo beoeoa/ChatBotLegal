@@ -229,7 +229,7 @@ export function useNotebookChat({ notebookId, sources, notes, contextSelections 
       await refetchCurrentSession()
     } catch (err: unknown) {
       const error = err as { response?: { data?: { detail?: string } }, message?: string };
-      console.error('Error sending message:', error)
+      console.warn('Unable to send notebook message:', error.response?.data?.detail || error.message)
       toast.error(getApiErrorMessage(error.response?.data?.detail || error.message, (key) => t(key), 'apiErrors.failedToSendMessage'))
       // Remove optimistic message on error
       setMessages(prev => prev.filter(msg => !msg.id.startsWith('temp-')))

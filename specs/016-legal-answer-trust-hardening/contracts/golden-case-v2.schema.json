@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://chatbotlegal.local/schemas/golden-case-v2.schema.json",
+  "title": "GoldenCaseV2",
+  "type": "object",
+  "required": ["case_id", "schema_version", "domain", "legal_as_of", "questions", "expected_sources", "forbidden_sources", "required_claims", "expected_answer_mode", "review_status"],
+  "properties": {
+    "case_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{2,95}$"},
+    "schema_version": {"const": "2.0"},
+    "domain": {"type": "string", "minLength": 1},
+    "procedure_family": {"type": ["string", "null"]},
+    "legal_as_of": {"type": "string", "format": "date"},
+    "questions": {
+      "type": "object",
+      "required": ["citizen"],
+      "properties": {"citizen": {"type": "string", "minLength": 2}, "officer": {"type": ["string", "null"]}},
+      "additionalProperties": false
+    },
+    "expected_sources": {"type": "array", "items": {"$ref": "#/$defs/source"}},
+    "forbidden_sources": {"type": "array", "items": {"$ref": "#/$defs/source"}},
+    "required_claims": {"type": "array", "items": {"$ref": "#/$defs/claim"}},
+    "expected_answer_mode": {"enum": ["grounded_answer", "verified_source_condensed", "source_view_only"]},
+    "expected_refusal": {"type": "boolean", "default": false},
+    "risk_tags": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "review_status": {"enum": ["proposed", "legally_reviewed", "approved"]}
+  },
+  "$defs": {
+    "proof": {
+      "type": "object",
+      "properties": {"quote": {"type": "string"}, "page_number": {"type": ["integer", "null"], "minimum": 1}, "char_start": {"type": ["integer", "null"], "minimum": 0}, "char_end": {"type": ["integer", "null"], "minimum": 0}, "source_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"}},
+      "required": ["quote"],
+      "additionalProperties": false
+    },
+    "source": {
+      "type": "object",
+      "required": ["law_number"],
+      "properties": {"law_number": {"type": "string"}, "article": {"type": ["string", "null"]}, "clause": {"type": ["string", "null"]}, "point": {"type": ["string", "null"]}, "reason": {"type": ["string", "null"]}, "proof": {"anyOf": [{"$ref": "#/$defs/proof"}, {"type": "null"}]}},
+      "additionalProperties": false
+    },
+    "claim": {
+      "type": "object",
+      "required": ["claim_id", "facet", "text", "order"],
+      "properties": {"claim_id": {"type": "string"}, "facet": {"type": "string"}, "text": {"type": "string", "minLength": 1}, "order": {"type": "integer", "minimum": 1}, "critical": {"type": "boolean", "default": true}},
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

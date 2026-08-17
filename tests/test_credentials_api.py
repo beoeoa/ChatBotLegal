@@ -14,8 +14,13 @@ def bypass_auth():
     async def no_real_users():
         return False
 
+    async def no_audit(**kwargs):
+        return None
+
     with patch("api.auth.has_real_users", new=no_real_users), patch(
         "api.auth.configured_role_passwords", return_value={}
+    ), patch(
+        "api.routers.credentials.write_audit_log", new=no_audit
     ):
         yield
 
@@ -25,11 +30,18 @@ def client():
     """Create test client after environment variables have been cleared by conftest."""
     from api.main import app
 
-    return TestClient(app)
+    return TestClient(app, headers={"X-User-Role": "admin"})
 
 
 class TestCredentialCascadeDelete:
     """Tests for #651 - deleting credential cascade-deletes linked models."""
+
+    def test_officer_cannot_access_credentials(self, client):
+        response = client.get(
+            "/api/credentials/status",
+            headers={"X-User-Role": "officer"},
+        )
+        assert response.status_code == 403
 
     @pytest.mark.asyncio
     @patch("api.routers.credentials.Credential.get")
@@ -154,6 +166,7 @@ class TestCredentialModelDiscovery:
             {
                 "name": "custom-openai-model",
                 "provider": "openai",
+                "model_type": "language",
                 "description": None,
             }
         ]

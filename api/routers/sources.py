@@ -15,15 +15,16 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse, Response
 from loguru import logger
-from surreal_commands import execute_command_sync, submit_command
 
-from api.command_service import CommandService
 from api.auth import get_request_role, get_request_user_id
-from api.legal_profile_access import assert_legal_profile_list_access, assert_notebook_access, assert_source_access
+from api.command_service import CommandService
+from api.legal_profile_access import (
+    assert_legal_profile_list_access,
+    assert_notebook_access,
+    assert_source_access,
+)
 from api.models import (
     AssetModel,
-    CreateSourceInsightRequest,
-    InsightCreationResponse,
     SourceCreate,
     SourceInsightResponse,
     SourceListResponse,
@@ -31,11 +32,16 @@ from api.models import (
     SourceStatusResponse,
     SourceUpdate,
 )
-from commands.source_commands import SourceProcessingInput
+from api.upload_security import (
+    SOURCE_ASSET_POLICY,
+    UploadSecurityError,
+    validate_upload,
+    write_validated_upload,
+)
+from commands.source_commands import SourceProcessingInput, process_source_command
 from open_notebook.config import UPLOADS_FOLDER
 from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.domain.notebook import Asset, Notebook, Source
-from open_notebook.domain.transformation import Transformation
 from open_notebook.exceptions import InvalidInputError
 
 router = APIRouter()
@@ -78,21 +84,28 @@ async def save_uploaded_file(upload_file: UploadFile) -> str:
     if not upload_file.filename:
         raise ValueError("No filename provided")
 
-    # Generate unique filename
-    file_path = generate_unique_filename(upload_file.filename, UPLOADS_FOLDER)
-
     try:
-        # Save file
-        with open(file_path, "wb") as f:
-            content = await upload_file.read()
-            f.write(content)
+        content = await upload_file.read(SOURCE_ASSET_POLICY.max_bytes + 1)
+        validated = validate_upload(
+            filename=upload_file.filename,
+            content=content,
+            policy=SOURCE_ASSET_POLICY,
+        )
+        file_path = generate_unique_filename(validated.filename, UPLOADS_FOLDER)
+        write_validated_upload(
+            root=Path(UPLOADS_FOLDER),
+            storage_name=Path(file_path).name,
+            content=content,
+        )
 
         logger.info(f"Saved uploaded file to: {file_path}")
         return file_path
+    except UploadSecurityError:
+        raise
     except Exception as e:
         logger.error(f"Failed to save uploaded file: {e}")
         # Clean up partial file if it exists
-        if os.path.exists(file_path):
+        if "file_path" in locals() and os.path.exists(file_path):
             os.unlink(file_path)
         raise
 
@@ -104,7 +117,6 @@ def parse_source_form_data(
     url: Optional[str] = Form(None),
     content: Optional[str] = Form(None),
     title: Optional[str] = Form(None),
-    transformations: Optional[str] = Form(None),  # JSON string of transformation IDs
     embed: str = Form("false"),  # Accept as string, convert to bool
     delete_source: str = Form("false"),  # Accept as string, convert to bool
     async_processing: str = Form("false"),  # Accept as string, convert to bool
@@ -130,14 +142,6 @@ def parse_source_form_data(
             logger.error(f"Invalid JSON in notebooks field: {notebooks}")
             raise ValueError("Invalid JSON in notebooks field")
 
-    transformations_list = []
-    if transformations:
-        try:
-            transformations_list = json.loads(transformations)
-        except json.JSONDecodeError:
-            logger.error(f"Invalid JSON in transformations field: {transformations}")
-            raise ValueError("Invalid JSON in transformations field")
-
     # Create SourceCreate instance
     try:
         source_data = SourceCreate(
@@ -148,7 +152,6 @@ def parse_source_form_data(
             content=content,
             title=title,
             file_path=None,  # Will be set later if file is uploaded
-            transformations=transformations_list,
             embed=embed_bool,
             delete_source=delete_source_bool,
             async_processing=async_processing_bool,
@@ -167,7 +170,7 @@ async def get_sources(
     notebook_id: Optional[str] = Query(None, description="Filter by notebook ID"),
     scope: Optional[str] = Query(None, description="Filter by source scope"),
     limit: int = Query(
-        50, ge=1, le=100, description="Number of sources to return (1-100)"
+        50, ge=1, le=500, description="Number of sources to return (1-500)"
     ),
     offset: int = Query(0, ge=0, description="Number of sources to skip"),
     sort_by: str = Query(
@@ -354,6 +357,11 @@ async def create_source(
         if upload_file and source_data.type == "upload":
             try:
                 file_path = await save_uploaded_file(upload_file)
+            except UploadSecurityError as exc:
+                raise HTTPException(
+                    status_code=exc.status_code,
+                    detail={"code": exc.code, "message": str(exc)},
+                ) from exc
             except Exception as e:
                 logger.error(f"File upload failed: {e}")
                 raise HTTPException(
@@ -399,21 +407,13 @@ async def create_source(
                 detail="Invalid source type. Must be link, upload, or text",
             )
 
-        # Validate transformations exist
-        transformation_ids = source_data.transformations or []
-        for trans_id in transformation_ids:
-            transformation = await Transformation.get(trans_id)
-            if not transformation:
-                raise HTTPException(
-                    status_code=404, detail=f"Transformation {trans_id} not found"
-                )
-
         role = get_request_role(request)
         user_id = get_request_user_id(request)
         
-        # Check allowed_domains for officer on import
+        # Check allowed_domains for officer on global document import (not personal notebook sources)
         source_domain = source_data.domain
-        if role == "officer" and user_id:
+        is_notebook_source = bool(source_data.notebook_id or (source_data.notebooks and len(source_data.notebooks) > 0))
+        if role == "officer" and user_id and not is_notebook_source:
             from api.user_service import get_user_profile
             profile = await get_user_profile(user_id)
             if profile:
@@ -480,7 +480,6 @@ async def create_source(
                     source_id=str(source.id),
                     content_state=content_state,
                     notebook_ids=source_data.notebooks,
-                    transformations=transformation_ids,
                     embed=source_data.embed,
                 )
 
@@ -533,7 +532,9 @@ async def create_source(
                 )
 
         else:
-            # SYNC PATH: Execute synchronously using execute_command_sync
+            # SYNC PATH: Execute the processor in this request. Calling
+            # execute_command_sync here only submitted another queue item and
+            # waited for a worker, which made local notebook imports time out.
             logger.info("Using sync processing path")
 
             try:
@@ -561,27 +562,19 @@ async def create_source(
                 for notebook_id in source_data.notebooks or []:
                     await source.add_to_notebook(notebook_id)
 
-                # Execute command synchronously
                 command_input = SourceProcessingInput(
                     source_id=str(source.id),
                     content_state=content_state,
                     notebook_ids=source_data.notebooks,
-                    transformations=transformation_ids,
                     embed=source_data.embed,
                 )
 
-                # Run in thread pool to avoid blocking the event loop
-                # execute_command_sync uses asyncio.run() internally which can't
-                # be called from an already-running event loop (FastAPI)
-                result = await asyncio.to_thread(
-                    execute_command_sync,
-                    "open_notebook",  # app name
-                    "process_source",  # command name
-                    command_input.model_dump(),
-                    timeout=300,  # 5 minute timeout for sync processing
+                result = await asyncio.wait_for(
+                    process_source_command(command_input),
+                    timeout=300,
                 )
 
-                if not result.is_success():
+                if not result.success:
                     logger.error(f"Sync processing failed: {result.error_message}")
                     # Clean up source record
                     try:
@@ -941,10 +934,22 @@ async def retry_source_processing(source_id: str, request: Request):
                 )
                 # Continue with retry if we can't check status
 
-        # Get notebooks that this source belongs to
-        query = "SELECT notebook FROM reference WHERE source = $source_id"
-        references = await repo_query(query, {"source_id": source_id})
-        notebook_ids = [str(ref["notebook"]) for ref in references]
+        # Get associated notebooks from the canonical notebook -> source edge.
+        # Include reverse legacy edges so previously-created sources remain retryable.
+        query = """
+            SELECT VALUE id FROM array::distinct(array::union(
+                (SELECT VALUE out FROM reference WHERE in = $source_id),
+                (SELECT VALUE in FROM reference WHERE out = $source_id)
+            ))
+        """
+        notebook_ids = [
+            str(record_id)
+            for record_id in await repo_query(
+                query,
+                {"source_id": ensure_record_id(source_id)},
+            )
+            if str(record_id).startswith("notebook:")
+        ]
 
         if not notebook_ids:
             raise HTTPException(
@@ -978,59 +983,57 @@ async def retry_source_processing(source_id: str, request: Request):
             # Import command modules to ensure they're registered
             import commands.source_commands  # noqa: F401
 
-            # Submit new command for background processing
+            # Retry locally and synchronously. The local runtime does not run a
+            # separate surreal-commands worker, and notebook Q&A needs extracted
+            # text immediately. Embedding remains an explicit, separate action.
             command_input = SourceProcessingInput(
                 source_id=str(source.id),
                 content_state=content_state,
                 notebook_ids=notebook_ids,
-                transformations=[],  # Use default transformations on retry
-                embed=True,  # Always embed on retry
+                embed=False,
             )
 
-            command_id = await CommandService.submit_command_job(
-                "open_notebook",  # app name
-                "process_source",  # command name
-                command_input.model_dump(),
+            result = await asyncio.wait_for(
+                process_source_command(command_input),
+                timeout=300,
             )
+            if not result.success:
+                raise RuntimeError(result.error_message or "Source processing failed")
 
-            logger.info(
-                f"Submitted retry processing command: {command_id} for source {source_id}"
+            await repo_query(
+                "UPDATE $source_id SET command = NONE;",
+                {"source_id": ensure_record_id(source_id)},
             )
-
-            # Update source with new command ID
-            source.command = ensure_record_id(f"command:{command_id}")
-            await source.save()
-
-            # Get current embedded chunks count
-            embedded_chunks = await source.get_embedded_chunks()
+            processed_source = await Source.get(source_id)
+            embedded_chunks = await processed_source.get_embedded_chunks()
 
             # Return updated source response
             return SourceResponse(
-                id=source.id or "",
-                title=source.title,
-                topics=source.topics or [],
+                id=processed_source.id or "",
+                title=processed_source.title,
+                topics=processed_source.topics or [],
                 asset=AssetModel(
-                    file_path=source.asset.file_path if source.asset else None,
-                    url=source.asset.url if source.asset else None,
+                    file_path=processed_source.asset.file_path if processed_source.asset else None,
+                    url=processed_source.asset.url if processed_source.asset else None,
                 )
-                if source.asset
+                if processed_source.asset
                 else None,
-                full_text=source.full_text,
+                full_text=processed_source.full_text,
                 embedded=embedded_chunks > 0,
                 embedded_chunks=embedded_chunks,
-                created=str(source.created),
-                updated=str(source.updated),
-                command_id=command_id,
-                status="queued",
-                processing_info={"retry": True, "queued": True},
+                created=str(processed_source.created),
+                updated=str(processed_source.updated),
+                command_id=None,
+                status="completed",
+                processing_info={"retry": True, "synchronous": True, "embedded": False},
             )
 
         except Exception as e:
             logger.error(
-                f"Failed to submit retry processing command for source {source_id}: {e}"
+                f"Failed to process source retry for {source_id}: {e}"
             )
             raise HTTPException(
-                status_code=500, detail=f"Failed to queue retry processing: {str(e)}"
+                status_code=500, detail=f"Failed to process source: {str(e)}"
             )
 
     except HTTPException:
@@ -1091,12 +1094,7 @@ async def get_source_insights(source_id: str, request: Request):
         )
 
 
-@router.post(
-    "/sources/{source_id}/insights",
-    response_model=InsightCreationResponse,
-    status_code=202,
-)
-async def create_source_insight(source_id: str, body: CreateSourceInsightRequest, request: Request):
+async def _retired_create_source_insight(source_id: str, body: object, request: Request):
     """
     Start insight generation for a source by running a transformation.
 
@@ -1104,6 +1102,10 @@ async def create_source_insight(source_id: str, body: CreateSourceInsightRequest
     The transformation runs asynchronously in the background via the job queue.
     Poll GET /sources/{source_id}/insights to see when the insight is ready.
     """
+    raise HTTPException(
+        status_code=410,
+        detail="Tạo insight bằng Transformation đã được ngừng. Insight cũ chỉ còn chế độ đọc.",
+    )
     try:
         await assert_source_access(source_id, request, action="write")
         # Validate source exists

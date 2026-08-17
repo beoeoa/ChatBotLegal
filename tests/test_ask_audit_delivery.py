@@ -32,6 +32,23 @@ def test_audit_trace_snapshot_excludes_query_answer_and_source_payload():
         "section_orchestration": {
             "issues": [{"validation_status": "fully_grounded", "question": "secret"}],
             "metric": {"completed": True, "repair_count": 0},
+            "pipeline_version": "legal-answer-v2",
+            "answer_route": "exact_article",
+            "route_reason": "explicit_document_and_article",
+            "data_release_id": "data-release-safe",
+            "retrieval_decision": {
+                "ranking_strategy": "rrf_v2",
+                "learned_reranker_enabled": False,
+                "learned_reranker_reason": "activation_gate_not_approved",
+                "raw_query": "secret",
+            },
+            "runtime_versions": {
+                "index_collection": "legal_core",
+                "embedding_fingerprint": "embedding-safe",
+                "validity_snapshot_sha256": "snapshot-safe",
+                "reranker_version": "disabled",
+                "source_content": "secret",
+            },
         },
     }
 
@@ -42,3 +59,10 @@ def test_audit_trace_snapshot_excludes_query_answer_and_source_payload():
     assert "question" not in serialized
     assert snapshot["answer_pipeline"]["retrieved_chunks"] == 6
     assert snapshot["section_orchestration"]["issue_count"] == 1
+    assert snapshot["pipeline_version"] == "legal-answer-v2"
+    assert snapshot["answer_route"] == "exact_article"
+    assert snapshot["retrieval_decision"]["ranking_strategy"] == "rrf_v2"
+    assert snapshot["retrieval_decision"]["learned_reranker_enabled"] is False
+    assert snapshot["runtime_versions"]["validity_snapshot_sha256"] == "snapshot-safe"
+    assert "raw_query" not in snapshot["retrieval_decision"]
+    assert "source_content" not in snapshot["runtime_versions"]

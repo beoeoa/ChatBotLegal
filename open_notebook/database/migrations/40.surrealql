@@ -1,0 +1,5 @@
+-- DB-7 Secondary indexes for ward procedures and user accounts
+DEFINE INDEX IF NOT EXISTS idx_ward_procedure_domain_slug ON TABLE ward_procedure COLUMNS domain_slug;
+DEFINE INDEX IF NOT EXISTS idx_ward_procedure_department ON TABLE ward_procedure COLUMNS department;
+DEFINE INDEX IF NOT EXISTS idx_user_account_username ON TABLE user_account COLUMNS username;
+DEFINE INDEX IF NOT EXISTS idx_user_account_email ON TABLE user_account COLUMNS email;

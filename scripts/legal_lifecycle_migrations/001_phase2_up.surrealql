@@ -1,0 +1,19 @@
+-- Phase 2 additive operational schema. Never changes PostgreSQL legal corpus rows.
+DEFINE TABLE IF NOT EXISTS legal_document_draft SCHEMALESS;
+DEFINE INDEX IF NOT EXISTS idx_legal_document_draft_state_updated ON TABLE legal_document_draft COLUMNS state, updated;
+DEFINE INDEX IF NOT EXISTS idx_legal_document_draft_creator_updated ON TABLE legal_document_draft COLUMNS created_by, updated;
+
+DEFINE TABLE IF NOT EXISTS legal_document_version SCHEMALESS;
+DEFINE INDEX IF NOT EXISTS idx_legal_document_version_key ON TABLE legal_document_version COLUMNS version_key UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_legal_document_version_logical ON TABLE legal_document_version COLUMNS logical_document_id, created;
+
+DEFINE TABLE IF NOT EXISTS legal_document_approval SCHEMALESS;
+DEFINE INDEX IF NOT EXISTS idx_legal_document_approval_draft_time ON TABLE legal_document_approval COLUMNS draft, created;
+DEFINE INDEX IF NOT EXISTS idx_legal_document_approval_request ON TABLE legal_document_approval COLUMNS request_fingerprint UNIQUE;
+
+DEFINE TABLE IF NOT EXISTS legal_activation_manifest SCHEMALESS;
+DEFINE INDEX IF NOT EXISTS idx_legal_activation_manifest_version ON TABLE legal_activation_manifest COLUMNS version UNIQUE;
+
+DEFINE TABLE IF NOT EXISTS legal_lifecycle_idempotency SCHEMALESS;
+DEFINE INDEX IF NOT EXISTS idx_legal_lifecycle_idempotency_scope ON TABLE legal_lifecycle_idempotency COLUMNS scope_key UNIQUE;
+

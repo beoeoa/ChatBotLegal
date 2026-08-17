@@ -4,6 +4,7 @@ import { FileText, Lightbulb, StickyNote } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
+import { useTranslation } from '@/lib/hooks/use-translation'
 
 interface ContextIndicatorProps {
   sourcesInsights: number
@@ -33,12 +34,13 @@ export function ContextIndicator({
   charCount,
   className
 }: ContextIndicatorProps) {
+  const { t } = useTranslation()
   const hasContext = (sourcesInsights + sourcesFull) > 0 || notesCount > 0
 
   if (!hasContext) {
     return (
       <div className={cn('flex-shrink-0 text-xs text-muted-foreground py-2 px-3 border-t', className)}>
-        No sources or notes included in context. Toggle icons on cards to include them.
+        {t('chat.contextEmpty')}
       </div>
     )
   }
@@ -46,7 +48,7 @@ export function ContextIndicator({
   return (
     <div className={cn('flex-shrink-0 flex items-center justify-between gap-2 py-2 px-3 border-t bg-muted/30', className)}>
       <div className="flex items-center gap-2">
-        <span className="text-xs font-medium text-muted-foreground">Context:</span>
+        <span className="text-xs font-medium text-muted-foreground">{t('chat.contextLabel')}</span>
 
         <div className="flex items-center gap-1.5">
           {sourcesInsights > 0 && (
@@ -58,7 +60,7 @@ export function ContextIndicator({
                 </Badge>
               </TooltipTrigger>
               <TooltipContent>
-                <p>Insights for {sourcesInsights} source{sourcesInsights !== 1 ? 's' : ''}</p>
+                <p>{t('chat.contextInsights').replace('{count}', String(sourcesInsights))}</p>
               </TooltipContent>
             </Tooltip>
           )}
@@ -72,7 +74,7 @@ export function ContextIndicator({
                 </Badge>
               </TooltipTrigger>
               <TooltipContent>
-                <p>{sourcesFull} full source{sourcesFull !== 1 ? 's' : ''}</p>
+                <p>{t('chat.contextSources').replace('{count}', String(sourcesFull))}</p>
               </TooltipContent>
             </Tooltip>
           )}
@@ -91,7 +93,7 @@ export function ContextIndicator({
                 </Badge>
               </TooltipTrigger>
               <TooltipContent>
-                <p>{notesCount} full note{notesCount !== 1 ? 's' : ''}</p>
+                <p>{t('chat.contextNotes').replace('{count}', String(notesCount))}</p>
               </TooltipContent>
             </Tooltip>
           </>
@@ -101,13 +103,13 @@ export function ContextIndicator({
       {(tokenCount !== undefined || charCount !== undefined) && (
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
           {tokenCount !== undefined && tokenCount > 0 && (
-            <span>{formatNumber(tokenCount)} tokens</span>
+            <span>{formatNumber(tokenCount)} {t('chat.tokensUnit')}</span>
           )}
           {tokenCount !== undefined && charCount !== undefined && tokenCount > 0 && charCount > 0 && (
             <span>/</span>
           )}
           {charCount !== undefined && charCount > 0 && (
-            <span>{formatNumber(charCount)} chars</span>
+            <span>{formatNumber(charCount)} {t('chat.charactersUnit')}</span>
           )}
         </div>
       )}

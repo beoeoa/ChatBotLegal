@@ -25,6 +25,15 @@ _SAFE_METADATA_KEYS = {
     "source_type",
     "cached",
     "origin",
+    "planner_mode",
+    "issue_count",
+    "query_count",
+    "candidate_count",
+    "rejected_count",
+    "missing_coverage_count",
+    "supplemental_round",
+    "removed_noise_count",
+    "prompt_chars",
 }
 _SAFE_OUTCOMES = {"success", "error", "cancelled", "queued", "failed", "skipped"}
 _ASK_STAGES = (
@@ -156,6 +165,40 @@ class RuntimeTelemetry:
         if outcome not in allowed:
             raise ValueError(f"Unsupported Ask outcome for {kind!r}: {outcome!r}")
         self._ask_outcomes[(kind, outcome)] += 1
+
+    def record_legal_orchestration(
+        self,
+        *,
+        duration_ms: int | float,
+        planner_mode: str,
+        issue_count: int,
+        query_count: int,
+        candidate_count: int,
+        rejected_count: int,
+        missing_coverage_count: int,
+        supplemental_round: int,
+        removed_noise_count: int,
+        prompt_chars: int,
+        outcome: str = "success",
+    ) -> None:
+        """Record bounded multi-issue counters without legal or user content."""
+
+        self.record_operation(
+            category="ask.legal_orchestration",
+            duration_ms=duration_ms,
+            outcome=outcome,
+            metadata={
+                "planner_mode": planner_mode,
+                "issue_count": issue_count,
+                "query_count": query_count,
+                "candidate_count": candidate_count,
+                "rejected_count": rejected_count,
+                "missing_coverage_count": missing_coverage_count,
+                "supplemental_round": supplemental_round,
+                "removed_noise_count": removed_noise_count,
+                "prompt_chars": prompt_chars,
+            },
+        )
 
     def record_issue(
         self,

@@ -1,24 +1,27 @@
 import asyncio
-import urllib.parse
-from pathlib import Path
-import json
 import io
+import json
 import os
 import re
-import unicodedata
 import time
+import unicodedata
+import urllib.parse
 import uuid
+import weakref
 from dataclasses import replace
-from typing import AsyncGenerator, Any, Mapping
+from datetime import date
+from functools import lru_cache
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, AsyncGenerator, Mapping
 
 import httpx
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from loguru import logger
-from api.utils.pii_detector import redact_upload_text
-from api.observability import telemetry
+from sqlalchemy.exc import SQLAlchemyError
 
-from api.auth import get_request_role, get_request_user_id, get_request_username
+from api import ask_idempotency
 from api import conversation_service as conv_svc
 from api.ask_progress import (
     ProgressCallback,
@@ -26,38 +29,127 @@ from api.ask_progress import (
     cloud_fallback_reason,
     emit_ask_progress,
     local_fallback_enabled,
+    safe_public_response_payload,
     stream_ask_progress,
 )
 from api.ask_role_rollout import enforce_ask_role_rollout
-from api.models import AskRequest, AskResponse, SearchRequest, SearchResponse
-from api.legal_question_policy import (
-    answer_contract,
-    classify_question,
-    missing_answer_sections,
-    render_answer_contract,
-)
-from api.legal_grounding import validate_legal_references
-from api.legal_search_client import get_legal_search_client
-from api.legal_retrieval_policy import expanded_retrieval_reason
-from api.legal_section_grounding import (
-    aggregate_answer_sections,
-    build_section_grounding_metric,
-    is_section_grounding_enabled,
-    plan_legal_issues,
-    validate_answer_section,
-)
+from api.auth import get_request_role, get_request_user_id, get_request_username
+from api.legal_answer_completeness import assess_answer_completeness
 from api.legal_answer_quality import (
     apply_claim_validation,
     build_claim_validation,
     build_evidence_coverage,
     clarifying_questions_for_gaps,
     effective_legal_date,
+    extractive_conclusion_from_evidence,
+    prepend_extractive_conclusion_when_supported,
     quality_preview,
     vietnamese_section_names,
 )
-from api import ask_idempotency
+from api.legal_answer_router import (
+    PIPELINE_VERSION as ANSWER_PIPELINE_V2_VERSION,
+)
+from api.legal_answer_router import (
+    is_answer_pipeline_v2_enabled,
+    route_legal_answer,
+)
+from api.legal_answer_trust_log import build_public_trust_projection
+from api.legal_citation_provenance import enrich_public_citation
+from api.legal_determinism import build_data_release_id
+from api.legal_domains import canonical_domain_decision, canonicalize_legal_domain
+from api.legal_taxonomy import classify_topic, classify_topic_v1
+from api.legal_evidence_relevance import rank_issue_evidence
+from api.legal_exact_article import is_single_exact_article_plan
+from api.legal_exact_retrieval import normalize_exact_identifier, plan_exact_lookup
+from api.legal_form_catalog import FormCatalog, normalize_procedure_id
+from api.legal_form_evidence import build_form_evidence_rows
+from api.legal_grounding import validate_legal_references
+from api.legal_official_procedure_evidence import (
+    build_official_procedure_evidence,
+)
+from api.legal_problem_map import (
+    build_hybrid_problem_map,
+    build_legal_intent,
+    problem_map_to_legal_issues,
+)
+from api.legal_provider_circuit import (
+    StructuredProviderCircuit,
+    StructuredProviderCircuitOpen,
+)
+from api.legal_provider_fallback import (
+    NORMAL,
+    SOURCE_VIEW_ONLY,
+    VERIFIED_SOURCE_CONDENSED,
+    answer_fallback_enabled,
+    choose_verified_fallback_mode,
+    classify_structured_provider_error,
+)
+from api.legal_provider_privacy import (
+    ProviderEgressBlocked,
+    ProviderEgressDecision,
+    prepare_provider_egress,
+    provider_mode,
+)
+from api.legal_question_policy import (
+    answer_contract,
+    classify_question,
+    missing_answer_sections,
+    render_answer_contract,
+)
+from api.legal_query_understanding import classify_legal_query
+from api.legal_retrieval_policy import expanded_retrieval_reason
+from api.legal_search_client import get_legal_search_client
+from api.legal_section_grounding import (
+    CurrentRequestEvidencePacket,
+    aggregate_answer_sections,
+    build_section_grounding_metric,
+    format_public_validity_sync,
+    is_section_grounding_enabled,
+    issue_requires_expanded_support,
+    plan_legal_issues,
+    retrieval_domain_slug,
+    select_eligible_evidence,
+    validate_answer_section,
+)
+from api.legal_structured_answer import (
+    AsyncModelCache,
+    build_and_render_extractive_answer,
+    build_compact_evidence_context,
+    build_fallback_quality_trace,
+    build_issue_coverage_matrix,
+    build_structured_answer_prompt,
+    derive_required_facets_by_issue,
+    enforce_explicit_facet_claims,
+    ensure_required_facet_issues,
+    invoke_blocking_model_with_deadline,
+    is_hard_legal_request,
+    model_invocation_budget_seconds,
+    optimized_profile_enabled,
+    parse_structured_answer,
+    remaining_generation_budget_seconds,
+    render_structured_answer,
+    safe_extractive_fallback,
+    structured_context_max_chars,
+    structured_generation_timeout_seconds,
+    structured_model_options,
+    structured_retrieval_timeout_seconds,
+    structured_total_timeout_seconds,
+    supplement_rule_source_diversity,
+)
+from api.legal_text_cleaning import project_legal_evidence_rows
+from api.models import AskRequest, AskResponse, SearchRequest, SearchResponse
+from api.observability import telemetry
+from api.optimized_profile_rollout import enforce as enforce_optimized_profile_rollout
+from api.source_gap_jobs import enqueue_answer_source_gap_notice
+from api.upload_security import (
+    UploadPolicy,
+    UploadSecurityError,
+    validate_upload,
+)
 from api.user_service import list_ask_history, log_ask_history
+from api.utils.pii_detector import redact_upload_text
 from open_notebook.ai.models import Model, model_manager
+from open_notebook.ai.provision import provision_langchain_model
 from open_notebook.domain.notebook import text_search, vector_search
 from open_notebook.exceptions import (
     ConfigurationError,
@@ -71,6 +163,12 @@ from open_notebook.exceptions import (
     RateLimitError,
 )
 from open_notebook.graphs.ask import graph as ask_graph
+from open_notebook.utils import clean_thinking_content
+from open_notebook.utils.text_utils import extract_text_content
+
+
+class _DeterministicPreflight(Exception):
+    """Signal that a fully grounded extractive answer can skip the provider."""
 
 
 async def _resolve_ask_model_ids(
@@ -104,9 +202,103 @@ async def _resolve_ask_model_ids(
     return strategy, answer, final_answer
 
 
+def _model_provider_identity(model: Any) -> tuple[str, str]:
+    provider = str(getattr(model, "provider", None) or "configured").strip()
+    model_name = str(
+        getattr(model, "name", None)
+        or getattr(model, "model", None)
+        or getattr(model, "id", None)
+        or "configured-model"
+    ).strip()
+    return provider, model_name
+
+
+def _prepare_ask_provider_egress(
+    question: str,
+    *models: Any,
+) -> ProviderEgressDecision:
+    """Redact once for every model path when any participating provider is cloud."""
+
+    identities = [_model_provider_identity(model) for model in models if model]
+    if not identities:
+        return prepare_provider_egress(
+            question,
+            provider="configured",
+            model="configured-model",
+        )
+    # Prefer the final-answer provider label, unless it is local while an
+    # earlier strategy/answer model is cloud. Any cloud participant requires
+    # the same redacted question at every graph/model boundary.
+    chosen = identities[-1]
+    for identity in reversed(identities):
+        if provider_mode(identity[0]) == "cloud":
+            chosen = identity
+            break
+    return prepare_provider_egress(
+        question,
+        provider=chosen[0],
+        model=chosen[1],
+    )
+
+
 router = APIRouter()
+_STRUCTURED_MODEL_CACHE = AsyncModelCache()
+_STRUCTURED_PROVIDER_CIRCUIT = StructuredProviderCircuit.from_environment()
+_STRUCTURED_MODEL_INVOCATION_SLOTS_BY_LOOP: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop, asyncio.Semaphore
+] = weakref.WeakKeyDictionary()
+
+
+def _structured_model_invocation_slots() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    slots = _STRUCTURED_MODEL_INVOCATION_SLOTS_BY_LOOP.get(loop)
+    if slots is None:
+        try:
+            configured = int(
+                os.getenv("LEGAL_STRUCTURED_PROVIDER_MAX_CONCURRENCY", "2")
+            )
+        except (TypeError, ValueError):
+            configured = 2
+        slots = asyncio.Semaphore(max(1, min(8, configured)))
+        _STRUCTURED_MODEL_INVOCATION_SLOTS_BY_LOOP[loop] = slots
+    return slots
+
+
+async def _invoke_structured_model_with_capacity(
+    model: Any,
+    prompt: str,
+    *,
+    timeout: float,
+) -> Any:
+    """Bound provider concurrency and queue only within the request deadline.
+
+    DeepSeek calls that exceed their deadline continue inside their transport
+    worker briefly even after the request has fallen back. Two in-flight calls
+    are supported. A third request may wait for a slot, but its wait consumes
+    the same wall-clock budget; it never receives a fresh timeout and cannot
+    push the response beyond the deterministic normal/hard SLA.
+    """
+
+    started = time.perf_counter()
+    slots = _structured_model_invocation_slots()
+    try:
+        await asyncio.wait_for(
+            slots.acquire(),
+            timeout=max(0.05, timeout),
+        )
+    except asyncio.TimeoutError:
+        raise asyncio.TimeoutError
+    try:
+        remaining = timeout - (time.perf_counter() - started)
+        if remaining <= 0:
+            raise asyncio.TimeoutError
+        return await invoke_blocking_model_with_deadline(
+            model, prompt, timeout=remaining
+        )
+    finally:
+        slots.release()
 LEGAL_SEARCH_URL = os.getenv(
-    "LEGAL_SEARCH_URL", "http://host.docker.internal:8765"
+    "LEGAL_SEARCH_URL", "http://127.0.0.1:8765"
 ).rstrip("/")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://host.docker.internal:11434").rstrip("/")
 RECOMMENDED_LOCAL_MODEL = "qwen2.5:3b"
@@ -169,7 +361,10 @@ def _ask_error_response(exc: OpenNotebookError) -> tuple[int, dict]:
     if isinstance(exc, ExternalServiceError):
         return 502, {
             "code": "AI_SERVICE_ERROR",
-            "message": str(exc),
+            "message": (
+                "Dịch vụ AI bên ngoài tạm thời không thể hoàn tất câu trả lời. "
+                "Vui lòng thử lại sau."
+            ),
             "how_to_fix": [
                 "Kiểm tra model và API key đang chọn.",
                 "Thử provider khác hoặc chế độ local.",
@@ -776,6 +971,12 @@ def _insufficient_legal_evidence_response(
         # server-side; the endpoint selectively exposes them to an admin.
         rag_trace=None,
         grounding_status="insufficient_evidence",
+        answer_status="source_gap",
+        fallback_tier="support",
+        canonical_domain=canonicalize_legal_domain(policy.get("detected_domain")),
+        evidence_count=0,
+        coverage_warning="Cần bổ sung thủ tục hoặc văn bản để xác định đúng căn cứ.",
+        blocked_reason="approved_current_source_not_found",
         procedure_detail=proc,
         procedure_summary=(
             f"Tham chiếu quy trình: {proc.get('name')}" if proc else None
@@ -785,7 +986,10 @@ def _insufficient_legal_evidence_response(
         question_type=policy["question_type"],
         detected_domain=policy.get("detected_domain"),
         required_sections=policy.get("required_sections") or [],
-        forms_unavailable=bool(policy.get("requests_form") and not recommended_forms),
+        forms_unavailable=_forms_unavailable_for_question(
+            question,
+            recommended_forms,
+        ),
         source_gap=policy.get("required_sections") or [],
     )
 
@@ -1132,6 +1336,8 @@ async def _run_section_orchestration(
                     if verified_answer
                     else "Bạn có thể nêu rõ thủ tục hoặc tình tiết cụ thể cần xác minh không?"
                 ),
+                facet=issue.intent,
+                priority=issue.priority,
             )
         )
         issue_traces.append(
@@ -1163,6 +1369,1848 @@ async def _run_section_orchestration(
         error_category="none",
     )
     return sections, aggregate, all_results, {"issues": issue_traces, "metric": metric}
+
+
+def _append_request_exact_identifiers(
+    issue_query: str,
+    *,
+    request_exact_plan: Any,
+) -> str:
+    """Carry one issue's verified identifiers into its own rewritten query."""
+
+    current = plan_exact_lookup(issue_query)
+    # A reviewed natural-language alias is an identity binding for the
+    # eligibility gate, but the retrieval service also needs a literal
+    # law/article token to build an exact packet.  Append the token when the
+    # query contains only the alias; avoid duplicating an identifier that the
+    # user already wrote explicitly.
+    literal_query = normalize_exact_identifier(issue_query).casefold()
+
+    def has_literal_pair(law_number: str, article_number: str) -> bool:
+        law_token = normalize_exact_identifier(law_number).casefold()
+        article_token = f"dieu{normalize_exact_identifier(article_number).casefold()}"
+        return law_token in literal_query and article_token in literal_query
+
+    suffix: list[str] = []
+    if request_exact_plan.article_law_pairs:
+        # Preserve reviewed law/article pairings when a natural-language
+        # question contains more than one approved provision. Appending all
+        # laws first and all Articles later would create a cross-product and
+        # can bind each Article to the wrong instrument.
+        for law_number, article_number in request_exact_plan.article_law_pairs:
+            if not has_literal_pair(law_number, article_number):
+                suffix.append(f"{law_number} Điều {article_number}")
+    else:
+        suffix.extend(
+            law_number
+            for law_number in request_exact_plan.law_numbers
+            if law_number not in current.law_numbers
+        )
+        suffix.extend(
+            f"Điều {article_number}"
+            for article_number in request_exact_plan.article_numbers
+            if article_number not in current.article_numbers
+        )
+    if request_exact_plan.clause_number and not current.clause_number:
+        suffix.append(f"Khoản {request_exact_plan.clause_number}")
+    if not suffix:
+        return issue_query
+    return f"{issue_query.rstrip(' ;')}; {'; '.join(suffix)}"
+
+
+def _issue_local_exact_plan(
+    issue_query: str,
+    *,
+    request_exact_plan: Any,
+    issue_count: int,
+) -> Any:
+    """Resolve identity locally and never broadcast it to sibling issues."""
+
+    local = plan_exact_lookup(issue_query)
+    if local.law_number:
+        return local
+    # A single issue may inherit an identifier that the facet planner kept in
+    # surrounding request wording. Multi-issue requests must resolve every
+    # identity from their own span; otherwise one Article contaminates all
+    # siblings and the omitted issue can never be retrieved.
+    if (
+        issue_count > 1
+        and not local.law_number
+        and len(request_exact_plan.law_numbers or ()) == 1
+        and len(local.article_numbers or ()) == 1
+    ):
+        # A multi-issue request may state one law once and name one Article in
+        # each issue span. Bind that single verified law to each local Article
+        # instead of leaving both issues without an exact identity.
+        law_number = request_exact_plan.law_numbers[0]
+        article_number = local.article_numbers[0]
+        return replace(
+            local,
+            law_number=law_number,
+            law_numbers=(law_number,),
+            article_law_pairs=((law_number, article_number),),
+        )
+    if issue_count == 1:
+        return request_exact_plan
+    return local
+
+
+def _restore_exact_article_context_after_relevance(
+    relevant_rows: list[dict[str, Any]],
+    projected_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep a complete Article packet when its first child lost relevance.
+
+    Retrieval attaches the assembled Article body to the first child chunk so
+    the normal evidence payload stays small.  The relevance gate may exclude
+    that first child (for example, because its heading is broad) even though
+    the request explicitly names the Article.  In that case the remaining
+    children still carry the same complete-packet identity, but no body reaches
+    ``build_compact_evidence_context`` and the exact-Article gate fails closed.
+
+    Reattach the already verified assembled body to the first retained child
+    only for the same complete packet.  This does not make an ineligible
+    document eligible, bypass validity, or broaden non-exact requests; it only
+    preserves context for an exact Article whose packet was already verified by
+    retrieval.  The full body remains internal evidence metadata.
+    """
+
+    if not relevant_rows or not projected_rows:
+        return relevant_rows
+
+    packet_context: dict[str, dict[str, Any]] = {}
+    for row in projected_rows:
+        packet_ref = str(row.get("exact_article_packet_ref") or "").strip()
+        if (
+            not packet_ref
+            or str(row.get("exact_article_packet_status") or "") != "complete"
+        ):
+            continue
+        assembled = str(row.get("exact_article_assembled_content") or "").strip()
+        if not assembled:
+            continue
+        packet_context.setdefault(packet_ref, row)
+
+    if not packet_context:
+        return relevant_rows
+
+    retained_by_packet: dict[str, list[dict[str, Any]]] = {}
+    for row in relevant_rows:
+        packet_ref = str(row.get("exact_article_packet_ref") or "").strip()
+        if packet_ref in packet_context:
+            retained_by_packet.setdefault(packet_ref, []).append(row)
+
+    for packet_ref, rows in retained_by_packet.items():
+        target = min(
+            rows,
+            key=lambda row: (
+                int(row.get("exact_article_order"))
+                if str(row.get("exact_article_order") or "").isdigit()
+                else 2**31,
+                int(row.get("chunk_id"))
+                if str(row.get("chunk_id") or "").isdigit()
+                else 2**31,
+            ),
+        )
+        source = packet_context[packet_ref]
+        assembled = str(source.get("exact_article_assembled_content") or "")
+        target.update(
+            {
+                "parent_context": assembled,
+                "parent_context_chars": len(assembled),
+                "parent_context_original_chars": int(
+                    source.get("parent_context_original_chars")
+                    or source.get("exact_article_full_article_character_count")
+                    or len(assembled)
+                ),
+                "parent_context_truncated": bool(
+                    source.get("parent_context_truncated")
+                ),
+                "parent_context_reason": "complete_exact_article",
+                "parent_context_primary": True,
+                "exact_article_assembled_content": assembled,
+                "exact_article_context_restored": True,
+                "exact_article_serving_mode": source.get(
+                    "exact_article_serving_mode"
+                ),
+                "exact_article_full_article_character_count": source.get(
+                    "exact_article_full_article_character_count"
+                ),
+            }
+        )
+    return relevant_rows
+
+
+async def _run_structured_section_orchestration(
+    *,
+    ask_request: AskRequest,
+    request_id: str,
+    question_policy: Mapping[str, Any],
+    legal_as_of: str,
+    strategy_model_id: str,
+    answer_model_id: str,
+    final_answer_model_id: str,
+) -> tuple[list[Any], dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
+    """Run one batch retrieval and exactly one structured model generation."""
+
+    del answer_model_id
+    stage_started = time.perf_counter()
+    logger.info("Feature005 stage=structured_start request_id={}", request_id)
+    original_runtime_domain = (
+        ask_request.domain
+        or (_detect_question_domain(ask_request.question) or {}).get("slug")
+        or ask_request.topic_domain
+        or None
+    )
+    domain_decision = canonical_domain_decision(original_runtime_domain)
+    selected_runtime_domain = domain_decision.canonical_domain
+    required_sections = [
+        str(item) for item in question_policy.get("required_sections") or []
+    ]
+
+    async def invoke_problem_map_model(prompt: str) -> str:
+        model = await provision_langchain_model(
+            prompt,
+            strategy_model_id,
+            "tools",
+            max_tokens=1600,
+            timeout=4.0,
+            temperature=0.0,
+            streaming=False,
+            structured={"type": "json_object"},
+        )
+        message = await model.ainvoke(prompt)
+        return clean_thinking_content(extract_text_content(message.content))
+
+    v2_enabled = is_answer_pipeline_v2_enabled(str(ask_request.role or "citizen"))
+    answer_route = route_legal_answer(ask_request.question) if v2_enabled else None
+    v2_form_resolution: dict[str, Any] | None = None
+    preserve_release_confirmed_seed = False
+    if (
+        answer_route is not None
+        and answer_route.answer_route == "procedure_form"
+    ):
+        if answer_route.procedure_id:
+            try:
+                v2_form_resolution = _get_canonical_form_catalog().resolve_forms(
+                    ask_request.question,
+                    role=str(ask_request.role or "citizen"),
+                    as_of=date.fromisoformat(str(legal_as_of)[:10]),
+                    procedure_ids=[answer_route.procedure_id],
+                    limit=12,
+                )
+            except (OSError, ValueError, TypeError):
+                # Forms are optional evidence. Catalog failure is recorded and
+                # fails closed; it never blocks retrieval of the governing law.
+                v2_form_resolution = {
+                    "recommended_forms": [],
+                    "rejected_forms": [],
+                    "forms_unavailable": True,
+                    "data_gap_status": "CATALOG_UNAVAILABLE",
+                    "data_gap_reasons": ["catalog_unavailable"],
+                }
+        try:
+            from api.form_router_v3 import resolve_from_configured_release
+            feature017_forms = resolve_from_configured_release(
+                question=ask_request.question,
+                audience=str(ask_request.role or "citizen"),
+                legal_as_of=date.fromisoformat(str(legal_as_of)[:10]),
+            )
+            if feature017_forms is not None:
+                if feature017_forms.get("router_mode") == "active":
+                    v2_form_resolution = feature017_forms
+                    resolved_procedure_id = str(feature017_forms.get("procedure_id") or "").strip() or None
+                    feature017_packet = feature017_forms.get("evidence_packet") or {}
+                    feature017_identity = (
+                        feature017_forms.get("identity_confirmation")
+                        or feature017_packet.get("identity_confirmation")
+                        or {}
+                    )
+                    preserve_release_confirmed_seed = bool(
+                        feature017_forms.get("status") == "resolved"
+                        and resolved_procedure_id
+                        and str(feature017_packet.get("release_id") or "").strip()
+                        and feature017_identity.get("confirmed") is True
+                    )
+                    if resolved_procedure_id:
+                        answer_route = replace(
+                            answer_route,
+                            procedure_id=resolved_procedure_id,
+                        )
+                        if preserve_release_confirmed_seed:
+                            # Long official procedure names commonly contain
+                            # commas. Generic legal issue splitting can mistake
+                            # title fragments (or words such as "Ä‘iá»u chá»‰nh")
+                            # for separate intents. Once Feature 017 confirms
+                            # one released identity, bind the user's requested
+                            # facet and full question back to one issue.
+                            folded_question = _ascii_fold(ask_request.question)
+                            confirmed_intent = (
+                                "form"
+                                if any(
+                                    marker in folded_question
+                                    for marker in ("bieu mau", "mau nao", "tai mau")
+                                )
+                                else "documents"
+                                if any(
+                                    marker in folded_question
+                                    for marker in ("ho so", "chuan bi")
+                                )
+                                else "deadline"
+                                if any(
+                                    marker in folded_question
+                                    for marker in ("thoi han", "bao lau")
+                                )
+                                else "fee"
+                                if any(
+                                    marker in folded_question
+                                    for marker in ("le phi", "chi phi")
+                                )
+                                else "authority"
+                                if any(
+                                    marker in folded_question
+                                    for marker in ("nop o dau", "co quan nao")
+                                )
+                                else "condition"
+                                if "dieu kien" in folded_question
+                                else "procedure"
+                            )
+                            base_issue = answer_route.issues[0]
+                            answer_route = replace(
+                                answer_route,
+                                issues=(
+                                    replace(
+                                        base_issue,
+                                        text=ask_request.question[:800],
+                                        title=(
+                                            base_issue.title[:300]
+                                            or "Ná»™i dung thá»§ tá»¥c Ä‘Ã£ xÃ¡c nháº­n"
+                                        ),
+                                        query_text=ask_request.question[:2000],
+                                        subject=(
+                                            base_issue.subject[:300]
+                                            or ask_request.question[:300]
+                                        ),
+                                        intent=confirmed_intent,
+                                    ),
+                                ),
+                            )
+                    if feature017_forms.get("status") == "clarification_required":
+                        questions = tuple(
+                            str(item) for item in feature017_forms.get("clarifying_questions") or []
+                            if str(item).strip()
+                        ) or ("Bạn muốn thực hiện thủ tục nào?",)
+                        answer_route = replace(answer_route, clarifying_questions=questions)
+                elif v2_form_resolution is not None:
+                    # Shadow decisions are admin-trace only; they do not alter
+                    # the public form set before separately approved activation.
+                    v2_form_resolution["feature017_shadow"] = {
+                        "status": feature017_forms.get("status"),
+                        "procedure_id": feature017_forms.get("procedure_id"),
+                        "form_ids": [
+                            item.get("form_id")
+                            for item in feature017_forms.get("recommended_forms") or []
+                        ],
+                        "reason": feature017_forms.get("reason"),
+                    }
+        except (OSError, RuntimeError, ValueError, TypeError, SQLAlchemyError):
+            # Feature 017 is optional until its schema and active release are
+            # explicitly activated; legacy fail-closed resolution stays intact.
+            pass
+    planner_enabled = (
+        not v2_enabled
+        and str(os.getenv("LEGAL_PROBLEM_MAP_LLM_ENABLED", "false"))
+        .strip()
+        .casefold()
+        in {"1", "true", "yes", "on"}
+    )
+    if answer_route is not None:
+        # In V2, requested sections are coverage facets inside the issue. They
+        # must not become extra retrieval issues. Explicit numbered/quoted
+        # questions have already been separated by the deterministic router.
+        deterministic_seed = list(answer_route.issues)
+    else:
+        deterministic_seed = ensure_required_facet_issues(
+            question=ask_request.question,
+            issues=plan_legal_issues(ask_request.question, max_issues=8),
+            required_sections=required_sections,
+            max_issues=8,
+        )
+    problem_map = await build_hybrid_problem_map(
+        ask_request.question,
+        role=str(ask_request.role or "citizen"),
+        required_sections=required_sections,
+        location=("Hải Phòng" if selected_runtime_domain else None),
+        invoke_model=invoke_problem_map_model if planner_enabled else None,
+        timeout_seconds=4.0,
+        seed_issues=deterministic_seed,
+        preserve_seed_issues=preserve_release_confirmed_seed,
+    )
+    planned_issues = problem_map_to_legal_issues(
+        problem_map,
+        request_id=request_id,
+    )
+    if answer_route is not None and answer_route.clarifying_questions:
+        issue = planned_issues[0]
+        section = validate_answer_section(
+            request_id=request_id,
+            issue_id=issue.issue_id,
+            title=issue.title,
+            sources=[],
+            limitation="Chưa đủ thông tin để xác định đúng thủ tục và biểu mẫu.",
+            clarifying_question=answer_route.clarifying_questions[0],
+            facet=issue.intent,
+            priority=issue.priority,
+        )
+        aggregate = aggregate_answer_sections([section])
+        metric = build_section_grounding_metric(
+            request_id=request_id,
+            statuses=[section.status],
+            stage_timings_ms={
+                "retrieval": 0,
+                "provisioning": 0,
+                "generation": 0,
+                "validation": 0,
+                "end_to_end": (time.perf_counter() - stage_started) * 1000,
+            },
+            repair_count=0,
+            completed=True,
+            error_category="none",
+        )
+        return [section], aggregate, [], {
+            "pipeline_version": ANSWER_PIPELINE_V2_VERSION,
+            "answer_route": answer_route.answer_route,
+            "route_reason": answer_route.decision_reason,
+            "problem_map": {
+                "planner_mode": "deterministic_v2",
+                "fallback_reason": None,
+                "issue_count": 1,
+                "query_count": 0,
+                "missing_fact_count": 1,
+                "branch_count": 0,
+                "issues": [],
+            },
+            "clarifying_questions": list(answer_route.clarifying_questions),
+            "issue_plan": [],
+            "claim_validation": {
+                "issues": [],
+                "claim_grounding_ratio": 0.0,
+                "coverage_ratio": 0.0,
+                "quality_gate": {"pass": False},
+                "fallback_reason": "clarification_required",
+            },
+            "validity_decision": {
+                "state": "unknown_or_stale",
+                "legal_as_of": legal_as_of,
+                "filtered_reason_codes": [],
+                "strict_current_answer": True,
+            },
+            "answer_mode": SOURCE_VIEW_ONLY,
+            "provider_error_code": None,
+            "metric": metric,
+        }
+    request_exact_plan = plan_exact_lookup(ask_request.question)
+    single_exact_article_request = bool(
+        len(planned_issues) == 1
+        and is_single_exact_article_plan(request_exact_plan)
+    )
+    if single_exact_article_request and planned_issues:
+        # A named Article is one indivisible retrieval unit. Requested facets
+        # remain in the coverage matrix, but splitting them into several search
+        # issues would duplicate the same full Article and could exhaust the
+        # context budget before generation.
+        planned_issues = [
+            replace(
+                planned_issues[0],
+                title=(
+                    f"Nội dung Điều {request_exact_plan.article_number} "
+                    f"của {request_exact_plan.law_number}"
+                ),
+                query_text=ask_request.question,
+                intent="rule",
+            )
+        ]
+    issues = []
+    issue_exact_plans: dict[str, Any] = {}
+    for planned_issue in planned_issues:
+        issue_exact_plan = _issue_local_exact_plan(
+            planned_issue.query_text,
+            request_exact_plan=request_exact_plan,
+            issue_count=len(planned_issues),
+        )
+        issue_query = _append_request_exact_identifiers(
+            planned_issue.query_text,
+            request_exact_plan=issue_exact_plan,
+        )
+        bound_domain = retrieval_domain_slug(
+            planned_issue.domain,
+            selected_runtime_domain,
+            issue_query,
+        )
+        bound_issue = replace(
+                planned_issue,
+                request_id=request_id,
+                query_text=issue_query,
+                domain=bound_domain or ("unknown" if planned_issue.domain == "administrative" else planned_issue.domain),
+                relevance_topics=tuple(set(planned_issue.relevance_topics) | set(ask_request.detected_topics or []))
+            )
+        issues.append(bound_issue)
+        issue_exact_plans[bound_issue.issue_id] = plan_exact_lookup(issue_query)
+    exact_article_issue_ids = {
+        issue_id
+        for issue_id, plan in issue_exact_plans.items()
+        if is_single_exact_article_plan(plan)
+    }
+    exact_article_request = bool(exact_article_issue_ids)
+    problem_issue_by_id = {
+        issue.issue_id: issue for issue in problem_map.legal_issues
+    }
+    batch_issues = []
+    for issue in issues:
+        problem_issue = problem_issue_by_id[issue.issue_id]
+        issue_exact_plan = issue_exact_plans[issue.issue_id]
+        issue_exact_article = issue.issue_id in exact_article_issue_ids
+        batch_issues.append(
+            {
+                "issue_id": issue.issue_id,
+                "query": issue.query_text,
+                "queries": [
+                    {
+                        **query.model_dump(exclude_none=True),
+                        "query": _append_request_exact_identifiers(
+                            query.query,
+                            request_exact_plan=issue_exact_plan,
+                        ),
+                    }
+                    for query in problem_issue.queries[:1]
+                ] if not issue_exact_article else [],
+                # ``unknown`` is a policy state, not an indexed domain slug.
+                # Exact document identifiers are still enforced by retrieval
+                # and by the section eligibility gate below.
+                "domain": selected_runtime_domain or None,
+                "intent": issue.intent,
+            }
+        )
+    required_facets_by_issue = derive_required_facets_by_issue(
+        issues=issues,
+        required_sections=required_sections,
+    )
+    hard_question = is_hard_legal_request(
+        issues=issues,
+        required_facets_by_issue=required_facets_by_issue,
+    )
+
+    def bounded_timeout(name: str, default: float, cap: float) -> float:
+        try:
+            configured = float(os.getenv(name, str(default)))
+        except (TypeError, ValueError):
+            configured = default
+        return min(cap, max(0.05, configured))
+
+    total_budget_seconds = structured_total_timeout_seconds(
+        hard_question=hard_question,
+        role=str(ask_request.role or "citizen"),
+    )
+    total_deadline = stage_started + total_budget_seconds
+    core_timeout = bounded_timeout(
+        "LEGAL_STRUCTURED_RETRIEVAL_TIMEOUT_SECONDS",
+        structured_retrieval_timeout_seconds(
+            "core", hard_question=hard_question, role=str(ask_request.role or "citizen")
+        ),
+        60.0,
+    )
+    retrieval_started = time.perf_counter()
+    client = get_legal_search_client()
+    retrieval_timed_out = False
+    try:
+        core = await asyncio.wait_for(
+            client.search_batch(
+                {
+                    "request_id": request_id,
+                    "as_of": legal_as_of,
+                    "as_of_explicit": bool(
+                        ask_request.legal_as_of or ask_request.event_date
+                    ),
+                    "issues": batch_issues,
+                    "retrieval_tier": "core",
+                    "audience": str(ask_request.role or "citizen"),
+                    "include_trace": ask_request.role == "admin",
+                    "ranking_strategy": "rrf_v2" if v2_enabled else "legacy_stack",
+                    # The last real benchmark did not pass activation Gate C.
+                    # V2 therefore keeps BGE off until a separately reviewed
+                    # benchmark changes this server-controlled decision.
+                    "enable_learned_reranker": False if v2_enabled else True,
+                }
+            ),
+            timeout=min(
+                core_timeout,
+                max(0.05, total_deadline - time.perf_counter() - 1.0),
+            ),
+        )
+    except asyncio.TimeoutError:
+        retrieval_timed_out = True
+        core = {"issues": []}
+        logger.warning(
+            "Feature005 stage=core_retrieval_timeout request_id={} timeout_s={}",
+            request_id,
+            core_timeout,
+        )
+    logger.info(
+        "Feature005 stage=core_retrieval_done request_id={} elapsed_ms={:.0f} "
+        "issue_count={} candidate_counts={} retrieval_service={}",
+        request_id,
+        (time.perf_counter() - retrieval_started) * 1000,
+        len(core.get("issues") or []),
+        [
+            len(item.get("results") or [])
+            for item in core.get("issues") or []
+            if isinstance(item, Mapping)
+        ],
+        getattr(client, "base_url", "in-process-test-adapter"),
+    )
+    candidates_by_issue: dict[str, list[dict[str, Any]]] = {
+        str(item["issue_id"]): [dict(row) for row in item.get("results") or []]
+        for item in core.get("issues") or []
+    }
+    runtime_versions = dict(core.get("versions") or {})
+    exact_packets_by_issue: dict[str, list[dict[str, Any]]] = {
+        issue.issue_id: [] for issue in issues
+    }
+    validity_filtered_reasons: dict[str, int] = {}
+
+    def record_validity_sync(payload: Mapping[str, Any]) -> None:
+        summaries: list[Mapping[str, Any]] = []
+        top_level = payload.get("validity_sync")
+        if isinstance(top_level, Mapping):
+            summaries.append(top_level)
+        else:
+            summaries.extend(
+                item["validity_sync"]
+                for item in payload.get("issues") or []
+                if isinstance(item, Mapping)
+                and isinstance(item.get("validity_sync"), Mapping)
+            )
+        for summary in summaries:
+            for reason, count in (
+                summary.get("filtered_reasons") or {}
+            ).items():
+                key = str(reason or "unknown")
+                validity_filtered_reasons[key] = (
+                    validity_filtered_reasons.get(key, 0) + int(count or 0)
+                )
+
+    def record_exact_packets(payload: Mapping[str, Any]) -> None:
+        for item in payload.get("issues") or []:
+            if not isinstance(item, Mapping):
+                continue
+            issue_id = str(item.get("issue_id") or "")
+            if issue_id not in exact_packets_by_issue:
+                continue
+            known = {
+                str(packet.get("packet_ref") or "")
+                + ":"
+                + str(packet.get("status") or "")
+                for packet in exact_packets_by_issue[issue_id]
+            }
+            for packet in item.get("exact_article_packets") or []:
+                if not isinstance(packet, Mapping):
+                    continue
+                identity = (
+                    str(packet.get("packet_ref") or "")
+                    + ":"
+                    + str(packet.get("status") or "")
+                )
+                if identity not in known:
+                    exact_packets_by_issue[issue_id].append(dict(packet))
+                    known.add(identity)
+
+    record_exact_packets(core)
+    record_validity_sync(core)
+    decision_trace: dict[str, list[dict[str, Any]]] = {}
+    content_decision_trace: dict[str, list[dict[str, Any]]] = {}
+
+    def eligible_rows(issue: Any) -> list[dict[str, Any]]:
+        projected, _ = project_legal_evidence_rows(
+            candidates_by_issue.get(issue.issue_id, [])
+        )
+        decisions = select_eligible_evidence(
+            request_id=request_id,
+            issue=issue,
+            candidates=projected,
+            legal_as_of=legal_as_of,
+        )
+        decision_trace[issue.issue_id] = [
+            {
+                "source_id": decision.source_id,
+                "status": decision.status,
+                "reason": decision.reason,
+            }
+            for decision in decisions
+        ]
+        legally_eligible = [
+            dict(decision.source_metadata)
+            for decision in decisions
+            if decision.eligible
+        ]
+        relevance_context = " ".join(
+            value
+            for value in (
+                issue.title,
+                issue.query_text,
+                issue.text,
+                issue.subject,
+                *issue.facts,
+            )
+            if value
+        )
+        if issue.issue_id in exact_article_issue_ids:
+            # Every chunk of the verified Article is required context. A
+            # content-relevance classifier may rank broad questions, but it
+            # must not discard a Khoản/Điểm from an explicitly named Article.
+            relevant = legally_eligible
+            content_decisions = [
+                {
+                    "source_id": row.get("source_id")
+                    or row.get("chunk_id")
+                    or row.get("id"),
+                    "decision": "keep",
+                    "reason": "complete_exact_article_packet",
+                    "penalty": 0.0,
+                }
+                for row in legally_eligible
+            ]
+        elif v2_enabled:
+            # The legal/validity/role hard gate above is authoritative in V2.
+            # Relevance is a coverage/ranking signal and cannot silently drop
+            # an otherwise eligible source for a second time.
+            relevant = legally_eligible
+            content_decisions = [
+                {
+                    "source_id": row.get("source_id")
+                    or row.get("chunk_id")
+                    or row.get("id"),
+                    "decision": "keep",
+                    "reason": "coverage_only_v2",
+                    "penalty": 0.0,
+                }
+                for row in legally_eligible
+            ]
+        else:
+            relevant, content_decisions = rank_issue_evidence(
+                relevance_context,
+                legally_eligible,
+                issue_intent=issue.intent,
+                relevance_topics=issue.relevance_topics,
+            )
+        if issue.issue_id in exact_article_issue_ids:
+            # The retrieval service attaches the assembled Article body to its
+            # first child.  That child may be the one content-relevance labels
+            # as broad, while the remaining children are still the same
+            # verified exact packet.  Preserve the packet body on a retained
+            # child before context construction.
+            relevant = _restore_exact_article_context_after_relevance(
+                relevant,
+                projected,
+            )
+        content_decision_trace[issue.issue_id] = content_decisions
+        candidates_by_issue[issue.issue_id] = [dict(row) for row in projected]
+        return [dict(row) for row in relevant]
+
+    selected_by_issue = {issue.issue_id: eligible_rows(issue) for issue in issues}
+    missing = [
+        issue
+        for issue in issues
+        if (
+            not selected_by_issue[issue.issue_id]
+            or issue_requires_expanded_support(
+                issue,
+                selected_by_issue[issue.issue_id],
+            )
+        )
+    ]
+    expanded_used = False
+    full_corpus_used = False
+    if missing and not retrieval_timed_out:
+        expanded_used = True
+        missing_ids = {issue.issue_id for issue in missing}
+        expanded_timeout = bounded_timeout(
+            "LEGAL_STRUCTURED_EXPANDED_RETRIEVAL_TIMEOUT_SECONDS",
+            structured_retrieval_timeout_seconds(
+                "expanded", hard_question=hard_question, role=str(ask_request.role or "citizen")
+            ),
+            structured_retrieval_timeout_seconds(
+                "expanded", hard_question=hard_question, role=str(ask_request.role or "citizen")
+            ),
+        )
+        try:
+            expanded = await asyncio.wait_for(
+                client.search_batch(
+                    {
+                        "request_id": request_id,
+                        "as_of": legal_as_of,
+                        "as_of_explicit": bool(
+                            ask_request.legal_as_of or ask_request.event_date
+                        ),
+                        "issues": [
+                            item
+                            for item in batch_issues
+                            if item["issue_id"] in missing_ids
+                        ],
+                        "retrieval_tier": "expanded",
+                        "audience": str(ask_request.role or "citizen"),
+                        "include_trace": ask_request.role == "admin",
+                        "ranking_strategy": "rrf_v2" if v2_enabled else "legacy_stack",
+                        "enable_learned_reranker": False if v2_enabled else True,
+                    }
+                ),
+                timeout=min(
+                    expanded_timeout,
+                    max(0.05, total_deadline - time.perf_counter() - 1.0),
+                ),
+            )
+        except asyncio.TimeoutError:
+            if not any(candidates_by_issue.values()):
+                retrieval_timed_out = True
+            expanded = {"issues": []}
+            logger.warning(
+                "Feature005 stage=expanded_retrieval_timeout request_id={} timeout_s={}",
+                request_id,
+                expanded_timeout,
+            )
+        logger.info(
+            "Feature005 stage=expanded_retrieval_done request_id={} elapsed_ms={:.0f}",
+            request_id,
+            (time.perf_counter() - retrieval_started) * 1000,
+        )
+        for item in expanded.get("issues") or []:
+            issue_id = str(item.get("issue_id") or "")
+            candidates_by_issue.setdefault(issue_id, []).extend(
+                dict(row) for row in item.get("results") or []
+            )
+        record_exact_packets(expanded)
+        record_validity_sync(expanded)
+        selected_by_issue = {issue.issue_id: eligible_rows(issue) for issue in issues}
+
+    # The final retrieval tier broadens only the domain boundary. It still uses
+    # the expanded active/reviewed collection and the exact same validity,
+    # authority, hierarchy and role eligibility gates below. Exact-article
+    # requests never use this route because their identity must remain exact.
+    full_corpus_missing = [
+        issue
+        for issue in issues
+        if issue.issue_id not in exact_article_issue_ids
+        and (
+            not selected_by_issue.get(issue.issue_id)
+            or issue_requires_expanded_support(
+                issue,
+                selected_by_issue.get(issue.issue_id, []),
+            )
+        )
+    ]
+    if v2_enabled and full_corpus_missing and not retrieval_timed_out:
+        full_corpus_ids = {issue.issue_id for issue in full_corpus_missing}
+        remaining_budget = total_deadline - time.perf_counter() - 1.0
+        if remaining_budget > 0.05:
+            full_corpus_used = True
+            full_corpus_issues = [
+                {**item, "domain": None}
+                for item in batch_issues
+                if item["issue_id"] in full_corpus_ids
+            ]
+            try:
+                full_corpus = await asyncio.wait_for(
+                    client.search_batch(
+                        {
+                            "request_id": request_id,
+                            "as_of": legal_as_of,
+                            "as_of_explicit": bool(
+                                ask_request.legal_as_of or ask_request.event_date
+                            ),
+                            "issues": full_corpus_issues,
+                            "retrieval_tier": "expanded",
+                            "audience": str(ask_request.role or "citizen"),
+                            "include_trace": ask_request.role == "admin",
+                            "ranking_strategy": "rrf_v2",
+                            "enable_learned_reranker": False,
+                        }
+                    ),
+                    timeout=min(expanded_timeout, max(0.05, remaining_budget)),
+                )
+            except asyncio.TimeoutError:
+                full_corpus = {"issues": []}
+                logger.warning(
+                    "AnswerV3 stage=full_corpus_retrieval_timeout request_id={}",
+                    request_id,
+                )
+            for item in full_corpus.get("issues") or []:
+                issue_id = str(item.get("issue_id") or "")
+                candidates_by_issue.setdefault(issue_id, []).extend(
+                    dict(row) for row in item.get("results") or []
+                )
+            record_exact_packets(full_corpus)
+            record_validity_sync(full_corpus)
+            selected_by_issue = {
+                issue.issue_id: eligible_rows(issue) for issue in issues
+            }
+
+    exact_article_gate = {
+        "required": exact_article_request,
+        "ready": True,
+        "reason_codes": [],
+        "issues": {},
+    }
+    if exact_article_request:
+        for issue in issues:
+            if issue.issue_id not in exact_article_issue_ids:
+                continue
+            packets = exact_packets_by_issue.get(issue.issue_id, [])
+            complete = [
+                packet for packet in packets if packet.get("status") == "complete"
+            ]
+            exact_article_gate["issues"][issue.issue_id] = {
+                "packet_count": len(packets),
+                "complete_packet_count": len(complete),
+                "reason_codes": list(
+                    dict.fromkeys(
+                        str(reason)
+                        for packet in packets
+                        for reason in packet.get("reason_codes") or []
+                    )
+                ),
+                "missing_chunk_indexes": sorted(
+                    {
+                        int(index)
+                        for packet in packets
+                        for index in packet.get("missing_chunk_indexes") or []
+                    }
+                ),
+                "missing_structural_units": list(
+                    dict.fromkeys(
+                        str(unit)
+                        for packet in packets
+                        for unit in packet.get("missing_structural_units") or []
+                    )
+                ),
+            }
+            if not complete:
+                exact_article_gate["ready"] = False
+                selected_by_issue[issue.issue_id] = []
+        if not exact_article_gate["ready"]:
+            exact_article_gate["reason_codes"].append(
+                "exact_article_packet_incomplete"
+            )
+
+    # Add reviewed official procedure publications only after the corpus has
+    # passed approval, validity, hierarchy, diversity and optional expanded
+    # retrieval.  These rows are issue-bound and pass the same eligibility and
+    # relevance gates; they cannot reorder or make an ineligible corpus source
+    # eligible.
+    if retrieval_timed_out:
+        official_rows, official_procedure_trace = [], {
+            "status": "skipped_retrieval_timeout",
+            "candidate_count": 0,
+        }
+    elif len(exact_article_issue_ids) == len(issues):
+        official_rows, official_procedure_trace = [], {
+            "status": "skipped_exact_article_request",
+            "candidate_count": 0,
+        }
+    else:
+        non_exact_issues = [
+            issue
+            for issue in issues
+            if issue.issue_id not in exact_article_issue_ids
+        ]
+        form_evidence_packet = (
+            (v2_form_resolution or {}).get("evidence_packet") or {}
+        )
+        form_identity_confirmation = (
+            (v2_form_resolution or {}).get("identity_confirmation")
+            or form_evidence_packet.get("identity_confirmation")
+            or {}
+        )
+        release_confirmed_procedure_id = (
+            str((v2_form_resolution or {}).get("procedure_id") or "").strip()
+            if (
+                (v2_form_resolution or {}).get("status") == "resolved"
+                and str(form_evidence_packet.get("release_id") or "").strip()
+                and form_identity_confirmation.get("confirmed") is True
+            )
+            else None
+        )
+        official_rows, official_procedure_trace = await asyncio.to_thread(
+            build_official_procedure_evidence,
+            issues=non_exact_issues,
+            question=ask_request.question,
+            legal_as_of=legal_as_of,
+            procedure_id=release_confirmed_procedure_id,
+            required_facets_by_issue=required_facets_by_issue,
+        )
+    official_by_issue: dict[str, list[dict[str, Any]]] = {}
+    for row in official_rows:
+        official_by_issue.setdefault(str(row.get("issue_id") or ""), []).append(row)
+
+    for issue in issues:
+        adapter_candidates, _ = project_legal_evidence_rows(
+            official_by_issue.get(issue.issue_id, [])
+        )
+        adapter_decisions = select_eligible_evidence(
+            request_id=request_id,
+            issue=issue,
+            candidates=adapter_candidates,
+            legal_as_of=legal_as_of,
+        )
+        adapter_eligible = [
+            dict(decision.source_metadata)
+            for decision in adapter_decisions
+            if decision.eligible
+        ]
+        if v2_enabled:
+            adapter_relevant = adapter_eligible
+            adapter_content_decisions = [
+                {
+                    "source_id": row.get("source_id")
+                    or row.get("chunk_id")
+                    or row.get("id"),
+                    "decision": "keep",
+                    "reason": "coverage_only_v2",
+                    "penalty": 0.0,
+                }
+                for row in adapter_eligible
+            ]
+        else:
+            adapter_relevant, adapter_content_decisions = rank_issue_evidence(
+                " ".join(
+                    value
+                    for value in (issue.title, issue.query_text, issue.subject)
+                    if value
+                ),
+                adapter_eligible,
+                issue_intent=issue.intent,
+                relevance_topics=issue.relevance_topics,
+            )
+        decision_trace.setdefault(issue.issue_id, []).extend(
+            {
+                "source_id": decision.source_id,
+                "status": decision.status,
+                "reason": decision.reason,
+                "source_adapter": "official_procedure_evidence_v1",
+            }
+            for decision in adapter_decisions
+        )
+        content_decision_trace.setdefault(issue.issue_id, []).extend(
+            {
+                **dict(decision),
+                "source_adapter": "official_procedure_evidence_v1",
+            }
+            for decision in adapter_content_decisions
+        )
+
+        existing = list(selected_by_issue.get(issue.issue_id, []))
+        # Decree 217/2026/ND-CP replaced the current building-permit procedure
+        # from 2026-07-01.  A stale corpus status must not let Decree 175 appear
+        # beside the reviewed current source.  Match metadata identity only;
+        # historical analysis before the effective date is untouched.
+        if any(
+            str(row.get("law_number") or "") == "217/2026/NĐ-CP"
+            for row in adapter_relevant
+        ):
+            kept: list[dict[str, Any]] = []
+            for row in existing:
+                identity = " ".join(
+                    str(row.get(field) or "")
+                    for field in ("law_number", "document_number", "document_title")
+                )
+                if "175/2024/NĐ-CP" in identity:
+                    content_decision_trace[issue.issue_id].append(
+                        {
+                            "source_id": row.get("source_id") or row.get("chunk_id"),
+                            "decision": "reject",
+                            "reason": "superseded_by_217_2026_nd_cp",
+                        }
+                    )
+                    continue
+                kept.append(row)
+            existing = kept
+
+        merged: list[dict[str, Any]] = []
+        seen_source_ids: set[str] = set()
+        for row in [*adapter_relevant, *existing]:
+            source_id = str(
+                row.get("source_id")
+                or row.get("chunk_id")
+                or row.get("id")
+                or ""
+            )
+            if source_id and source_id in seen_source_ids:
+                continue
+            if source_id:
+                seen_source_ids.add(source_id)
+            merged.append(dict(row))
+        selected_by_issue[issue.issue_id] = merged
+
+    retrieval_ms = (time.perf_counter() - retrieval_started) * 1000
+    if v2_form_resolution is not None and answer_route is not None and issues:
+        resolved_procedure_id = str(
+            v2_form_resolution.get("procedure_id") or answer_route.procedure_id or ""
+        )
+        form_evidence = build_form_evidence_rows(
+            request_id=request_id,
+            issue=issues[0],
+            procedure_id=resolved_procedure_id,
+            forms=list(v2_form_resolution.get("recommended_forms") or []),
+            legal_as_of=legal_as_of,
+        )
+        selected_by_issue[issues[0].issue_id] = [
+            *selected_by_issue.get(issues[0].issue_id, []),
+            *form_evidence,
+        ]
+    evidence_packets: dict[str, CurrentRequestEvidencePacket] = {}
+    if v2_enabled:
+        # Materialize the issue boundary before prompt construction.  This is
+        # the final fail-closed guard against a sibling issue's evidence being
+        # broadcast into the current issue by later aggregation code.
+        evidence_packets = {
+            issue.issue_id: CurrentRequestEvidencePacket(
+                request_id=request_id,
+                issue_id=issue.issue_id,
+                sources=list(selected_by_issue.get(issue.issue_id, [])),
+                retrieval_tier=(
+                    "full_corpus"
+                    if full_corpus_used
+                    else "expanded"
+                    if expanded_used
+                    else "core"
+                ),
+            )
+            for issue in issues
+        }
+        all_results = [
+            dict(row)
+            for issue in issues
+            for row in evidence_packets[issue.issue_id].eligible_sources
+        ]
+    else:
+        all_results = [
+            row
+            for issue in issues
+            for row in selected_by_issue.get(issue.issue_id, [])
+        ]
+    context_limit = structured_context_max_chars(
+        hard_question=hard_question or exact_article_request,
+        role=str(ask_request.role or "citizen"),
+    )
+    context, evidence_by_id = build_compact_evidence_context(
+        issues=issues,
+        evidence_rows=all_results,
+        max_chars=context_limit,
+    )
+    if exact_article_request and exact_article_gate["ready"]:
+        complete_context_issues = {
+            str(item.get("issue_id") or "")
+            for item in evidence_by_id.values()
+            if item.get("exact_article_context_complete") is True
+        }
+        missing_context_issues = [
+            issue_id
+            for issue_id in exact_article_issue_ids
+            if issue_id not in complete_context_issues
+        ]
+        if missing_context_issues:
+            exact_article_gate["ready"] = False
+            exact_article_gate["reason_codes"].append(
+                "exact_article_context_not_fully_loaded"
+            )
+            exact_article_gate["missing_context_issue_ids"] = (
+                missing_context_issues
+            )
+            for issue_id in missing_context_issues:
+                selected_by_issue[issue_id] = []
+            all_results = [
+                row
+                for issue in issues
+                for row in selected_by_issue.get(issue.issue_id, [])
+            ]
+            context, evidence_by_id = build_compact_evidence_context(
+                issues=issues,
+                evidence_rows=all_results,
+                max_chars=context_limit,
+            )
+    coverage_matrix = build_issue_coverage_matrix(
+        issues=issues,
+        evidence_by_id=evidence_by_id,
+        required_facets_by_issue=required_facets_by_issue,
+    )
+    required_fact_ids_by_issue = {
+        issue.issue_id: list(issue.required_fact_ids)
+        for issue in problem_map.legal_issues
+        if issue.required_fact_ids
+    }
+    for issue_id, fact_ids in required_fact_ids_by_issue.items():
+        for facet in coverage_matrix.get(issue_id, ()):
+            facet["requires_user_fact"] = True
+            facet["missing_fact_ids"] = list(fact_ids)
+            facet["coverage_status"] = "requires_user_fact"
+    generation_ms = 0.0
+    provisioning_ms = 0.0
+    validation_ms = 0.0
+    error_category = "none"
+    answer_mode = NORMAL
+    provider_error_code: str | None = None
+    structured_trace: dict[str, Any] = {
+        "accepted_claim_count": 0,
+        "rejected_claim_count": 0,
+        "issues": [],
+    }
+    expired_source_blocked = bool(
+        exact_article_request and validity_filtered_reasons.get("expired", 0)
+    )
+    if not evidence_by_id:
+        if not answer_fallback_enabled():
+            raise HTTPException(
+                status_code=502,
+                detail="Answer fallback disabled for local diagnostic; no eligible legal evidence was retrieved.",
+            )
+        error_category = "retrieval_unavailable"
+        if expired_source_blocked:
+            limitation = (
+                f"Văn bản {request_exact_plan.law_number} đã hết hiệu lực – "
+                "không dùng để trả lời hiện hành."
+            )
+            sections = [
+                validate_answer_section(
+                    request_id=request_id,
+                    issue_id=issue.issue_id,
+                    title=issue.title,
+                    sources=[],
+                    limitation=limitation,
+                    facet=issue.intent,
+                )
+                for issue in issues
+            ]
+            aggregate = aggregate_answer_sections(sections)
+        else:
+            sections, aggregate = safe_extractive_fallback(
+                request_id=request_id,
+                issues=issues,
+                evidence_by_id=evidence_by_id,
+                role=str(ask_request.role or "citizen"),
+            )
+            next_question = (
+                "Bạn muốn thực hiện thủ tục cụ thể nào, và trường hợp của bạn "
+                "đang ở bước nộp hồ sơ hay bổ sung hồ sơ?"
+                if answer_route is not None
+                and answer_route.answer_route == "procedure_form"
+                else "Bạn có thể cho biết thủ tục/văn bản, địa bàn và thời điểm của sự việc không?"
+            )
+            aggregate = {
+                **aggregate,
+                "answer": (
+                    "Tôi chưa xác định được căn cứ hiện hành đủ chắc chắn cho toàn bộ "
+                    "câu hỏi sau khi đã mở rộng tra cứu trong kho nguồn chính thức đã duyệt. "
+                    "Tôi sẽ không tự suy đoán điều luật, thời hạn, lệ phí hoặc biểu mẫu.\n\n"
+                    f"{next_question}"
+                ),
+            }
+        if (
+            exact_article_request
+            and not exact_article_gate["ready"]
+            and not expired_source_blocked
+        ):
+            missing_indexes = sorted(
+                {
+                    int(index)
+                    for issue_gate in exact_article_gate["issues"].values()
+                    for index in issue_gate.get("missing_chunk_indexes") or []
+                }
+            )
+            missing_units = list(
+                dict.fromkeys(
+                    str(unit)
+                    for issue_gate in exact_article_gate["issues"].values()
+                    for unit in issue_gate.get("missing_structural_units") or []
+                )
+            )
+            detail_parts = []
+            if missing_indexes:
+                detail_parts.append(
+                    "chunk " + ", ".join(str(index) for index in missing_indexes)
+                )
+            if missing_units:
+                detail_parts.append(
+                    "phần " + ", ".join(missing_units[:8])
+                )
+            detail = (
+                " Hệ thống phát hiện thiếu " + "; ".join(detail_parts) + "."
+                if detail_parts
+                else ""
+            )
+            aggregate = {
+                **aggregate,
+                "answer": (
+                    f"Chưa thể trả lời Điều {request_exact_plan.article_number} "
+                    f"của văn bản {request_exact_plan.law_number} vì kho dữ liệu "
+                    "chưa có một gói Điều đầy đủ và liên tục."
+                    f"{detail} Hệ thống không dùng một chunk riêng lẻ để suy ra "
+                    "toàn bộ Điều luật."
+                ),
+            }
+        structured_trace = build_fallback_quality_trace(
+            issues=issues,
+            coverage_matrix=coverage_matrix,
+            reason=error_category,
+        )
+        structured_trace["expired_source_blocked"] = expired_source_blocked
+        structured_trace["validity_filtered_reasons"] = sorted(
+            validity_filtered_reasons
+        )
+    else:
+        # Prepare the validated deterministic fallback before starting the
+        # provider clock. If several provider calls time out together, doing
+        # this work afterward can hold the GIL and delay another request's
+        # asyncio deadline. Precomputation keeps the 24-second deadline real.
+        fallback_started = time.perf_counter()
+        extractive_fallback = await asyncio.to_thread(
+            build_and_render_extractive_answer,
+            request_id=request_id,
+            issues=issues,
+            evidence_by_id=evidence_by_id,
+            role=str(ask_request.role or "citizen"),
+            coverage_matrix=coverage_matrix,
+        )
+        validation_ms += (time.perf_counter() - fallback_started) * 1000
+
+        def verified_provider_fallback(
+            reason: str,
+        ) -> tuple[list[Any], dict[str, Any], dict[str, Any], str]:
+            """Render only the strongest deterministic output proven safe."""
+
+            if not answer_fallback_enabled():
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        "Answer fallback disabled for local diagnostic; "
+                        f"provider answer was not accepted ({reason})."
+                    ),
+                )
+
+            mode = choose_verified_fallback_mode(
+                question=ask_request.question,
+                evidence_by_id=evidence_by_id,
+                quality_trace=extractive_fallback[2],
+            )
+            if mode == VERIFIED_SOURCE_CONDENSED:
+                fallback_sections, fallback_aggregate, fallback_trace = (
+                    extractive_fallback
+                )
+                fallback_trace = dict(fallback_trace)
+            else:
+                fallback_sections, fallback_aggregate = safe_extractive_fallback(
+                    request_id=request_id,
+                    issues=issues,
+                    evidence_by_id=evidence_by_id,
+                    role=str(ask_request.role or "citizen"),
+                )
+                fallback_trace = build_fallback_quality_trace(
+                    issues=issues,
+                    coverage_matrix=coverage_matrix,
+                    reason=reason,
+                )
+            fallback_trace["fallback_reason"] = reason
+            return (
+                fallback_sections,
+                fallback_aggregate,
+                fallback_trace,
+                mode,
+            )
+
+        # The optimized profile has a deterministic, already validated answer
+        # available before provider provisioning.  When every requested facet
+        # is covered, using that answer directly avoids an unnecessary timeout
+        # or malformed JSON response while preserving the same grounding and
+        # citation gates used by provider output.
+        preflight_coverage = float(
+            (extractive_fallback[2] or {}).get("coverage_ratio") or 0.0
+        )
+        preflight_deterministic = False
+        preflight_issues = list((extractive_fallback[2] or {}).get("issues") or [])
+        preflight_facets_complete = bool(preflight_issues) and all(
+            not item.get("missing_facets") and not item.get("unavailable_facets")
+            for item in preflight_issues
+        )
+        preflight_completeness = assess_answer_completeness(
+            question=ask_request.question,
+            answer=str(extractive_fallback[1].get("answer") or ""),
+            sources=all_results,
+            orchestration_trace=extractive_fallback[2],
+        )
+        if (
+            optimized_profile_enabled(str(ask_request.role or "citizen"))
+            and preflight_coverage >= 1.0
+            and preflight_facets_complete
+            and preflight_completeness.get("status") == "complete"
+            and str(extractive_fallback[1].get("grounding_status") or "")
+            == "fully_grounded"
+            and bool((extractive_fallback[2].get("quality_gate") or {}).get("pass"))
+            and choose_verified_fallback_mode(
+                question=ask_request.question,
+                evidence_by_id=evidence_by_id,
+                quality_trace=extractive_fallback[2],
+            )
+            == VERIFIED_SOURCE_CONDENSED
+        ):
+            sections, aggregate, structured_trace = extractive_fallback
+            structured_trace = dict(structured_trace)
+            preflight_deterministic = True
+            answer_mode = NORMAL
+            provider_error_code = None
+
+        prompt = build_structured_answer_prompt(
+            question=ask_request.question,
+            role=str(ask_request.role or "citizen"),
+            context=context,
+            coverage_matrix=coverage_matrix,
+        )
+        generation_started = time.perf_counter()
+        invocation_started: float | None = None
+        try:
+            if preflight_deterministic:
+                structured_trace["preflight_deterministic"] = True
+                structured_trace["preflight_reason"] = "fully_grounded_extractive"
+                raise _DeterministicPreflight
+            if (
+                not ask_request.offline_mode
+                and not _STRUCTURED_PROVIDER_CIRCUIT.allow(final_answer_model_id)
+            ):
+                raise StructuredProviderCircuitOpen(
+                    _STRUCTURED_PROVIDER_CIRCUIT.reason(final_answer_model_id)
+                    or "provider_failure"
+                )
+            generation_timeout = structured_generation_timeout_seconds(
+                hard_question=hard_question,
+                role=str(ask_request.role or "citizen"),
+            )
+            remaining_total_budget = max(
+                0.0, total_deadline - time.perf_counter() - 0.5
+            )
+            if remaining_total_budget < 1.0:
+                error_category = "total_budget_exhausted"
+                sections, aggregate, structured_trace = extractive_fallback
+                structured_trace["fallback_reason"] = error_category
+                logger.warning(
+                    "Feature005 stage=total_budget_exhausted request_id={}",
+                    request_id,
+                )
+                raise StructuredProviderCircuitOpen(error_category)
+            generation_timeout = min(
+                generation_timeout,
+                remaining_total_budget,
+            )
+            model_options = structured_model_options(
+                generation_timeout,
+                role=str(ask_request.role or "citizen"),
+                hard_question=hard_question,
+            )
+            logger.info(
+                "Feature005 stage=generation_start request_id={} timeout_s={} "
+                "prompt_chars={} context_chars={} evidence_count={} issue_count={} facet_count={}",
+                request_id,
+                generation_timeout,
+                len(prompt),
+                len(context),
+                len(evidence_by_id),
+                len(issues),
+                sum(len(values) for values in required_facets_by_issue.values()),
+            )
+            provisioning_started = time.perf_counter()
+            model = None
+            if not ask_request.offline_mode:
+                model = await _STRUCTURED_MODEL_CACHE.get(
+                    (
+                        final_answer_model_id,
+                        int(model_options.get("max_tokens") or 0),
+                        generation_timeout,
+                        "structured" in model_options,
+                    ),
+                    lambda: provision_langchain_model(
+                        prompt,
+                        final_answer_model_id,
+                        "tools",
+                        **model_options,
+                    ),
+                )
+            provisioning_ms = (
+                time.perf_counter() - provisioning_started
+            ) * 1000
+            remaining_timeout = remaining_generation_budget_seconds(
+                generation_started, generation_timeout
+            )
+            logger.info(
+                "Feature005 stage=model_provisioned request_id={} elapsed_ms={:.0f} remaining_s={:.1f}",
+                request_id,
+                provisioning_ms,
+                remaining_timeout,
+            )
+            if remaining_timeout <= 0:
+                raise asyncio.TimeoutError
+            invocation_timeout = min(
+                remaining_timeout,
+                model_invocation_budget_seconds(generation_timeout),
+            )
+            invocation_started = time.perf_counter()
+            if ask_request.offline_mode:
+                raw = await asyncio.wait_for(
+                    _call_ollama(ask_request.offline_model, prompt),
+                    timeout=invocation_timeout,
+                )
+            else:
+                message = await _invoke_structured_model_with_capacity(
+                    model, prompt, timeout=invocation_timeout
+                )
+                raw = clean_thinking_content(extract_text_content(message.content))
+                _STRUCTURED_PROVIDER_CIRCUIT.record_success(final_answer_model_id)
+            generation_ms = (time.perf_counter() - invocation_started) * 1000
+            logger.info(
+                "Feature005 stage=generation_done request_id={} elapsed_ms={:.0f} raw_preview={}",
+                request_id,
+                generation_ms,
+                raw[:500] if raw else "None",
+            )
+            validation_started = time.perf_counter()
+            output = parse_structured_answer(raw)
+            if not v2_enabled:
+                # Rollback path keeps the former deterministic claim repair and
+                # source supplementation. V2 sends model output directly to the
+                # single claim/citation validator below; coverage cannot rewrite
+                # or remove a separately valid claim.
+                output = enforce_explicit_facet_claims(
+                    issues=issues,
+                    output=output,
+                    evidence_by_id=evidence_by_id,
+                    coverage_matrix=coverage_matrix,
+                )
+                output = supplement_rule_source_diversity(
+                    request_id=request_id,
+                    issues=issues,
+                    output=output,
+                    evidence_by_id=evidence_by_id,
+                    coverage_matrix=coverage_matrix,
+                )
+            sections, aggregate, structured_trace = render_structured_answer(
+                request_id=request_id,
+                issues=issues,
+                output=output,
+                evidence_by_id=evidence_by_id,
+                role=str(ask_request.role or "citizen"),
+                coverage_matrix=coverage_matrix,
+            )
+            gate_pass = bool((structured_trace.get("quality_gate") or {}).get("pass"))
+            logger.info("Quality gate check: pass={} quality_gate={} trace={}", gate_pass, structured_trace.get("quality_gate"), structured_trace)
+            if not gate_pass:
+                error_category = "invalid_output"
+                provider_error_code = error_category
+                (
+                    sections,
+                    aggregate,
+                    structured_trace,
+                    answer_mode,
+                ) = verified_provider_fallback(error_category)
+            validation_ms += (time.perf_counter() - validation_started) * 1000
+        except _DeterministicPreflight:
+            error_category = "none"
+            provider_error_code = None
+            logger.info(
+                "Feature005 stage=deterministic_preflight request_id={}",
+                request_id,
+            )
+        except StructuredProviderCircuitOpen as exc:
+            if str(exc) == "total_budget_exhausted":
+                error_category = "total_budget_exhausted"
+            else:
+                error_category = "provider_circuit_open"
+            provider_error_code = error_category
+            (
+                sections,
+                aggregate,
+                structured_trace,
+                answer_mode,
+            ) = verified_provider_fallback(error_category)
+            structured_trace["provider_failure_reason"] = str(exc)
+            logger.info(
+                "Feature005 stage=provider_circuit_open request_id={} reason={}",
+                request_id,
+                str(exc),
+            )
+        except asyncio.TimeoutError:
+            generation_ms = (
+                (time.perf_counter() - invocation_started) * 1000
+                if invocation_started is not None
+                else 0.0
+            )
+            if not ask_request.offline_mode:
+                _STRUCTURED_PROVIDER_CIRCUIT.record_failure(
+                    final_answer_model_id,
+                    "provider_timeout",
+                )
+            logger.warning(
+                "Feature005 stage=generation_timeout request_id={} elapsed_ms={:.0f}",
+                request_id,
+                generation_ms,
+            )
+            error_category = "provider_timeout"
+            provider_error_code = error_category
+            (
+                sections,
+                aggregate,
+                structured_trace,
+                answer_mode,
+            ) = verified_provider_fallback(error_category)
+            structured_trace["fallback_error_class"] = "TimeoutError"
+        except Exception as exc:
+            generation_ms = (
+                (time.perf_counter() - invocation_started) * 1000
+                if invocation_started is not None and generation_ms == 0.0
+                else generation_ms
+            )
+            logger.warning("Structured legal answer fallback: {} detail={} raw={}", exc.__class__.__name__, exc, raw if 'raw' in locals() else 'no-raw')
+            error_category = classify_structured_provider_error(exc)
+            if error_category.startswith("provider_") and not ask_request.offline_mode:
+                _STRUCTURED_PROVIDER_CIRCUIT.record_failure(
+                    final_answer_model_id,
+                    error_category,
+                )
+            provider_error_code = error_category
+            (
+                sections,
+                aggregate,
+                structured_trace,
+                answer_mode,
+            ) = verified_provider_fallback(error_category)
+            structured_trace["fallback_error_class"] = exc.__class__.__name__
+
+    total_ms = (time.perf_counter() - stage_started) * 1000
+    metric = build_section_grounding_metric(
+        request_id=request_id,
+        statuses=[section.status for section in sections],
+        stage_timings_ms={
+            "retrieval": retrieval_ms,
+            "provisioning": provisioning_ms,
+            "generation": generation_ms,
+            "validation": validation_ms,
+            "end_to_end": total_ms,
+        },
+        repair_count=0,
+        completed=True,
+        error_category=error_category,
+    )
+    document_ids = {
+        str(row.get("document_id") or row.get("law_number") or "")
+        for row in all_results
+        if row.get("document_id") or row.get("law_number")
+    }
+    _, sanitization_summary = project_legal_evidence_rows(all_results)
+    missing_coverage_count = sum(
+        1
+        for facets in coverage_matrix.values()
+        for facet in facets
+        if not bool(facet.get("evidence_available"))
+    )
+    rejected_count = sum(
+        1
+        for decisions in content_decision_trace.values()
+        for decision in decisions
+        if decision.get("decision") == "reject"
+    )
+    telemetry.record_legal_orchestration(
+        duration_ms=total_ms,
+        planner_mode=problem_map.planner_mode,
+        issue_count=len(problem_map.legal_issues),
+        query_count=sum(len(issue.queries) for issue in problem_map.legal_issues),
+        candidate_count=sum(len(rows) for rows in candidates_by_issue.values()),
+        rejected_count=rejected_count,
+        missing_coverage_count=missing_coverage_count,
+        supplemental_round=3 if full_corpus_used else 2 if expanded_used else 1,
+        removed_noise_count=int(sanitization_summary.get("removed_count") or 0),
+        prompt_chars=len(context),
+        outcome="success" if error_category == "none" else "failed",
+    )
+    normalized_intent = build_legal_intent(
+        ask_request.question,
+        legal_as_of=legal_as_of,
+    )
+    if answer_mode == NORMAL and str(aggregate.get("grounding_status") or "") in {
+        "ungrounded",
+        "insufficient_evidence",
+    }:
+        # An answer without a grounded aggregate must never be presented as a
+        # normal generated answer. The outer form-only catalog path may still
+        # explicitly restore NORMAL for an identity-confirmed official form.
+        answer_mode = SOURCE_VIEW_ONLY
+        structured_trace["answer_mode"] = answer_mode
+
+    return sections, aggregate, all_results, {
+        "timing_summary": {
+            "retrieval_ms": round(retrieval_ms, 1),
+            "provisioning_ms": round(provisioning_ms, 1),
+            "generation_ms": round(generation_ms, 1),
+            "validation_ms": round(validation_ms, 1),
+            "end_to_end_ms": round(total_ms, 1),
+        },
+        "pipeline_version": (
+            ANSWER_PIPELINE_V2_VERSION if answer_route is not None else "legacy"
+        ),
+        "answer_route": (
+            answer_route.answer_route if answer_route is not None else "legacy"
+        ),
+        "route_reason": (
+            answer_route.decision_reason if answer_route is not None else None
+        ),
+        "retrieval_decision": {
+            "ranking_strategy": "rrf_v2" if v2_enabled else "legacy_stack",
+            "learned_reranker_enabled": False if v2_enabled else True,
+            "learned_reranker_reason": (
+                "activation_gate_not_approved" if v2_enabled else "legacy_runtime_policy"
+            ),
+            "original_domain": domain_decision.original_domain,
+            "canonical_domain": domain_decision.canonical_domain,
+            "domain_mapping_reason": domain_decision.mapping_reason,
+            "fallback_tier": (
+                "full_corpus"
+                if full_corpus_used
+                else "expanded"
+                if expanded_used
+                else "exact"
+                if exact_article_request
+                else "domain"
+            ),
+        },
+        "evidence_packets": [
+            {
+                "issue_id": issue.issue_id,
+                "retrieval_tier": evidence_packets[issue.issue_id].retrieval_tier,
+                "source_count": len(
+                    evidence_packets[issue.issue_id].eligible_sources
+                ),
+                "coverage": list(coverage_matrix.get(issue.issue_id, [])),
+                "source_kinds": sorted(
+                    {
+                        str(row.get("evidence_kind") or "legal_chunk")
+                        for row in evidence_packets[issue.issue_id].eligible_sources
+                    }
+                ),
+            }
+            for issue in issues
+            if issue.issue_id in evidence_packets
+        ],
+        "data_release_id": build_data_release_id(runtime_versions),
+        "runtime_versions": runtime_versions,
+        "form_router": (
+            {
+                "procedure_id": (
+                    (v2_form_resolution or {}).get("procedure_id")
+                    or answer_route.procedure_id
+                ),
+                "status": (
+                    "resolved"
+                    if v2_form_resolution
+                    and v2_form_resolution.get("recommended_forms")
+                    else "fail_closed"
+                ),
+                "recommended_forms": list(
+                    (v2_form_resolution or {}).get("recommended_forms") or []
+                ),
+                "accepted_count": len(
+                    (v2_form_resolution or {}).get("recommended_forms") or []
+                ),
+                "rejected_count": len(
+                    (v2_form_resolution or {}).get("rejected_forms") or []
+                ),
+                "data_gap_status": (v2_form_resolution or {}).get("data_gap_status"),
+                "data_gap_reasons": list(
+                    (v2_form_resolution or {}).get("data_gap_reasons") or []
+                ),
+            }
+            if answer_route is not None
+            and answer_route.answer_route == "procedure_form"
+            else None
+        ),
+        "intent": normalized_intent.model_dump(mode="json"),
+        "validity_decision": {
+            "state": (
+                "expired_or_repealed"
+                if expired_source_blocked and not all_results
+                else "effective"
+                if all_results
+                else "unknown_or_stale"
+            ),
+            "legal_as_of": legal_as_of,
+            "filtered_reason_codes": sorted(validity_filtered_reasons),
+            "strict_current_answer": True,
+        },
+        "problem_map": {
+            "planner_mode": problem_map.planner_mode,
+            "fallback_reason": problem_map.fallback_reason,
+            "issue_count": len(problem_map.legal_issues),
+            "query_count": sum(
+                len(issue.queries) for issue in problem_map.legal_issues
+            ),
+            "missing_fact_count": len(problem_map.missing_facts),
+            "branch_count": len(problem_map.conditional_branches),
+            "issues": [
+                {
+                    "issue_id": issue.issue_id,
+                    "title": issue.title,
+                    "priority": issue.priority,
+                    "intent": issue.intent,
+                    "query_count": len(issue.queries),
+                }
+                for issue in problem_map.legal_issues
+            ],
+        },
+        "clarifying_questions": [
+            fact.question for fact in problem_map.missing_facts[:2]
+        ],
+        "issue_plan": [
+            {
+                "issue_id": issue.issue_id,
+                "title": issue.title,
+                "intent": issue.intent,
+                "domain": issue.domain,
+                "query": issue.query_text,
+                "candidate_count": len(candidates_by_issue.get(issue.issue_id, [])),
+                "selected_count": len(selected_by_issue.get(issue.issue_id, [])),
+                "decisions": decision_trace.get(issue.issue_id, []),
+                "content_decisions": content_decision_trace.get(issue.issue_id, []),
+            }
+            for issue in issues
+        ],
+        "expanded_retrieval_used": expanded_used,
+        "full_corpus_retrieval_used": full_corpus_used,
+        "retrieval_timed_out": retrieval_timed_out,
+        "total_budget_seconds": total_budget_seconds,
+        "supplemental_round": 3 if full_corpus_used else 2 if expanded_used else 1,
+        "sanitization_summary": sanitization_summary,
+        "official_procedure_evidence": official_procedure_trace,
+        "exact_article_gate": exact_article_gate,
+        "source_diversity": {
+            "document_count": len(document_ids),
+            "selected_chunk_count": len(all_results),
+        },
+        "context_stats": {
+            "character_count": len(context),
+            "evidence_count": len(evidence_by_id),
+            "maximum_characters": context_limit,
+        },
+        "claim_validation": structured_trace,
+        "preflight_deterministic": bool(
+            structured_trace.get("preflight_deterministic")
+        ),
+        "expired_source_blocked": expired_source_blocked,
+        "validity_filtered_reasons": sorted(validity_filtered_reasons),
+        "answer_mode": answer_mode,
+        "provider_error_code": provider_error_code,
+        "metric": metric,
+    }
 
 
 def _get_ask_session_history(owner_key: str | None, session_id: str | None) -> list[dict]:
@@ -1237,13 +3285,9 @@ def _build_local_prompt(
             )
         )
 
+    # Canonical recommended_forms are attached after deterministic resolution.
+    # Never add legacy form records to an LLM context.
     form_context = ""
-    try:
-        from api.routers.ward_procedures import build_official_form_context
-
-        form_context = build_official_form_context(question)
-    except Exception as e:
-        logger.warning(f"Failed to load matching forms for local context: {str(e)}")
 
     source_block = (
         "\n\n".join(sources)
@@ -1268,6 +3312,7 @@ Yêu cầu bắt buộc (áp dụng mọi vai trò):
 - CHỈ trích số hiệu/điều/khoản có trong nguồn đã truy xuất. Không bịa điều luật, mức phạt, thời hạn, lệ phí.
 - Nếu nguồn không nêu phí/thời hạn/hồ sơ bắt buộc: ghi rõ "Nguồn hiện có không nêu nội dung này" hoặc "Chưa đủ căn cứ trong kho hiện tại".
 - Không thêm giấy tờ, cơ quan hoặc nơi lấy biểu mẫu từ kiến thức nền.
+- Khi nguồn đã nêu trực tiếp câu trả lời cho một mục được hỏi, phải nêu lại sự kiện đó trước. Tuyệt đối không nói "chưa xác minh" hoặc "nguồn không nêu" đối với nội dung đã có trong nguồn được cung cấp.
 - Nếu thiếu biểu mẫu chính thức: nói thẳng "Hệ thống chưa có biểu mẫu chính thức đã duyệt".
 - KHÔNG dùng mã nội bộ [legal:...], legal:123, chunk id, hay ngoặc vuông citation kỹ thuật.
 - Không mở đầu xã giao dài ("Chào anh, tôi hiểu..."). Đi thẳng vào kết luận.
@@ -1405,12 +3450,16 @@ async def _call_legal_retrieval(ask_request: AskRequest) -> dict:
                 legal_as_of=ask_request.legal_as_of,
                 event_date=ask_request.event_date,
             ).isoformat(),
+            "as_of_explicit": bool(
+                ask_request.legal_as_of or ask_request.event_date
+            ),
             "domain": domain,
             "include_trace": bool(
                 ask_request.show_rag_trace and ask_request.role == "admin"
             ),
             "scope_filter": scope_filter,
             "retrieval_tier": tier,
+            "audience": str(ask_request.role or "citizen"),
         }
         return await get_legal_search_client().search(payload)
 
@@ -1469,8 +3518,8 @@ async def _call_ollama(model: str, prompt: str) -> str:
                 "prompt": prompt,
                 "stream": False,
                 "options": {
-                    "temperature": 0.05,
-                    "top_p": 0.9,
+                    "temperature": 0.0,
+                    "top_p": 1.0,
                     "num_ctx": LOCAL_NUM_CTX,
                     "num_predict": LOCAL_NUM_PREDICT,
                 },
@@ -1537,7 +3586,7 @@ def _resolve_citation_source_url(item: dict) -> str:
 def _build_citations_from_retrieval(
     retrieval_or_results: dict | list | None,
     answer_text: str | None = None,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     """Normalize retrieval hits into citation objects with links when available.
 
     Each citation aims to include:
@@ -1645,8 +3694,7 @@ def _build_citations_from_retrieval(
         if article_number and pdf_url:
             pdf_url = f"{pdf_url}?article={article_number}"
             
-        citations.append(
-            {
+        citation: dict[str, Any] = {
                 "chunk_id": chunk_id,  # retained for audit/trace only
                 "doc_id": doc_id,
                 "law_number": law_number,
@@ -1655,6 +3703,11 @@ def _build_citations_from_retrieval(
                 "article_title": str(item.get("article_title") or ""),
                 "clause_number": str(item.get("clause_number") or "").strip(),
                 "point_number": str(item.get("point_number") or "").strip(),
+                # The retriever returns document_status for article hits. Keep
+                # that verified eligibility visible to API consumers instead
+                # of dropping it and making an active official citation look
+                # unverified at the answer boundary.
+                "effective_status": status or None,
                 # Source provenance is retained for audit. The default Ask link
                 # remains the internal viewer, never this external URL.
                 "source_url": raw_source_url,
@@ -1664,13 +3717,32 @@ def _build_citations_from_retrieval(
                     "effective_date": str(item.get("effective_date") or "").strip(),
                     "source_url": raw_source_url,
                 },  # link gốc VBPL làm link phụ
+                "validity_sync": format_public_validity_sync(item.get("validity_sync")),
+                "authority_level": str(item.get("authority_level") or "").strip(),
+                "authority_label": str(item.get("authority_label") or "").strip(),
                 "internal_url": internal_url,  # link viewer nội bộ (frontend) làm link chính
                 "pdf_url": pdf_url,
                 "fallback_search_url": f"https://vbpl.vn/van-ban/tim-kiem?q={urllib.parse.quote_plus(law_number)}" if law_number else "",
                 "link_status": "internal_indexed" if doc_id else ("external_recorded" if raw_source_url else "missing"),
                 "label": natural_label or "Văn bản pháp luật",
             }
+        proof_projection = enrich_public_citation(
+            {
+                **item,
+                **citation,
+                "internal_url": internal_url,
+            }
         )
+        for proof_field in (
+            "verification_level",
+            "verification_status",
+            "verification_reason",
+            "viewer_url",
+            "proof",
+        ):
+            if proof_field in proof_projection:
+                citation[proof_field] = proof_projection[proof_field]
+        citations.append(citation)
     return citations[:3]
 
 
@@ -1921,7 +3993,8 @@ def _extract_retrieval_results(retrieval_or_evidence: dict | list) -> list[dict]
             "official_level": item.get("official_level"),
             "domain": item.get("domain") or item.get("domain_slug") or item.get("issue_domain"),
             "document_status": item.get("document_status"),
-            "article_status": item.get("article_status"),
+            "article_status": item.get("effective_article_status") or item.get("article_status"),
+            "effective_article_status": item.get("effective_article_status"),
             "request_id": item.get("request_id"),
             "issue_id": item.get("issue_id"),
             "issue_domain": item.get("issue_domain"),
@@ -1929,6 +4002,9 @@ def _extract_retrieval_results(retrieval_or_evidence: dict | list) -> list[dict]
             "score": item.get("score") or item.get("final_score"),
             "source_url": item.get("source_url"),
             "content": item.get("content"),
+            "validity_sync": item.get("validity_sync") or {},
+            "authority_level": item.get("authority_level"),
+            "authority_label": item.get("authority_label"),
         }
 
     if isinstance(retrieval_or_evidence, dict):
@@ -2031,6 +4107,44 @@ def _audit_trace_snapshot(trace: dict | list | None) -> dict:
 
     section_trace = trace.get("section_orchestration")
     if isinstance(section_trace, dict):
+        for key in (
+            "pipeline_version",
+            "answer_route",
+            "route_reason",
+            "data_release_id",
+        ):
+            value = section_trace.get(key)
+            if isinstance(value, (str, int, float, bool)):
+                snapshot[key] = value
+
+        retrieval_decision = section_trace.get("retrieval_decision")
+        if isinstance(retrieval_decision, dict):
+            snapshot["retrieval_decision"] = {
+                key: retrieval_decision.get(key)
+                for key in (
+                    "ranking_strategy",
+                    "learned_reranker_enabled",
+                    "learned_reranker_reason",
+                )
+                if isinstance(
+                    retrieval_decision.get(key), (str, int, float, bool)
+                )
+            }
+
+        runtime_versions = section_trace.get("runtime_versions")
+        if isinstance(runtime_versions, dict):
+            snapshot["runtime_versions"] = {
+                key: runtime_versions.get(key)
+                for key in (
+                    "app_version",
+                    "index_collection",
+                    "embedding_fingerprint",
+                    "validity_snapshot_sha256",
+                    "reranker_version",
+                )
+                if isinstance(runtime_versions.get(key), (str, int, float, bool))
+            }
+
         issues = section_trace.get("issues")
         statuses = []
         if isinstance(issues, list):
@@ -2103,7 +4217,11 @@ WARD_DOMAIN_CATALOG: list[dict[str, Any]] = [
         "keywords": [
             "xay dung", "xây dựng", "giay phep xay dung", "giấy phép xây dựng",
             "so do", "sổ đỏ", "sang ten", "sang tên", "dat dai", "đất đai",
-            "nha o", "nhà ở", "chuyen nhuong dat", "quy hoach",
+            "nha o", "nhà ở", "chuyen nhuong dat", "quy hoach", "khu dat",
+            "dat xen ket", "thu hoi dat", "dien tich dat",
+            "chung cu", "chung cư", "nha chung cu", "nhà chung cư",
+            "ban quan tri", "ban quản trị", "cong nhan ban quan tri",
+            "công nhận ban quản trị",
         ],
     },
     {
@@ -2113,6 +4231,9 @@ WARD_DOMAIN_CATALOG: list[dict[str, Any]] = [
         "keywords": [
             "tro cap", "trợ cấp", "bao tro", "bảo trợ", "xa hoi", "xã hội",
             "ngheo", "nghèo", "khuyet tat", "khuyết tật", "y te", "giao duc",
+            "truong tieu hoc", "trường tiểu học", "truong mam non", "trường mầm non",
+            "truong trung hoc", "trường trung học", "co so giao duc", "cơ sở giáo dục",
+            "giai the truong", "giải thể trường", "thanh lap truong", "thành lập trường",
         ],
     },
     {
@@ -2157,6 +4278,7 @@ WARD_DOMAIN_CATALOG: list[dict[str, Any]] = [
 def _ascii_fold_simple(value: str) -> str:
     text = unicodedata.normalize("NFD", value or "")
     text = "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
+    text = text.replace("đ", "d").replace("Đ", "D")
     return text.casefold()
 
 
@@ -2236,6 +4358,12 @@ def _domain_mismatch_response(
         question=question,
         answer=answer,
         grounding_status=status,
+        answer_status="clarifying",
+        fallback_tier="clarification",
+        canonical_domain=canonicalize_legal_domain(suggested_domain),
+        evidence_count=0,
+        coverage_warning="Cần chọn đúng lĩnh vực trước khi truy xuất căn cứ.",
+        blocked_reason="domain_mismatch",
         domain_mismatch=mismatch,
         selected_domain=selected_domain,
         suggested_domain=suggested_domain,
@@ -2283,7 +4411,12 @@ def _as_reference_procedure(procedure_detail: dict | None) -> dict | None:
 
 
 
-def _procedure_response_fields(procedure_detail: dict | None, question: str | None = None) -> tuple[dict | None, list[dict] | None, str | None]:
+def _procedure_response_fields(
+    procedure_detail: dict | None,
+    question: str | None = None,
+    *,
+    role: str = "citizen",
+) -> tuple[dict | None, list[dict] | None, str | None]:
     """Return a reference procedure plus only explicitly requested valid forms."""
     proc = _as_reference_procedure(procedure_detail)
     form_intent = bool(question and _question_requests_forms(question))
@@ -2310,13 +4443,18 @@ def _procedure_response_fields(procedure_detail: dict | None, question: str | No
             raw_forms = list((procedure_detail or {}).get("recommended_forms") or [])
             matched_ids = list((procedure_detail or {}).get("matched_procedure_ids") or [])
             ranked = _rank_forms_for_question(
-                question or "", raw_forms, limit=3,
+                question or "", raw_forms, limit=12,
                 matched_procedure_ids=matched_ids,
                 selected_domain=str(proc.get("domain_slug") or "") or None,
+                role=role,
             )
             recommended = ranked or None
             primary_id = str(proc.get("id") or "")
-            proc["forms"] = [form for form in ranked if str(form.get("procedure_id") or "") == primary_id][:2]
+            proc["forms"] = [
+                form
+                for form in ranked
+                if str(form.get("procedure_id") or "") == primary_id
+            ][:12]
             proc["recommended_forms"] = list(ranked)
             # An explicit request may match a workflow but still have no approved
             # file. Make that absence explicit without inventing a template.
@@ -2345,6 +4483,66 @@ def _queue_form_discovery_if_needed(question: str | None, recommended_forms: lis
         # Missing-form discovery is optional and must never affect answering.
         logger.debug("Unable to queue missing-form discovery", exc_info=True)
 
+
+def _build_form_provenance_trace(
+    *,
+    question: str | None,
+    procedure_match: dict | None,
+    accepted_forms: list[dict] | None,
+) -> dict[str, Any]:
+    """Build privacy-safe form acceptance/rejection reasons for Admin trace."""
+
+    requested = bool(question and _question_requests_forms(question))
+    accepted = [dict(item) for item in (accepted_forms or [])]
+    accepted_keys = {
+        str(item.get("form_id") or item.get("download_url") or "")
+        for item in accepted
+    }
+    rejected: list[dict[str, Any]] = []
+    for item in list((procedure_match or {}).get("recommended_forms") or []):
+        form = dict(item)
+        key = str(form.get("form_id") or form.get("download_url") or "")
+        if key and key in accepted_keys:
+            continue
+        reasons: list[str] = []
+        if form.get("official_level") != "official":
+            reasons.append("not_official")
+        if form.get("review_status") != "approved":
+            reasons.append("not_approved")
+        if form.get("has_official_file") is not True:
+            reasons.append("missing_official_file")
+        if not str(form.get("download_url") or "").strip():
+            reasons.append("missing_download_url")
+        if not str(form.get("procedure_id") or "").strip():
+            reasons.append("missing_procedure_binding")
+        rejected.append(
+            {
+                "form_id": str(form.get("form_id") or "") or None,
+                "procedure_id": str(form.get("procedure_id") or "") or None,
+                "reasons": reasons or ["not_selected_for_question"],
+            }
+        )
+    accepted_trace = [
+        {
+            "form_id": str(item.get("form_id") or "") or None,
+            "procedure_id": str(item.get("procedure_id") or "") or None,
+            "official_level": item.get("official_level"),
+            "review_status": item.get("review_status"),
+            "has_official_file": item.get("has_official_file") is True,
+            "download_url_available": bool(item.get("download_url")),
+        }
+        for item in accepted
+    ]
+    return {
+        "requested": requested,
+        "accepted": accepted_trace,
+        "rejected": rejected,
+        "catalog_resolution": dict(
+            (procedure_match or {}).get("form_resolution_trace") or {}
+        ),
+        "forms_unavailable": requested and not bool(accepted_trace),
+    }
+
 def _normalize_procedure_query(question: str) -> str:
     """Lowercase + strip accents for robust Vietnamese phrase matching."""
     import unicodedata
@@ -2355,6 +4553,13 @@ def _normalize_procedure_query(question: str) -> str:
     value = value.casefold()
     value = re.sub(r"\s+", " ", value).strip()
     return value
+
+
+@lru_cache(maxsize=1)
+def _get_canonical_form_catalog() -> FormCatalog:
+    """Load the immutable versioned catalog once per API process."""
+
+    return FormCatalog.load_default()
 
 
 def _question_requests_forms(question: str) -> bool:
@@ -2386,6 +4591,258 @@ def _question_requests_forms(question: str) -> bool:
         and re.search(r"\b(tai|xin|can|gui|cung cap|dien|viet|nop)\b", q)
     )
 
+
+def _forms_unavailable_for_question(
+    question: str | None,
+    recommended_forms: list[dict] | None,
+) -> bool:
+    """Apply the strict explicit-form detector consistently on every path."""
+
+    return bool(
+        _question_requests_forms(str(question or ""))
+        and not recommended_forms
+    )
+
+
+def _append_verified_form_answer(
+    answer: str,
+    *,
+    question: str,
+    recommended_forms: list[dict] | None,
+) -> str:
+    """Append only hard-gated form metadata, or one explicit safe gap."""
+
+    if not _question_requests_forms(question):
+        return answer
+    forms = [
+        form
+        for form in (recommended_forms or [])
+        if str(form.get("review_status") or "").casefold() == "approved"
+        and str(form.get("official_level") or "").casefold() == "official"
+        and form.get("source_url")
+        and form.get("download_url")
+        and form.get("procedure_identity_confirmed") is True
+    ]
+    if not forms:
+        notice = (
+            "## Biểu mẫu chính thức\n"
+            "Hệ thống chưa có biểu mẫu chính thức đã duyệt và đủ điều kiện "
+            "phát hành cho thủ tục này."
+        )
+        return answer if notice in answer else f"{answer}\n\n{notice}".strip()
+    lines = ["## Biểu mẫu chính thức đã xác minh"]
+    for form in forms:
+        name = str(form.get("name") or form.get("display_name") or "").strip()
+        code = str(form.get("form_code") or "").strip()
+        label = f"{name} ({code})" if code else name
+        lines.append(f"- {label}")
+        effective_from = str(form.get("effective_from") or "").strip()
+        if effective_from:
+            lines.append(f"  - Hiệu lực từ: {effective_from}")
+        legal_basis = [
+            str(value).strip()
+            for value in form.get("legal_basis") or []
+            if str(value).strip()
+        ]
+        if legal_basis:
+            lines.append("  - Căn cứ: " + "; ".join(legal_basis))
+        source_url = str(form.get("source_url") or "").strip()
+        if source_url:
+            lines.append(f"  - [Nguồn biểu mẫu chính thức]({source_url})")
+        download_url = str(form.get("download_url") or "").strip()
+        if download_url:
+            lines.append(f"  - [Tải biểu mẫu]({download_url})")
+    section = "\n".join(lines)
+    policy = classify_question(question)
+    requested = set(policy.get("required_sections") or [])
+    form_lookup_only = requested <= {
+        "conclusion",
+        "official_forms",
+        "legal_basis_links",
+    }
+    normalized_answer = _normalize_procedure_query(answer)
+    if len(answer.strip()) < 260 and any(
+        marker in normalized_answer
+        for marker in (
+            "chua co nguon hien hanh du de xac minh noi dung nay",
+            "chua tim thay nguon hien hanh ho tro truc tiep",
+            "da tim thay nguon co lien quan nhung chua xac minh du",
+        )
+    ):
+        answer = (
+            "Phần biểu mẫu đã được xác minh bên dưới. Các nội dung khác của hồ sơ "
+            "chỉ được kết luận khi hệ thống có đủ nguồn hiện hành hỗ trợ trực tiếp."
+        )
+    if form_lookup_only:
+        labels = [
+            str(form.get("name") or form.get("display_name") or "").strip()
+            for form in forms
+        ]
+        conclusion = (
+            "## Kết luận\n"
+            "Theo danh mục biểu mẫu chính thức đã xác minh, thủ tục này sử dụng: "
+            + "; ".join(label for label in labels if label)
+            + "."
+        )
+        return f"{conclusion}\n\n{section}".strip()
+    return answer if section in answer else f"{answer}\n\n{section}".strip()
+
+
+def _is_verified_form_lookup_only(
+    question_policy: Mapping[str, Any],
+    recommended_forms: list[dict] | None,
+) -> bool:
+    requested = set(question_policy.get("required_sections") or [])
+    if not question_policy.get("requests_form") or not requested <= {
+        "conclusion",
+        "official_forms",
+        "legal_basis_links",
+    }:
+        return False
+    forms = list(recommended_forms or [])
+    return bool(forms) and all(
+        str(form.get("review_status") or "").casefold() == "approved"
+        and str(form.get("official_level") or "").casefold() == "official"
+        and form.get("source_url")
+        and form.get("download_url")
+        and form.get("procedure_id")
+        and form.get("procedure_identity_confirmed") is True
+        for form in forms
+    )
+
+
+def _merge_form_catalog_citations(
+    citations: list[dict[str, Any]] | None,
+    recommended_forms: list[dict] | None,
+) -> list[dict[str, Any]]:
+    merged = list(citations or [])
+    seen = {
+        (
+            str(item.get("law_number") or ""),
+            str(item.get("source_url") or ""),
+        )
+        for item in merged
+    }
+    for form in recommended_forms or []:
+        if (
+            str(form.get("review_status") or "").casefold() != "approved"
+            or str(form.get("official_level") or "").casefold() != "official"
+            or form.get("procedure_identity_confirmed") is not True
+        ):
+            continue
+        source_url = str(form.get("source_url") or "").strip()
+        if not source_url:
+            continue
+        bases = [
+            str(value).strip()
+            for value in form.get("legal_basis") or []
+            if str(value).strip()
+        ] or [""]
+        for basis in bases:
+            key = (basis, source_url)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append({
+                "document_title": "Nguồn biểu mẫu chính thức",
+                "law_number": basis or None,
+                "article_number": None,
+                "effective_status": "active",
+                "source_url": source_url,
+                "verification_source": "approved_form_catalog",
+            })
+    return merged
+
+
+def _has_verified_released_form(
+    recommended_forms: list[dict] | None,
+) -> bool:
+    """Return true only for a catalog form safe for public release."""
+
+    return any(
+        str(form.get("review_status") or "").casefold() == "approved"
+        and str(form.get("official_level") or "").casefold() == "official"
+        and bool(form.get("source_url"))
+        and bool(form.get("download_url"))
+        and form.get("procedure_identity_confirmed") is True
+        for form in (recommended_forms or [])
+        if isinstance(form, Mapping)
+    )
+
+
+def _reconcile_verified_form_sections(
+    sections: list[Any] | None,
+    *,
+    section_trace: Mapping[str, Any] | None,
+    recommended_forms: list[dict] | None,
+) -> tuple[list[Any], dict[str, Any]]:
+    """Replace a retrieval-only form gap with the verified catalog result.
+
+    Legal retrieval normally has no form-file evidence, while the separately
+    governed catalog does. Once a released form is verified, keeping an
+    ``insufficient`` form card beside the downloadable form is contradictory.
+    Only a form-only issue is removed; mixed fee/form or other legal issues are
+    preserved unchanged.
+    """
+
+    current = list(sections or [])
+    if not current or not _has_verified_released_form(recommended_forms):
+        return current, aggregate_answer_sections(current)
+
+    form_only_ids: set[str] = set()
+    claim_trace = (
+        section_trace.get("claim_validation")
+        if isinstance(section_trace, Mapping)
+        else None
+    )
+    if isinstance(claim_trace, Mapping):
+        for item in claim_trace.get("issues") or []:
+            if not isinstance(item, Mapping):
+                continue
+            requested = {
+                str(value or "").strip()
+                for value in item.get("requested_facets") or []
+                if str(value or "").strip()
+            }
+            if requested == {"form"}:
+                form_only_ids.add(str(item.get("issue_id") or ""))
+
+    reconciled = [
+        section
+        for section in current
+        if str(getattr(section, "issue_id", "")) not in form_only_ids
+        and _normalize_procedure_query(str(getattr(section, "title", "")))
+        not in {"bieu mau", "mau bieu", "form"}
+    ]
+    return reconciled, aggregate_answer_sections(reconciled)
+
+
+def _structured_source_gap(
+    section_trace: Mapping[str, Any] | None,
+    *,
+    has_verified_form: bool = False,
+) -> list[str]:
+    """Expose missing structured facets without leaking internal trace data."""
+
+    if not isinstance(section_trace, Mapping):
+        return []
+    claim_trace = section_trace.get("claim_validation")
+    if not isinstance(claim_trace, Mapping):
+        return []
+    gaps: list[str] = []
+    for issue in claim_trace.get("issues") or []:
+        if not isinstance(issue, Mapping):
+            continue
+        for key in ("missing_facets", "unavailable_facets"):
+            for raw in issue.get(key) or []:
+                facet = str(raw or "").strip()
+                if has_verified_form and facet == "form":
+                    continue
+                if facet and facet not in gaps:
+                    gaps.append(facet)
+    return gaps
+
+
 def _rank_forms_for_question(
     question: str,
     forms: list[dict],
@@ -2394,6 +4851,7 @@ def _rank_forms_for_question(
     matched_procedure_ids: list[str] | None = None,
     selected_domain: str | None = None,
     ward_scope: str | None = None,
+    role: str = "citizen",
 ) -> list[dict]:
     """Rank exact, downloadable official forms for the active question.
 
@@ -2410,7 +4868,10 @@ def _rank_forms_for_question(
     q_tokens = {token for token in re.findall(r"[a-z0-9]{3,}", q)}
     matched = set(matched_procedure_ids or [proc_id for proc_id, _score, _phrases in _detect_matched_procedure_ids(question)])
     detected_domain = selected_domain or (_detect_question_domain(question) or {}).get("slug")
-    max_forms = max(1, min(int(limit or 3), 3))
+    # A procedure can have more than three mandatory forms. Keep the public
+    # response bounded, but never omit a fourth required form for a compact
+    # card layout.
+    max_forms = max(1, min(int(limit or 3), 12))
 
     intent_map = {
         "dang_ky_khai_sinh": ("khai sinh", "giay khai sinh"),
@@ -2433,6 +4894,13 @@ def _rank_forms_for_question(
             and form.get("has_official_file") is True
             and str(form.get("download_url") or "").strip()
         ):
+            continue
+        audience = str(form.get("audience") or "citizen")
+        if role == "citizen" and audience not in {"citizen", "both"}:
+            continue
+        if role == "officer" and audience not in {"citizen", "officer", "both"}:
+            continue
+        if role not in {"citizen", "officer", "admin"}:
             continue
         procedure_id = str(form.get("procedure_id") or "").strip()
         # A form with no bound procedure must not be guessed from a domain.
@@ -2532,13 +5000,28 @@ def _form_record_matches_specific_procedure(record: dict, procedure_id: str) -> 
 def _collect_official_forms_for_procedure(
     procedure_id: str,
     procedure_meta: dict | None = None,
+    *,
+    role: str = "citizen",
 ) -> list[dict]:
     """Return only approved official forms with real downloadable files.
 
     Never invent seed/synthetic download URLs.
     """
+    canonical_catalog = _get_canonical_form_catalog()
+    canonical_id = normalize_procedure_id(procedure_id)
+    if canonical_catalog.get_procedure(canonical_id):
+        resolved = canonical_catalog.resolve_forms(
+            "",
+            role=role,
+            procedure_ids=[canonical_id],
+            limit=12,
+        )
+        return list(resolved["recommended_forms"])
+
     from pathlib import Path as _Path
+
     from api.routers.ward_procedures import (
+        HAI_PHONG_PROCEDURES_SEED,
         OFFICIAL_FORMS_CATALOG_PATH,
         OFFICIAL_FORMS_INDEX_PATH,
         _get_approved_form_ids,
@@ -2547,7 +5030,6 @@ def _collect_official_forms_for_procedure(
         _validate_form_file_integrity,
         normalize_form_display_name,
         normalize_form_record,
-        HAI_PHONG_PROCEDURES_SEED,
     )
 
     forms: list[dict] = []
@@ -2683,6 +5165,85 @@ def _collect_official_forms_for_procedure(
 
 
 def _detect_matched_procedure_ids(question: str) -> list[tuple[str, int, list[str]]]:
+    catalog = _get_canonical_form_catalog()
+    catalog_matches = catalog.resolve_procedures(
+        question,
+        limit=6,
+    )
+    raw_matches = list(catalog_matches["matches"])
+    strong_matches = [
+        item
+        for item in raw_matches
+        if item.get("match_type") != "form_code"
+    ]
+    if strong_matches:
+        # Descriptive procedure/form wording is direct intent evidence.  A
+        # lower-ranked shared code (``01``, ``CT01``...) is only retrieval
+        # context and must not create extra procedures or public form cards.
+        def matched_tokens(item: Mapping[str, Any]) -> set[str]:
+            return max(
+                (
+                    set(_normalize_procedure_query(phrase).split())
+                    for phrase in item.get("matched_phrases") or []
+                    if _normalize_procedure_query(phrase)
+                ),
+                key=len,
+                default=set(),
+            )
+
+        # Remove a generic procedure whose full matched wording is contained
+        # by a more specific, higher-scored procedure in the same domain (for
+        # example ``tro cap xa hoi`` inside ``huong tro cap huu tri xa hoi``).
+        # Distinct explicit procedures in the same question remain intact.
+        strong_matches = [
+            item
+            for item in strong_matches
+            if not any(
+                matched_tokens(item)
+                and matched_tokens(item) < matched_tokens(other)
+                and int(other.get("score") or 0) > int(item.get("score") or 0)
+                and str(
+                    (catalog.get_procedure(str(other.get("procedure_id"))) or {}).get(
+                        "domain"
+                    )
+                    or ""
+                )
+                == str(
+                    (catalog.get_procedure(str(item.get("procedure_id"))) or {}).get(
+                        "domain"
+                    )
+                    or ""
+                )
+                for other in strong_matches
+                if other is not item
+            )
+        ]
+        raw_matches = strong_matches
+    elif catalog_matches.get("ambiguous"):
+        # A bare shared form code cannot identify one legal procedure safely.
+        raw_matches = []
+    else:
+        raw_matches = raw_matches[:1]
+    ranked_catalog = [
+        (
+            str(item["procedure_id"]),
+            int(item["score"]),
+            list(item.get("matched_phrases") or []),
+        )
+        for item in raw_matches
+    ]
+    if ranked_catalog:
+        return ranked_catalog
+
+    # Compatibility-only virtual intent. It never supplies a form or legal fact.
+    normalized_question = _normalize_procedure_query(question)
+    if any(
+        phrase in normalized_question
+        for phrase in ("ho chieu cho con", "ho chieu tre em", "cap ho chieu")
+    ):
+        return [("cap_ho_chieu_tre_em", 10, ["hộ chiếu trẻ em"])]
+    return []
+
     """Return ranked multi-procedure matches: (procedure_id, score, matched_phrases).
 
     Supports complex multi-intent questions without merging distinct procedures.
@@ -2753,12 +5314,63 @@ def _detect_matched_procedure_ids(question: str) -> list[tuple[str, int, list[st
     return scored
 
 
-def _build_procedure_payload(procedure_id: str, matched_phrases: list[str] | None = None) -> dict | None:
+def _build_procedure_payload(
+    procedure_id: str,
+    matched_phrases: list[str] | None = None,
+    *,
+    role: str = "citizen",
+) -> dict | None:
     from api.routers.ward_procedures import HAI_PHONG_PROCEDURES_SEED
+
+    canonical_catalog = _get_canonical_form_catalog()
+    canonical_id = normalize_procedure_id(procedure_id)
+    canonical = canonical_catalog.get_procedure(canonical_id)
+    if canonical:
+        form_resolution = canonical_catalog.resolve_forms(
+            "",
+            role=role,
+            procedure_ids=[canonical_id],
+            limit=12,
+        )
+        official_forms = list(form_resolution["recommended_forms"])
+        return {
+            "id": canonical_id,
+            "name": canonical.get("name"),
+            "department": canonical.get("receiving_authority"),
+            "domain_slug": canonical.get("domain"),
+            "steps": [],
+            "documents_required": [],
+            "duration": None,
+            "fee": None,
+            "forms": official_forms,
+            "matched_phrases": matched_phrases or [],
+            "is_reference_only": True,
+            "source": "canonical_procedure_catalog",
+            "label": "Tham chiếu thủ tục",
+            "has_official_forms": bool(official_forms),
+            "source_status": canonical.get("source_status"),
+            "review_status": canonical.get("review_status"),
+            "official_procedure_code": canonical.get("official_procedure_code"),
+            "official_procedure_url": canonical.get("official_procedure_url"),
+            "form_resolution_trace": {
+                "forms_unavailable": form_resolution["forms_unavailable"],
+                "data_gap_status": form_resolution.get("data_gap_status"),
+                "data_gap_reasons": form_resolution.get("data_gap_reasons", []),
+                "rejected_forms": form_resolution["rejected_forms"],
+            },
+            "disclaimer": (
+                "Thông tin thủ tục chỉ được hiển thị khi đã có nguồn chính thức; "
+                "biểu mẫu thiếu phê duyệt hoặc thiếu hiệu lực luôn bị loại."
+            ),
+        }
 
     # Virtual intents without seed catalog: expose metadata only, never fake forms.
     if procedure_id == "cap_ho_chieu_tre_em":
-        official_forms = _collect_official_forms_for_procedure(procedure_id, None)
+        official_forms = _collect_official_forms_for_procedure(
+            procedure_id,
+            None,
+            role=role,
+        )
         return {
             "id": procedure_id,
             "name": "Cấp hộ chiếu cho con/trẻ em",
@@ -2783,7 +5395,11 @@ def _build_procedure_payload(procedure_id: str, matched_phrases: list[str] | Non
     seed = next((item for item in HAI_PHONG_PROCEDURES_SEED if item.get("id") == procedure_id), None)
     if not seed:
         return None
-    official_forms = _collect_official_forms_for_procedure(procedure_id, seed)
+    official_forms = _collect_official_forms_for_procedure(
+        procedure_id,
+        seed,
+        role=role,
+    )
     return {
         "id": seed["id"],
         "name": seed["name"],
@@ -2815,6 +5431,7 @@ def _match_faqs_for_question(
 ) -> list[dict]:
     """Match approved FAQs for Ask UI from local seed/store. Fail soft if missing."""
     import json
+
     from api.data_paths import notebook_data_dir
 
     data_root = notebook_data_dir()
@@ -2822,14 +5439,31 @@ def _match_faqs_for_question(
     seed_path = data_root / "faq" / "faq_seed_haiphong_lechan.json"
 
     faqs: list[dict] = []
+    
+    # Try PostgreSQL first if configured
     try:
-        if store_path.exists():
-            data = json.loads(store_path.read_text(encoding="utf-8"))
-            faqs = list(data.get("faqs") or [])
-        elif seed_path.exists():
-            faqs = list(json.loads(seed_path.read_text(encoding="utf-8")))
+        from api.faq_governance_service import get_faq_governance_service
+        faq_service = get_faq_governance_service()
+        revisions = faq_service.repository.list_revisions()
+        # Keep only released FAQs
+        faqs = [r for r in revisions if r.get("public_state") == "released" or r.get("public_state") == "needs_review"]
+        # Map fields back to expected keys for the scoring logic
+        for f in faqs:
+            f["review_status"] = "approved"
+            if "canonical_domain" in f:
+                f["domain"] = f["canonical_domain"]
     except Exception:
-        return []
+        faqs = []
+
+    if not faqs:
+        try:
+            if store_path.exists():
+                data = json.loads(store_path.read_text(encoding="utf-8"))
+                faqs = list(data.get("faqs") or [])
+            elif seed_path.exists():
+                faqs = list(json.loads(seed_path.read_text(encoding="utf-8")))
+        except Exception:
+            return []
 
     faqs = [f for f in faqs if (f.get("review_status") or "approved") == "approved"]
     if domain:
@@ -2880,7 +5514,11 @@ def _match_faqs_for_question(
     return [f for _, f in scored[:limit]]
 
 
-def _match_procedure_detail(question: str) -> dict | None:
+def _match_procedure_detail(
+    question: str,
+    *,
+    role: str = "citizen",
+) -> dict | None:
     """Match one primary procedure + multi-procedure recommended forms.
 
     Rules:
@@ -2897,7 +5535,7 @@ def _match_procedure_detail(question: str) -> dict | None:
 
     built: list[dict] = []
     for proc_id, score, phrases in ranked:
-        payload = _build_procedure_payload(proc_id, phrases)
+        payload = _build_procedure_payload(proc_id, phrases, role=role)
         if not payload:
             continue
         payload["match_score"] = score
@@ -2991,17 +5629,51 @@ def _extract_recommended_forms(procedure_detail: dict | None, question: str | No
     return _rank_forms_for_question(
         question,
         list(procedure_detail.get("recommended_forms") or procedure_detail.get("forms") or []),
-        limit=3,
+        limit=12,
         matched_procedure_ids=list(procedure_detail.get("matched_procedure_ids") or []),
         selected_domain=str(procedure_detail.get("domain_slug") or "") or None,
     ) or None
+
+
+def _apply_m4_temporal_scope(ask_request: AskRequest) -> dict[str, Any]:
+    """Apply an exact query date to every downstream answer-validity gate."""
+
+    explicit = bool(ask_request.legal_as_of or ask_request.event_date)
+    computed_as_of = effective_legal_date(
+        legal_as_of=ask_request.legal_as_of,
+        event_date=ask_request.event_date,
+    )
+    classification = classify_legal_query(
+        ask_request.question,
+        requested_domain=ask_request.domain,
+        as_of=computed_as_of,
+        as_of_explicit=explicit,
+    )
+    if (
+        classification["retrieval_allowed"]
+        and classification["temporal_scope"] == "historical"
+        and not explicit
+        and classification["retrieval_as_of"]
+    ):
+        ask_request.legal_as_of = date.fromisoformat(
+            classification["retrieval_as_of"]
+        )
+    return classification
+
+
 async def _ask_local(ask_request: AskRequest, user_id: str | None = None, request=None) -> AskResponse:
     try:
+        # Keep the feature flag request-local on the offline path as well as
+        # the provider path.  The legacy path reads this value after answer
+        # verification even when section orchestration is disabled.
+        section_grounding = is_section_grounding_enabled()
+        m4_classification = _apply_m4_temporal_scope(ask_request)
         detected = _detect_question_domain(ask_request.question)
         question_policy = classify_question(
             ask_request.question,
             detected_domain=(detected or {}).get("slug") if detected else None,
         )
+        question_policy["structured_classification"] = m4_classification
         original_selected_domain = ask_request.domain
         soft_mismatch = bool(
             ask_request.role in ("citizen", "admin")
@@ -3021,8 +5693,15 @@ async def _ask_local(ask_request: AskRequest, user_id: str | None = None, reques
             ask_request.domain = detected.get("slug")
 
         retrieval = await _call_legal_retrieval(ask_request)
-        procedure_match = _match_procedure_detail(ask_request.question)
-        procedure_detail, recommended_forms, procedure_summary = _procedure_response_fields(procedure_match, ask_request.question)
+        procedure_match = _match_procedure_detail(
+            ask_request.question,
+            role=ask_request.role,
+        )
+        procedure_detail, recommended_forms, procedure_summary = _procedure_response_fields(
+            procedure_match,
+            ask_request.question,
+            role=ask_request.role,
+        )
         _queue_form_discovery_if_needed(ask_request.question, recommended_forms)
         matched_faqs = _match_faqs_for_question(
             ask_request.question,
@@ -3083,20 +5762,27 @@ async def _ask_local(ask_request: AskRequest, user_id: str | None = None, reques
         retrieval_results = _extract_retrieval_results(retrieval)
         # If the model itself admits no matching regulation, prefer a short insufficient answer.
         if _answer_admits_no_legal_basis(answer, retrieval_results):
-            resp = _insufficient_legal_evidence_response(
-                ask_request.question,
-                retrieval,
-                procedure_detail,
+            extractive_fallback = extractive_conclusion_from_evidence(
+                retrieval_results,
+                required_sections=question_policy.get("required_sections") or [],
             )
-            resp.selected_domain = original_selected_domain
-            resp.suggested_domain = (detected or {}).get("slug") if detected else None
-            resp.suggested_agency = (detected or {}).get("agency") if detected else None
-            resp.domain_mismatch = soft_mismatch
-            resp.detected_domain = (detected or {}).get("slug") if detected else None
-            resp.question_type = question_policy["question_type"]
-            resp.required_sections = question_policy.get("required_sections") or []
-            resp.forms_unavailable = bool(question_policy.get("requests_form") and not recommended_forms)
-            return resp
+            if extractive_fallback:
+                answer = extractive_fallback
+            else:
+                resp = _insufficient_legal_evidence_response(
+                    ask_request.question,
+                    retrieval,
+                    procedure_detail,
+                )
+                resp.selected_domain = original_selected_domain
+                resp.suggested_domain = (detected or {}).get("slug") if detected else None
+                resp.suggested_agency = (detected or {}).get("agency") if detected else None
+                resp.domain_mismatch = soft_mismatch
+                resp.detected_domain = (detected or {}).get("slug") if detected else None
+                resp.question_type = question_policy["question_type"]
+                resp.required_sections = question_policy.get("required_sections") or []
+                resp.forms_unavailable = bool(question_policy.get("requests_form") and not recommended_forms)
+                return resp
 
         # Gọi verify_and_ground_answer
         final_answer, grounding_status = _verify_and_ground_answer(
@@ -3111,6 +5797,27 @@ async def _ask_local(ask_request: AskRequest, user_id: str | None = None, reques
             answer_out, citations = _ensure_answer_has_source_links(final_answer, retrieval)
             answer_out, removed_claims = _guard_sensitive_claims(answer_out, retrieval)
         answer_out = _sanitize_answer_citation_display(answer_out, retrieval)
+        answer_out = _append_verified_form_answer(
+            answer_out,
+            question=ask_request.question,
+            recommended_forms=recommended_forms,
+        )
+        if not section_grounding:
+            answer_out = prepend_extractive_conclusion_when_supported(
+                answer_out,
+                retrieval_results,
+                required_sections=question_policy.get("required_sections") or [],
+            )
+        verified_form_lookup = _is_verified_form_lookup_only(
+            question_policy,
+            recommended_forms,
+        )
+        if verified_form_lookup:
+            citations = []
+            removed_claims = []
+            if grounding_status in {"ungrounded", "insufficient_evidence", "unknown"}:
+                grounding_status = "partially_grounded"
+        citations = _merge_form_catalog_citations(citations, recommended_forms)
         source_gap = missing_answer_sections(
             answer_out,
             question_policy["question_type"],
@@ -3122,6 +5829,11 @@ async def _ask_local(ask_request: AskRequest, user_id: str | None = None, reques
         rag_trace = _merge_claim_guard_into_trace(retrieval.get("trace") if isinstance(retrieval, dict) else None, removed_claims)
         if isinstance(rag_trace, dict):
             rag_trace["question_classification"] = question_policy
+            rag_trace["form_provenance"] = _build_form_provenance_trace(
+                question=ask_request.question,
+                procedure_match=procedure_match,
+                accepted_forms=recommended_forms,
+            )
         legal_as_of = effective_legal_date(
             legal_as_of=ask_request.legal_as_of,
             event_date=ask_request.event_date,
@@ -3130,19 +5842,51 @@ async def _ask_local(ask_request: AskRequest, user_id: str | None = None, reques
             retrieval_results,
             required_sections=question_policy.get("required_sections") or [],
             recommended_forms=recommended_forms,
+            answer=answer_out,
         )
         claim_validation = build_claim_validation(
             removed_claims=removed_claims,
             citations=citations,
             legal_as_of=legal_as_of,
-            answer=answer_out,
+            answer=None if verified_form_lookup else answer_out,
             coverage=evidence_coverage,
         )
+        if verified_form_lookup:
+            claim_validation.append({
+                "claim_type": "conclusion",
+                "status": "verified",
+                "reason": "approved_form_catalog_mapping",
+                "original": None,
+                "evidence_ids": list(
+                    evidence_coverage.get("conclusion", {}).get("evidence_ids") or []
+                ),
+                "legal_as_of": legal_as_of.isoformat(),
+            })
         answer_out = apply_claim_validation(answer_out, claim_validation)
+        # A claim guard may remove a model-written conclusion. Restore only a
+        # source-verbatim direct outcome and recompute its observable coverage.
+        answer_out = prepend_extractive_conclusion_when_supported(
+            answer_out,
+            retrieval_results,
+            required_sections=question_policy.get("required_sections") or [],
+        )
+        evidence_coverage = build_evidence_coverage(
+            retrieval_results,
+            required_sections=question_policy.get("required_sections") or [],
+            recommended_forms=recommended_forms,
+            answer=answer_out,
+        )
         answer_score_preview, quality_flags = quality_preview(
             coverage=evidence_coverage,
             grounding_status=grounding_status,
             claim_validation=claim_validation,
+            answer=answer_out,
+        )
+        answer_completeness = assess_answer_completeness(
+            question=ask_request.question,
+            answer=answer_out,
+            sources=retrieval_results,
+            orchestration_trace=rag_trace,
         )
         clarifying_questions = clarifying_questions_for_gaps(
             ask_request.question,
@@ -3169,6 +5913,14 @@ async def _ask_local(ask_request: AskRequest, user_id: str | None = None, reques
             )
             if tip.strip() not in answer_out:
                 answer_out = answer_out + tip
+        trust_fields = build_public_trust_projection(
+            trace=rag_trace if isinstance(rag_trace, Mapping) else None,
+            citations=citations,
+            answer_mode=(
+                VERIFIED_SOURCE_CONDENSED if verified_form_lookup else NORMAL
+            ),
+            provider_label="local",
+        )
         return AskResponse(
             answer=answer_out,
             question=ask_request.question,
@@ -3178,6 +5930,7 @@ async def _ask_local(ask_request: AskRequest, user_id: str | None = None, reques
                 else None
             ),
             grounding_status=grounding_status,
+            answer_completeness=answer_completeness,
             procedure_detail=procedure_detail,
             recommended_forms=recommended_forms,
             faqs=matched_faqs if 'matched_faqs' in locals() else None,
@@ -3190,7 +5943,10 @@ async def _ask_local(ask_request: AskRequest, user_id: str | None = None, reques
             question_type=question_policy["question_type"],
             detected_domain=question_policy.get("detected_domain"),
             required_sections=question_policy.get("required_sections") or [],
-            forms_unavailable=bool(question_policy.get("requests_form") and not recommended_forms),
+            forms_unavailable=_forms_unavailable_for_question(
+                ask_request.question,
+                recommended_forms,
+            ),
             source_gap=source_gap,
             evidence_coverage=evidence_coverage,
             claim_validation=claim_validation,
@@ -3199,6 +5955,7 @@ async def _ask_local(ask_request: AskRequest, user_id: str | None = None, reques
             clarifying_questions=clarifying_questions,
             quality_flags=quality_flags,
             answer_score_preview=answer_score_preview,
+            **trust_fields,
         )
     except httpx.ConnectError as exc:
         raise HTTPException(
@@ -3269,6 +6026,9 @@ def _normalize_legal_search_item(item: dict, index: int = 0) -> dict[str, Any]:
         "document_id": item.get("document_id"),
         "scope": item.get("scope"),
         "document_status": item.get("document_status"),
+        "validity_sync": item.get("validity_sync") or {},
+        "authority_level": item.get("authority_level"),
+        "authority_label": item.get("authority_label"),
         "created": str(item.get("effective_date") or item.get("issued_date") or ""),
         "updated": str(item.get("expired_date") or ""),
     }
@@ -3341,11 +6101,10 @@ async def _search_legal_documents(query: str, limit: int = 12, domain: str | Non
             "domain": domain_value,
             "include_trace": False,
             "scope_filter": scope_filter,
+            "as_of": date.today().isoformat(),
+            "as_of_explicit": False,
         }
-        async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.post(f"{LEGAL_SEARCH_URL}/search", json=payload)
-        response.raise_for_status()
-        return response.json()
+        return await get_legal_search_client().search(payload)
 
     try:
         data = await _search(selected_domain)
@@ -3707,11 +6466,59 @@ async def _deprecated_ask_knowledge_base_stream(
                 detail=f"Final answer model {final_id} not found",
             )
 
+        async def privacy_guard_stream() -> StreamingResponse:
+            try:
+                if not local_fallback_enabled():
+                    raise RuntimeError("local_fallback_disabled")
+                fallback_request = ask_request.model_copy(
+                    update={
+                        "offline_mode": True,
+                        "offline_model": RECOMMENDED_LOCAL_MODEL,
+                    }
+                )
+                fallback_result = await _ask_local(
+                    fallback_request,
+                    user_id=user_id,
+                    request=request,
+                )
+            except Exception:
+                fallback_result = _insufficient_legal_evidence_response(
+                    ask_request.question
+                ).model_copy(
+                    update={
+                        "answer_mode": SOURCE_VIEW_ONLY,
+                        "generation_provenance": {
+                            "mode": "cloud_blocked",
+                            "provider_label": "blocked",
+                            "model_label": None,
+                            "redaction_applied": False,
+                            "reason_code": "pii_redaction_incomplete",
+                        },
+                    }
+                )
+
+            async def guarded_stream() -> AsyncGenerator[str, None]:
+                yield f"data: {json.dumps({'type': 'final_answer', 'content': fallback_result.answer})}\n\n"
+                yield f"data: {json.dumps({'type': 'complete', 'final_answer': fallback_result.answer})}\n\n"
+
+            return StreamingResponse(guarded_stream(), media_type="text/event-stream")
+
+        try:
+            egress_decision = _prepare_ask_provider_egress(
+                ask_request.question,
+                strategy_model,
+                answer_model,
+                final_answer_model,
+            )
+        except ProviderEgressBlocked:
+            return await privacy_guard_stream()
+        provider_question = egress_decision.text
+
         section_grounding = is_section_grounding_enabled()
         section_answer_sections: list[Any] | None = None
         section_aggregate: dict[str, Any] | None = None
         section_trace: dict[str, Any] | None = None
-        history_question = ask_request.question
+        history_question = provider_question
         # Use a deterministic domain hint for retrieval when the UI is in
         # auto-select mode.  Keep the user-selected field unchanged in the
         # response; this is only a scope hint and never bypasses officer ACLs.
@@ -3724,9 +6531,26 @@ async def _deprecated_ask_knowledge_base_stream(
         owner_key = _resolve_ask_session_owner_key(request, user_id=user_id, role=getattr(ask_request, "role", None))
         role_val = getattr(ask_request, "role", None) or get_request_role(request)
         conv_ctx, ctx_msgs = await _build_conversation_context(conv_id, owner_key, real_user_id=user_id, role_context=role_val, is_admin=(role_val=="admin"))
+        if (
+            ask_request.pre_persisted_user_message
+            and ctx_msgs
+            and ctx_msgs[-1].get("role") == "user"
+            and str(ctx_msgs[-1].get("content") or "").strip()
+            == ask_request.question.strip()
+        ):
+            ctx_msgs = ctx_msgs[:-1]
         if ctx_msgs:
             history_str = conv_svc.format_context_for_prompt(ctx_msgs)
             history_question = f"Lịch sử trò chuyện trước đó:\n{history_str}\n---\nCâu hỏi hiện tại:\n{ask_request.question}"
+        try:
+            history_question = _prepare_ask_provider_egress(
+                history_question,
+                strategy_model,
+                answer_model,
+                final_answer_model,
+            ).text
+        except ProviderEgressBlocked:
+            return await privacy_guard_stream()
 
         return StreamingResponse(
             stream_ask_response(
@@ -3741,7 +6565,7 @@ async def _deprecated_ask_knowledge_base_stream(
                     event_date=ask_request.event_date,
                 ).isoformat(),
                 **_section_retrieval_kwargs(
-                    current_question=ask_request.question,
+                    current_question=provider_question,
                     request_id=uuid.uuid4().hex,
                     selected_domain=retrieval_domain,
                 ),
@@ -3777,6 +6601,32 @@ async def _persist_conversation_answer(
     if not owner_key:
         return
     try:
+        metadata_attachments: list[dict[str, Any]] = []
+        if response.answer_mode and response.answer_mode != NORMAL:
+            metadata_attachments.append(
+                {"kind": "answer_mode", "value": response.answer_mode}
+            )
+        if response.presentation_version:
+            metadata_attachments.append(
+                {
+                    "kind": "legal_answer_presentation",
+                    "value": {
+                        "presentation_version": response.presentation_version,
+                        "answer_route": response.answer_route,
+                        "pipeline_version": response.pipeline_version,
+                        "data_release_id": response.data_release_id,
+                        "index_fingerprint": response.index_fingerprint,
+                        "validity_snapshot": response.validity_snapshot,
+                        "verification_label": response.verification_label,
+                        "historical_label": response.historical_label,
+                        "sections": (
+                            response.sections.model_dump(mode="json")
+                            if response.sections
+                            else None
+                        ),
+                    },
+                }
+            )
         persisted = await conv_svc.add_message(
             conversation_id,
             owner_key=owner_key,
@@ -3790,8 +6640,20 @@ async def _persist_conversation_answer(
             faq_refs=[item.get("id") for item in (response.faqs or []) if isinstance(item, dict) and item.get("id")] or None,
             faqs=response.faqs,
             procedure_detail=response.procedure_detail,
+            answer_sections=[
+                section.model_dump(mode="json")
+                for section in (response.answer_sections or [])
+            ] or None,
+            forms_unavailable=response.forms_unavailable,
             rag_trace=response.rag_trace if role_val == "admin" else None,
             grounding_status=response.grounding_status,
+            answer_status=response.answer_status,
+            fallback_tier=response.fallback_tier,
+            canonical_domain=response.canonical_domain,
+            evidence_count=response.evidence_count,
+            coverage_warning=response.coverage_warning,
+            blocked_reason=response.blocked_reason,
+            attachments=metadata_attachments or None,
         )
         if not persisted:
             logger.warning(
@@ -3841,7 +6703,7 @@ async def _persist_conversation_error(
         )
 
 
-async def _execute_ask_simple(
+async def _execute_ask_simple_core(
     ask_request: AskRequest,
     request: Request,
     *,
@@ -3856,19 +6718,34 @@ async def _execute_ask_simple(
     # Prefer request role, fall back to payload role
     effective_role = user_role or ask_request.role
     ask_request.role = effective_role  # type: ignore[assignment]
+    answer_pipeline_v2 = is_answer_pipeline_v2_enabled(
+        str(effective_role or "citizen")
+    )
+    m4_classification = _apply_m4_temporal_scope(ask_request)
     detected_domain = _detect_question_domain(ask_request.question)
+    _topic_classification = classify_topic_v1(ask_request.question)
+    detected_topics = _topic_classification.topics
+    ask_request.detected_topics = [t.value for t in detected_topics]
+    ask_request.topic_confidence = _topic_classification.confidence
+    ask_request.topic_domain = _topic_classification.domain.value if _topic_classification.domain else None
+    
     question_policy = classify_question(
         ask_request.question,
         detected_domain=(detected_domain or {}).get("slug") if detected_domain else None,
     )
+    question_policy["structured_classification"] = m4_classification
     original_selected_domain = ask_request.domain
+    selected_canonical_domain = canonicalize_legal_domain(original_selected_domain)
+    detected_canonical_domain = canonicalize_legal_domain(
+        (detected_domain or {}).get("slug") if detected_domain else None
+    )
     soft_domain_mismatch = bool(
         effective_role in ("citizen", "admin")
-        and original_selected_domain
-        and detected_domain
-        and original_selected_domain != detected_domain.get("slug")
+        and selected_canonical_domain
+        and detected_canonical_domain
+        and selected_canonical_domain != detected_canonical_domain
     )
-    if _should_block_domain_mismatch(effective_role, ask_request.domain, detected_domain):
+    if _should_block_domain_mismatch(effective_role, selected_canonical_domain, detected_domain):
         return _domain_mismatch_response(
             ask_request.question,
             effective_role,
@@ -3877,7 +6754,7 @@ async def _execute_ask_simple(
         )
     # citizen/admin soft redirect selected domain to detected when clearly mismatched
     if soft_domain_mismatch and detected_domain:
-        ask_request.domain = detected_domain.get("slug")
+        ask_request.domain = detected_canonical_domain
     if user_role == "officer" and user_id:
         from api.user_service import get_user_profile
         profile = await get_user_profile(user_id)
@@ -3999,24 +6876,45 @@ async def _execute_ask_simple(
                 )
             return completed_result
 
-        if ask_request.offline_mode:
+        v2_local = bool(
+            ask_request.offline_mode
+            and answer_pipeline_v2
+        )
+        if ask_request.offline_mode and not v2_local:
             await emit_ask_progress(progress, "status", {"stage": "generating"})
             result = await _ask_local(ask_request, user_id=user_id, request=request)
             return await _complete_local_result(result)
 
         try:
-            strategy_id, answer_id, final_id = await _resolve_ask_model_ids(
-                ask_request.strategy_model,
-                ask_request.answer_model,
-                ask_request.final_answer_model,
-            )
-            ask_request.strategy_model = strategy_id
-            ask_request.answer_model = answer_id
-            ask_request.final_answer_model = final_id
+            model_lookup_started = time.perf_counter()
+            if v2_local:
+                local_id = f"ollama:{ask_request.offline_model}"
+                ask_request.strategy_model = local_id
+                ask_request.answer_model = local_id
+                ask_request.final_answer_model = local_id
+                strategy_model = answer_model = final_answer_model = SimpleNamespace(
+                    id=local_id,
+                    provider="ollama",
+                    name=ask_request.offline_model,
+                )
+            else:
+                strategy_id, answer_id, final_id = await _resolve_ask_model_ids(
+                    ask_request.strategy_model,
+                    ask_request.answer_model,
+                    ask_request.final_answer_model,
+                )
+                ask_request.strategy_model = strategy_id
+                ask_request.answer_model = answer_id
+                ask_request.final_answer_model = final_id
 
-            strategy_model = await Model.get(strategy_id)
-            answer_model = await Model.get(answer_id)
-            final_answer_model = await Model.get(final_id)
+                strategy_model = await Model.get(strategy_id)
+                answer_model = await Model.get(answer_id)
+                final_answer_model = await Model.get(final_id)
+            if is_section_grounding_enabled() or answer_pipeline_v2:
+                logger.info(
+                    "Feature005 stage=model_lookup_done elapsed_ms={:.0f}",
+                    (time.perf_counter() - model_lookup_started) * 1000,
+                )
         except NotFoundError as exc:
             raise HTTPException(status_code=400, detail=f"Model not found: {exc}") from exc
 
@@ -4025,10 +6923,69 @@ async def _execute_ask_simple(
                 status_code=400,
                 detail="One or more required models are missing. Register models via Settings or check the model IDs.",
             )
+
+        async def _provider_guard_fallback(reason: str) -> AskResponse:
+            if local_fallback_enabled():
+                try:
+                    local_request = ask_request.model_copy(
+                        update={
+                            "offline_mode": True,
+                            "offline_model": RECOMMENDED_LOCAL_MODEL,
+                        }
+                    )
+                    local_result = await _ask_local(
+                        local_request,
+                        user_id=user_id,
+                        request=request,
+                    )
+                    return await _complete_local_result(
+                        local_result,
+                        fallback_reason=reason,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Provider privacy guard local fallback unavailable trace_id={}",
+                        trace_id,
+                    )
+            source_only = _insufficient_legal_evidence_response(
+                ask_request.question
+            ).model_copy(
+                update={
+                    "answer_mode": SOURCE_VIEW_ONLY,
+                    "generation_provenance": {
+                        "mode": "cloud_blocked",
+                        "provider_label": "blocked",
+                        "model_label": None,
+                        "redaction_applied": False,
+                        "reason_code": reason,
+                    },
+                    "quality_flags": ["provider_egress_blocked"],
+                }
+            )
+            return await _complete_local_result(
+                source_only,
+                fallback_reason=reason,
+            )
+
+        try:
+            egress_decision = _prepare_ask_provider_egress(
+                ask_request.question,
+                strategy_model,
+                answer_model,
+                final_answer_model,
+            )
+        except ProviderEgressBlocked:
+            return await _provider_guard_fallback("pii_redaction_incomplete")
+        provider_ask_request = ask_request.model_copy(
+            update={"question": egress_decision.text}
+        )
+        provider_redaction_applied = egress_decision.redaction_applied
         # The opt-in section orchestration state belongs to this request only.
         # Keep it initialized even while the flag is off so the legacy path
         # remains a safe, immediate rollback and cannot fail at runtime.
-        section_grounding = is_section_grounding_enabled()
+        section_grounding = bool(
+            is_section_grounding_enabled() or answer_pipeline_v2
+        )
         section_answer_sections: list[Any] | None = None
         section_aggregate: dict[str, Any] | None = None
         section_trace: dict[str, Any] | None = None
@@ -4044,10 +7001,37 @@ async def _execute_ask_simple(
         conv_id = getattr(ask_request, "conversation_id", None) or ask_request.session_id
         owner_key = _resolve_ask_session_owner_key(request, user_id=user_id, role=getattr(ask_request, "role", None))
         role_val = getattr(ask_request, "role", None) or get_request_role(request)
+        conversation_context_started = time.perf_counter()
         conv_ctx, ctx_msgs = await _build_conversation_context(conv_id, owner_key, real_user_id=user_id, role_context=role_val, is_admin=(role_val=="admin"))
+        if section_grounding:
+            logger.info(
+                "Feature005 stage=conversation_context_done elapsed_ms={:.0f}",
+                (time.perf_counter() - conversation_context_started) * 1000,
+            )
+        if (
+            ask_request.pre_persisted_user_message
+            and ctx_msgs
+            and ctx_msgs[-1].get("role") == "user"
+            and str(ctx_msgs[-1].get("content") or "").strip()
+            == ask_request.question.strip()
+        ):
+            ctx_msgs = ctx_msgs[:-1]
         if ctx_msgs:
             history_str = conv_svc.format_context_for_prompt(ctx_msgs)
             history_question = f"Lịch sử trò chuyện trước đó:\n{history_str}\n---\nCâu hỏi hiện tại:\n{ask_request.question}"
+        try:
+            history_egress = _prepare_ask_provider_egress(
+                history_question,
+                strategy_model,
+                answer_model,
+                final_answer_model,
+            )
+        except ProviderEgressBlocked:
+            return await _provider_guard_fallback("pii_redaction_incomplete")
+        history_question = history_egress.text
+        provider_redaction_applied = bool(
+            provider_redaction_applied or history_egress.redaction_applied
+        )
 
         final_answer = None
         evidence = []
@@ -4064,8 +7048,8 @@ async def _execute_ask_simple(
                     section_aggregate,
                     section_results,
                     section_trace,
-                ) = await _run_section_orchestration(
-                    ask_request=ask_request,
+                ) = await _run_structured_section_orchestration(
+                    ask_request=provider_ask_request,
                     request_id=trace_id,
                     question_policy=question_policy,
                     legal_as_of=legal_as_of_iso,
@@ -4086,7 +7070,7 @@ async def _execute_ask_simple(
                 )
                 graph_input.update(
                     _section_retrieval_kwargs(
-                        current_question=ask_request.question,
+                        current_question=provider_ask_request.question,
                         request_id=trace_id,
                         selected_domain=retrieval_domain,
                     )
@@ -4113,7 +7097,76 @@ async def _execute_ask_simple(
             httpx.HTTPError,
         ) as cloud_exc:
             fallback_reason = cloud_fallback_reason(cloud_exc)
-            if local_fallback_enabled() and fallback_reason:
+            if section_grounding:
+                # The structured feature must fail closed.  Falling through to
+                # the legacy graph would make live acceptance measure a
+                # different pipeline and could reintroduce ungrounded claims.
+                fallback_issues = [
+                    replace(issue, request_id=trace_id)
+                    for issue in plan_legal_issues(ask_request.question, max_issues=6)
+                ]
+                section_answer_sections, section_aggregate = safe_extractive_fallback(
+                    request_id=trace_id,
+                    issues=fallback_issues,
+                    evidence_by_id={},
+                    role=str(ask_request.role or "citizen"),
+                )
+                fallback_required_facets = derive_required_facets_by_issue(
+                    issues=fallback_issues,
+                    required_sections=[
+                        str(item)
+                        for item in question_policy.get("required_sections") or []
+                    ],
+                )
+                fallback_coverage_matrix = build_issue_coverage_matrix(
+                    issues=fallback_issues,
+                    evidence_by_id={},
+                    required_facets_by_issue=fallback_required_facets,
+                )
+                section_results = []
+                section_trace = {
+                    "intent": build_legal_intent(
+                        ask_request.question,
+                        legal_as_of=str(
+                            ask_request.legal_as_of
+                            or ask_request.event_date
+                            or date.today()
+                        ),
+                    ).model_dump(mode="json"),
+                    "validity_decision": {
+                        "state": "unknown_or_stale",
+                        "strict_current_answer": True,
+                        "reason_codes": ["retrieval_unavailable"],
+                    },
+                    "issue_plan": [
+                        {
+                            "issue_id": issue.issue_id,
+                            "title": issue.title,
+                            "intent": issue.intent,
+                            "domain": issue.domain,
+                            "query": issue.query_text,
+                            "candidate_count": 0,
+                            "selected_count": 0,
+                            "decisions": [],
+                        }
+                        for issue in fallback_issues
+                    ],
+                    "expanded_retrieval_used": False,
+                    "source_diversity": {
+                        "document_count": 0,
+                        "selected_chunk_count": 0,
+                    },
+                    "error_category": "retrieval_unavailable",
+                    "fallback_reason": fallback_reason or "retrieval_unavailable",
+                    "claim_validation": build_fallback_quality_trace(
+                        issues=fallback_issues,
+                        coverage_matrix=fallback_coverage_matrix,
+                        reason="retrieval_unavailable",
+                    ),
+                }
+                evidence = []
+                final_answer = str(section_aggregate["answer"])
+            elif local_fallback_enabled() and fallback_reason:
                 # Provider fallback changes only the generator. The local path
                 # still enforces retrieval sufficiency and citation validation.
                 fallback_request = ask_request.model_copy(
@@ -4158,8 +7211,23 @@ async def _execute_ask_simple(
                 ask_request.question, final_answer, retrieval_results
             )
 
-        procedure_match = _match_procedure_detail(ask_request.question)
-        procedure_detail, recommended_forms, procedure_summary = _procedure_response_fields(procedure_match, ask_request.question)
+        procedure_match = _match_procedure_detail(
+            ask_request.question,
+            role=ask_request.role,
+        )
+        procedure_detail, recommended_forms, procedure_summary = _procedure_response_fields(
+            procedure_match,
+            ask_request.question,
+            role=ask_request.role,
+        )
+        if section_grounding and isinstance(section_trace, Mapping):
+            form_router_trace = section_trace.get("form_router")
+            if isinstance(form_router_trace, Mapping) and form_router_trace.get(
+                "procedure_id"
+            ):
+                recommended_forms = list(
+                    form_router_trace.get("recommended_forms") or []
+                ) or None
         _queue_form_discovery_if_needed(ask_request.question, recommended_forms)
         matched_faqs = _match_faqs_for_question(
             ask_request.question,
@@ -4175,6 +7243,15 @@ async def _execute_ask_simple(
                 "summary": procedure_summary or procedure_detail.get("name"),
             }
         if section_grounding and section_aggregate is not None:
+            section_answer_sections, section_aggregate = (
+                _reconcile_verified_form_sections(
+                    section_answer_sections,
+                    section_trace=section_trace,
+                    recommended_forms=recommended_forms,
+                )
+            )
+            grounding_status = str(section_aggregate["grounding_status"])
+        if section_grounding and section_aggregate is not None:
             answer_out = str(section_aggregate["answer"])
             citations = list(section_aggregate["citations"])
             removed_claims: list[dict[str, Any]] = []
@@ -4186,12 +7263,51 @@ async def _execute_ask_simple(
             answer_out, citations = _ensure_answer_has_source_links(final_answer, retrieval_results)
             answer_out, removed_claims = _guard_sensitive_claims(answer_out, retrieval_results)
         answer_out = _sanitize_answer_citation_display(answer_out, retrieval_results)
-        source_gap = [] if section_grounding else missing_answer_sections(
+        answer_out = _append_verified_form_answer(
             answer_out,
-            question_policy["question_type"],
-            bool(question_policy.get("is_procedural")),
-            required_sections=question_policy.get("required_sections") or [],
+            question=ask_request.question,
+            recommended_forms=recommended_forms,
         )
+        if not section_grounding:
+            answer_out = prepend_extractive_conclusion_when_supported(
+                answer_out,
+                retrieval_results,
+                required_sections=question_policy.get("required_sections") or [],
+            )
+        verified_form_lookup = _is_verified_form_lookup_only(
+            question_policy,
+            recommended_forms,
+        )
+        if verified_form_lookup:
+            citations = []
+            removed_claims = []
+            if grounding_status in {"ungrounded", "insufficient_evidence", "unknown"}:
+                grounding_status = "partially_grounded"
+        citations = _merge_form_catalog_citations(citations, recommended_forms)
+        source_gap = (
+            _structured_source_gap(
+                section_trace,
+                has_verified_form=_has_verified_released_form(recommended_forms),
+            )
+            if section_grounding
+            else missing_answer_sections(
+                answer_out,
+                question_policy["question_type"],
+                bool(question_policy.get("is_procedural")),
+                required_sections=question_policy.get("required_sections") or [],
+            )
+        )
+        if source_gap and str(
+            os.getenv("LEGAL_ANSWER_SOURCE_GAP_QUEUE_ENABLED", "false")
+        ).strip().casefold() in {"1", "true", "yes", "on"}:
+            await asyncio.to_thread(
+                enqueue_answer_source_gap_notice,
+                question=ask_request.question,
+                missing_facets=source_gap,
+                domain=str(question_policy.get("detected_domain") or ask_request.domain or "unknown"),
+                legal_as_of=str(ask_request.legal_as_of or ask_request.event_date or date.today()),
+                actor_role="system",
+            )
         if source_gap and not section_grounding:
             answer_out += "\n\nThông tin chưa xác minh được từ nguồn hiện có: " + ", ".join(vietnamese_section_names(source_gap)) + "."
         rag_trace = _merge_claim_guard_into_trace(retrieval_trace, removed_claims)
@@ -4203,27 +7319,138 @@ async def _execute_ask_simple(
             retrieval_results,
             required_sections=question_policy.get("required_sections") or [],
             recommended_forms=recommended_forms,
+            answer=answer_out,
         )
         claim_validation = build_claim_validation(
             removed_claims=removed_claims,
-            citations=citations,
+            # Structured citations are already emitted only from claims that
+            # passed request/issue/quote validation. Their public schema
+            # intentionally omits internal doc/chunk IDs, so revalidating
+            # those display objects here would create false rejections.
+            citations=(
+                citations
+                if verified_form_lookup
+                else []
+                if section_grounding
+                else citations
+            ),
             legal_as_of=legal_as_of,
-            answer=answer_out,
+            answer=None if verified_form_lookup else answer_out,
             coverage=evidence_coverage,
         )
+        if verified_form_lookup:
+            claim_validation.append({
+                "claim_type": "conclusion",
+                "status": "verified",
+                "reason": "approved_form_catalog_mapping",
+                "original": None,
+                "evidence_ids": list(
+                    evidence_coverage.get("conclusion", {}).get("evidence_ids") or []
+                ),
+                "legal_as_of": legal_as_of.isoformat(),
+            })
         if not section_grounding:
             answer_out = apply_claim_validation(answer_out, claim_validation)
+        if not section_grounding:
+            extractive_fallback = extractive_conclusion_from_evidence(
+                retrieval_results,
+                required_sections=question_policy.get("required_sections") or [],
+            )
+            if (
+                extractive_fallback
+                and evidence_coverage.get("conclusion", {}).get("status") != "verified"
+            ):
+                # The model omitted a direct answer although active evidence
+                # has one. This compatibility repair must never bypass the
+                # structured per-issue claim validator.
+                answer_out = _append_verified_form_answer(
+                    extractive_fallback,
+                    question=ask_request.question,
+                    recommended_forms=recommended_forms,
+                )
+            else:
+                answer_out = prepend_extractive_conclusion_when_supported(
+                    answer_out,
+                    retrieval_results,
+                    required_sections=question_policy.get("required_sections") or [],
+                )
+        evidence_coverage = build_evidence_coverage(
+            retrieval_results,
+            required_sections=question_policy.get("required_sections") or [],
+            recommended_forms=recommended_forms,
+            answer=answer_out,
+        )
         answer_score_preview, quality_flags = quality_preview(
             coverage=evidence_coverage,
             grounding_status=grounding_status,
             claim_validation=claim_validation,
+            answer=answer_out,
         )
+        if (
+            section_grounding
+            and isinstance(section_trace, Mapping)
+            and section_trace.get("expired_source_blocked")
+        ):
+            quality_flags = list(
+                dict.fromkeys([*quality_flags, "expired_source_blocked"])
+            )
+        answer_completeness = assess_answer_completeness(
+            question=ask_request.question,
+            answer=answer_out,
+            sources=retrieval_results,
+            orchestration_trace=(section_trace if section_grounding else rag_trace),
+        )
+        # A confirmed procedure/form binding is safe to show independently of
+        # provider wording, but it only verifies the form facet.  It must not
+        # certify the whole legal answer as fully grounded. It is nevertheless
+        # a deterministic, validated answer path rather than a provider
+        # fallback, so a form-only request must not be presented as blocked.
+        if verified_form_lookup:
+            answer_mode = NORMAL
+            provider_error_code = None
+        else:
+            answer_mode = (
+                str(section_trace.get("answer_mode") or NORMAL)
+                if section_grounding and isinstance(section_trace, Mapping)
+                else NORMAL
+            )
+            provider_error_code = (
+                (str(section_trace.get("provider_error_code") or "") or None)
+                if section_grounding and isinstance(section_trace, Mapping)
+                else None
+            )
+        provider_fallback_error: dict[str, Any] | None = None
+        if answer_mode != NORMAL:
+            reason_codes = list(answer_completeness.get("reason_codes") or [])
+            reason_codes.append(
+                "deterministic_source_view_only"
+                if answer_mode == SOURCE_VIEW_ONLY
+                else "deterministic_verified_source_condensed"
+            )
+            answer_completeness = {
+                **answer_completeness,
+                "status": "incomplete",
+                "reason_codes": list(dict.fromkeys(reason_codes)),
+            }
+            quality_flags = list(dict.fromkeys([
+                *quality_flags,
+                answer_mode,
+            ]))
         clarifying_questions = (
-            [
-                section.clarifying_question
-                for section in (section_answer_sections or [])
-                if section.clarifying_question
-            ][:1]
+            list(
+                dict.fromkeys(
+                    [
+                        section.clarifying_question
+                        for section in (section_answer_sections or [])
+                        if section.clarifying_question
+                    ]
+                    + (
+                        list(section_trace.get("clarifying_questions") or [])
+                        if isinstance(section_trace, Mapping)
+                        else []
+                    )
+                )
+            )[:2]
             if section_grounding
             else clarifying_questions_for_gaps(ask_request.question, evidence_coverage)
         )
@@ -4232,11 +7459,19 @@ async def _execute_ask_simple(
             rag_trace["legal_as_of"] = legal_as_of.isoformat()
             rag_trace["evidence_coverage"] = evidence_coverage
             rag_trace["claim_validation"] = claim_validation
+            rag_trace["form_provenance"] = _build_form_provenance_trace(
+                question=ask_request.question,
+                procedure_match=procedure_match,
+                accepted_forms=recommended_forms,
+            )
             rag_trace["answer_pipeline"] = {
                 "retrieved_chunks": len(retrieval_results),
                 "llm_sources": len(retrieval_results),
                 "citations_created": len(citations or []),
                 "grounding_status": grounding_status,
+                "answer_completeness_status": answer_completeness["status"],
+                "answer_mode": answer_mode,
+                "provider_error_code": provider_error_code,
                 "final_answer_chars": len(answer_out),
             }
             existing_timing = dict(rag_trace.get("latency_by_stage") or {})
@@ -4251,8 +7486,14 @@ async def _execute_ask_simple(
             rag_trace.setdefault("filtered_by_location", [])
             rag_trace.setdefault("filtered_by_legal_hierarchy", [])
             rag_trace.setdefault("filtered_by_relationship", [])
-            rag_trace.setdefault("forms_accepted", recommended_forms or [])
-            rag_trace.setdefault("forms_rejected", [])
+            rag_trace.setdefault(
+                "forms_accepted",
+                rag_trace["form_provenance"]["accepted"],
+            )
+            rag_trace.setdefault(
+                "forms_rejected",
+                rag_trace["form_provenance"]["rejected"],
+            )
         if soft_domain_mismatch and detected_domain:
             tip = (
                 f"\n\n---\nGợi ý: câu hỏi có vẻ thuộc **{detected_domain.get('name')}** "
@@ -4261,6 +7502,53 @@ async def _execute_ask_simple(
             )
             if tip.strip() not in answer_out:
                 answer_out = answer_out + tip
+        trust_fields = build_public_trust_projection(
+            trace=(
+                section_trace
+                if section_grounding and isinstance(section_trace, Mapping)
+                else rag_trace if isinstance(rag_trace, Mapping) else None
+            ),
+            citations=citations,
+            answer_mode=answer_mode,
+            provider_label=egress_decision.provider_label,
+            provider_mode=egress_decision.mode,
+            model_label=egress_decision.model_label,
+            redaction_applied=provider_redaction_applied,
+        )
+        timing_summary = None
+        if section_grounding and isinstance(section_trace, Mapping):
+            raw_timing = section_trace.get("timing_summary")
+            if isinstance(raw_timing, Mapping):
+                timing_summary = {
+                    key: float(raw_timing[key])
+                    for key in (
+                        "retrieval_ms",
+                        "provisioning_ms",
+                        "generation_ms",
+                        "validation_ms",
+                        "end_to_end_ms",
+                    )
+                    if isinstance(raw_timing.get(key), (int, float))
+                }
+        canonical_domain = canonicalize_legal_domain(
+            original_selected_domain
+            or question_policy.get("detected_domain")
+            or (detected_domain or {}).get("slug")
+        )
+        delivery = _answer_delivery_projection(
+            grounding_status=grounding_status,
+            answer_completeness=answer_completeness,
+            evidence_count=len(retrieval_results),
+            clarifying_questions=clarifying_questions,
+            provider_error_code=provider_error_code,
+            source_gap=source_gap,
+            section_trace=(section_trace if isinstance(section_trace, Mapping) else None),
+            verified_form_lookup=verified_form_lookup,
+        )
+        presentation_metadata = _answer_presentation_metadata(
+            ask_request.question,
+            section_trace if isinstance(section_trace, Mapping) else None,
+        )
         response = AskResponse(
             answer=answer_out,
             question=ask_request.question,
@@ -4270,6 +7558,10 @@ async def _execute_ask_simple(
                 else None
             ),
             grounding_status=grounding_status,
+            canonical_domain=canonical_domain,
+            **delivery,
+            answer_completeness=answer_completeness,
+            answer_mode=answer_mode,
             procedure_detail=procedure_detail,
             recommended_forms=recommended_forms,
             faqs=matched_faqs if 'matched_faqs' in locals() else None,
@@ -4281,11 +7573,16 @@ async def _execute_ask_simple(
             suggested_agency=(detected_domain or {}).get("agency") if detected_domain else None,
             conversation_id=ask_request.conversation_id,
             latency_ms=int((time.perf_counter() - started_at) * 1000),
+            timing_summary=timing_summary,
             trace_id=trace_id,
+            error=provider_fallback_error,
             question_type=question_policy["question_type"],
             detected_domain=question_policy.get("detected_domain"),
             required_sections=question_policy.get("required_sections") or [],
-            forms_unavailable=bool(question_policy.get("requests_form") and not recommended_forms),
+            forms_unavailable=_forms_unavailable_for_question(
+                ask_request.question,
+                recommended_forms,
+            ),
             source_gap=source_gap,
             evidence_coverage=evidence_coverage,
             claim_validation=claim_validation,
@@ -4295,6 +7592,16 @@ async def _execute_ask_simple(
             quality_flags=quality_flags,
             answer_score_preview=answer_score_preview,
             answer_sections=section_answer_sections if section_grounding else None,
+            **presentation_metadata,
+            **trust_fields,
+        )
+        response = AskResponse.model_validate(
+            safe_public_response_payload(
+                response.model_dump(mode="json"),
+                include_admin_trace=(
+                    ask_request.role == "admin" and ask_request.show_rag_trace
+                ),
+            )
         )
         await emit_ask_progress(
             progress,
@@ -4348,13 +7655,12 @@ async def _execute_ask_simple(
         )
         detail = exc.detail
         if isinstance(detail, dict):
-            detail = {**detail, "trace_id": trace_id}
+            detail = dict(detail)
         else:
             detail = {
                 "code": "ASK_HTTP_ERROR",
                 "message": str(detail),
                 "retryable": exc.status_code >= 500,
-                "trace_id": trace_id,
             }
         await _persist_conversation_error(
             ask_request,
@@ -4368,7 +7674,7 @@ async def _execute_ask_simple(
             await ask_idempotency.fail(idempotency_cache_key, exc)
         status_code, detail = _ask_error_response(exc)
         if isinstance(detail, dict):
-            detail = {**detail, "trace_id": trace_id}
+            detail = dict(detail)
         logger.error(
             "Ask simple failed [{}]: {}",
             detail["code"],
@@ -4413,9 +7719,78 @@ async def _execute_ask_simple(
                     "Xem log backend để xác định lỗi chưa được phân loại.",
                 ],
                 "retryable": True,
-                "trace_id": trace_id,
             },
         ) from e
+
+
+def _answer_presentation_metadata(
+    question: str,
+    trace: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Allow-list trace identities needed by the public presentation contract."""
+
+    trace = trace or {}
+    raw_route = str(trace.get("answer_route") or "")
+    answer_route = (
+        raw_route
+        if raw_route in {
+            "exact_article",
+            "procedure_form",
+            "general_legal",
+            "historical",
+        }
+        else route_legal_answer(question).answer_route
+    )
+    runtime_versions = trace.get("runtime_versions")
+    runtime_versions = (
+        runtime_versions if isinstance(runtime_versions, Mapping) else {}
+    )
+    return {
+        "answer_route": answer_route,
+        "pipeline_version": str(
+            trace.get("pipeline_version") or ANSWER_PIPELINE_V2_VERSION
+        ),
+        "data_release_id": (
+            str(trace["data_release_id"])
+            if trace.get("data_release_id") not in (None, "")
+            else None
+        ),
+        "index_fingerprint": (
+            str(runtime_versions["index_fingerprint"])
+            if runtime_versions.get("index_fingerprint") not in (None, "")
+            else None
+        ),
+        "validity_snapshot": (
+            str(runtime_versions["validity_snapshot_sha256"])
+            if runtime_versions.get("validity_snapshot_sha256") not in (None, "")
+            else None
+        ),
+    }
+
+
+async def _execute_ask_simple(
+    ask_request: AskRequest,
+    request: Request,
+    *,
+    progress: ProgressCallback | None = None,
+    trace_id_override: str | None = None,
+) -> AskResponse:
+    from api.unified_chat_service import run_legal_answer_pipeline_v3
+
+    response = await run_legal_answer_pipeline_v3(
+        ask_request=ask_request,
+        request=request,
+        progress=progress,
+        trace_id_override=trace_id_override,
+        executor=_execute_ask_simple_core,
+    )
+    await _persist_conversation_answer(
+        ask_request,
+        request,
+        response,
+        user_id=get_request_user_id(request),
+    )
+    return response
 
 
 def _build_validated_ask_stream(
@@ -4458,6 +7833,67 @@ def _build_validated_ask_stream(
     )
 
 
+def _answer_delivery_projection(
+    *,
+    grounding_status: str,
+    answer_completeness: Mapping[str, Any] | None,
+    evidence_count: int,
+    clarifying_questions: list[str],
+    provider_error_code: str | None,
+    source_gap: list[str],
+    section_trace: Mapping[str, Any] | None,
+    verified_form_lookup: bool,
+) -> dict[str, Any]:
+    retrieval = (
+        section_trace.get("retrieval_decision")
+        if isinstance(section_trace, Mapping)
+        else None
+    )
+    fallback_tier = str((retrieval or {}).get("fallback_tier") or "")
+    if verified_form_lookup:
+        fallback_tier = "catalog"
+    if clarifying_questions and evidence_count == 0:
+        answer_status = "clarifying"
+        fallback_tier = "clarification"
+    elif evidence_count == 0 and provider_error_code:
+        answer_status = "provider_error"
+        fallback_tier = "support"
+    elif evidence_count == 0:
+        answer_status = "source_gap"
+        fallback_tier = "support"
+    elif fallback_tier == "full_corpus":
+        answer_status = "broad_grounded"
+    elif (
+        grounding_status == "fully_grounded"
+        and str((answer_completeness or {}).get("status") or "") == "complete"
+    ):
+        answer_status = "grounded"
+    else:
+        answer_status = "partial_grounded"
+    if fallback_tier not in {
+        "exact", "domain", "expanded", "full_corpus", "catalog",
+        "clarification", "support",
+    }:
+        fallback_tier = "domain" if evidence_count else "support"
+    warning = None
+    if source_gap:
+        warning = (
+            "Câu trả lời đã giữ các phần có căn cứ; còn thiếu: "
+            + ", ".join(vietnamese_section_names(source_gap))
+            + "."
+        )
+    blocked_reason = None
+    if evidence_count == 0:
+        blocked_reason = provider_error_code or "approved_current_source_not_found"
+    return {
+        "answer_status": answer_status,
+        "fallback_tier": fallback_tier,
+        "evidence_count": evidence_count,
+        "coverage_warning": warning,
+        "blocked_reason": blocked_reason,
+    }
+
+
 @router.post("/search/ask")
 async def ask_knowledge_base(
     ask_request: AskRequest,
@@ -4465,6 +7901,7 @@ async def ask_knowledge_base(
 ) -> StreamingResponse:
     """Compatibility SSE endpoint with lifecycle and validated final only."""
 
+    enforce_optimized_profile_rollout(request)
     return _build_validated_ask_stream(
         ask_request,
         request,
@@ -4479,6 +7916,7 @@ async def ask_knowledge_base_simple(
 ) -> AskResponse:
     """Backward-compatible non-streaming Ask endpoint."""
 
+    enforce_optimized_profile_rollout(request)
     return await _execute_ask_simple(ask_request, request)
 
 
@@ -4500,6 +7938,7 @@ async def ask_knowledge_base_progress(
         )
 
     enforce_ask_role_rollout(request)
+    enforce_optimized_profile_rollout(request)
     return _build_validated_ask_stream(
         ask_request,
         request,
@@ -4669,15 +8108,20 @@ async def transcribe_voice_upload(
             ),
         )
 
-    file_bytes = await file.read()
-    if len(file_bytes) > MAX_VOICE_BYTES:
+    file_bytes = await file.read(MAX_VOICE_BYTES + 1)
+    voice_policy = UploadPolicy(
+        allowed_extensions=frozenset(
+            {".webm", ".wav", ".mp3", ".ogg", ".mp4", ".m4a", ".aac", ".flac"}
+        ),
+        max_bytes=MAX_VOICE_BYTES,
+    )
+    try:
+        validate_upload(filename=file.filename, content=file_bytes, policy=voice_policy)
+    except UploadSecurityError as exc:
         raise HTTPException(
-            status_code=413,
-            detail=(
-                f"File âm thanh quá lớn ({len(file_bytes) // 1024} KB). "
-                f"Giới hạn tối đa là {MAX_VOICE_BYTES // 1024 // 1024} MB."
-            ),
-        )
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
 
     audio_buffer = io.BytesIO(file_bytes)
     audio_buffer.name = file.filename
@@ -4757,15 +8201,18 @@ async def extract_text_from_upload(
         )
 
     try:
-        file_bytes = await file.read()
-        if len(file_bytes) > MAX_FILE_BYTES:
+        file_bytes = await file.read(MAX_FILE_BYTES + 1)
+        media_policy = UploadPolicy(
+            allowed_extensions=frozenset({".txt", ".docx", ".pdf", ".png", ".jpg", ".jpeg"}),
+            max_bytes=MAX_FILE_BYTES,
+        )
+        try:
+            validate_upload(filename=file.filename, content=file_bytes, policy=media_policy)
+        except UploadSecurityError as exc:
             raise HTTPException(
-                status_code=413,
-                detail=(
-                    f"File '{file.filename}' quá lớn ({len(file_bytes) // 1024} KB). "
-                    f"Giới hạn tối đa là {MAX_FILE_BYTES // 1024 // 1024} MB."
-                ),
-            )
+                status_code=exc.status_code,
+                detail={"code": exc.code, "message": str(exc)},
+            ) from exc
 
         extracted_text, source_type = await extract_text_from_file(
             file_bytes=file_bytes,

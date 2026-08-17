@@ -87,3 +87,40 @@ def test_failed_repair_does_not_keep_a_draft_when_no_grounded_fragment_remains()
     draft = "Theo Nghị định 99/2026/NĐ-CP, lệ phí là 100.000 đồng [legal:999]."
 
     assert _safe_draft_after_failed_repair(draft, EVIDENCE) is None
+
+
+def test_failed_repair_drops_uncited_conclusion_even_when_another_fragment_is_grounded():
+    draft = (
+        "## Kết luận\n"
+        "Gia đình chưa đủ điều kiện đăng ký thường trú.\n\n"
+        "## Căn cứ\n"
+        "Theo Nghị định 23/2015/NĐ-CP, Điều 24, yêu cầu được giải quyết "
+        "ngay trong ngày [legal:101]."
+    )
+
+    safe = _safe_draft_after_failed_repair(draft, EVIDENCE)
+
+    assert safe is not None
+    assert "chưa đủ điều kiện đăng ký thường trú" not in safe
+    assert "yêu cầu được giải quyết ngay trong ngày" in safe
+    assert safe.count("đã được lược bỏ") == 1
+
+
+def test_failed_repair_removes_unsafe_step_and_renumbers_remaining_steps():
+    draft = (
+        "## Các bước\n"
+        "**Bước 1:** Theo Nghị định 23/2015/NĐ-CP, Điều 24, yêu cầu được "
+        "giải quyết ngay trong ngày [legal:101].\n"
+        "**Bước 2:** Theo Nghị định 99/2026/NĐ-CP, nộp hồ sơ giả định "
+        "[legal:101].\n"
+        "**Bước 3:** Theo Nghị định 23/2015/NĐ-CP, Điều 24, yêu cầu được "
+        "giải quyết ngay trong ngày [legal:101]."
+    )
+
+    safe = _safe_draft_after_failed_repair(draft, EVIDENCE)
+
+    assert safe is not None
+    assert "**Bước 1:**" in safe
+    assert "**Bước 2:**" in safe
+    assert "**Bước 3:**" not in safe
+    assert "99/2026/" not in safe

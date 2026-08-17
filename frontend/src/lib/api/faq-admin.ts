@@ -32,6 +32,10 @@ export interface FaqItem {
   created_at: string
   updated_at: string
   approved_by: string | null
+  revision_id: string
+  revision_number: number
+  confirmed_procedure_id: string
+  public_state: 'pending' | 'needs_review' | 'confirmed' | 'released' | 'dismissed' | 'blocked'
 }
 
 export interface FaqListResponse {
@@ -40,6 +44,7 @@ export interface FaqListResponse {
 }
 
 export interface FaqCreatePayload {
+  faq_key?: string
   question: string
   answer: string
   submission_place?: string
@@ -47,10 +52,9 @@ export interface FaqCreatePayload {
   guidance_label?: string
   requires_forms?: boolean
   steps?: string[]
-  form_ids?: string[]
   domain: string
+  confirmed_procedure_id: string
   ward_scope?: string | null
-  review_status?: 'draft' | 'approved' | 'rejected'
 }
 
 export interface FaqUpdatePayload {
@@ -61,10 +65,18 @@ export interface FaqUpdatePayload {
   guidance_label?: string
   requires_forms?: boolean
   steps?: string[]
-  form_ids?: string[]
   domain?: string
+  confirmed_procedure_id?: string
   ward_scope?: string | null
-  review_status?: 'draft' | 'approved' | 'rejected'
+}
+
+export interface FaqRelease {
+  id: string
+  release_id: string
+  version: number
+  status: 'candidate' | 'validated' | 'active' | 'retired' | 'blocked'
+  form_release_id: string
+  manifest: { gate_report?: { passed: boolean; errors: string[] } }
 }
 
 export const DOMAIN_OPTIONS: Record<string, string> = {
@@ -78,9 +90,12 @@ export const DOMAIN_OPTIONS: Record<string, string> = {
 }
 
 export const REVIEW_STATUS_OPTIONS: Record<string, string> = {
-  draft: 'Nháp',
-  approved: 'Đã duyệt',
-  rejected: 'Từ chối',
+  pending: 'Chờ xác nhận',
+  needs_review: 'Cần rà soát',
+  confirmed: 'Đã xác nhận · chưa công khai',
+  released: 'Đã phát hành',
+  dismissed: 'Đã loại',
+  blocked: 'Đang bị chặn',
 }
 
 export const faqAdminApi = {
@@ -92,14 +107,17 @@ export const faqAdminApi = {
     limit?: number
     offset?: number
   }): Promise<FaqListResponse> => {
-    const query = new URLSearchParams()
-    if (params?.domain) query.set('domain', params.domain)
-    if (params?.review_status) query.set('review_status', params.review_status)
-    if (params?.q) query.set('q', params.q)
-    query.set('limit', String(params?.limit ?? 200))
-    query.set('offset', String(params?.offset ?? 0))
-    const response = await apiClient.get<FaqListResponse>(`/faq?${query.toString()}`)
-    return response.data
+    const response = await apiClient.get<FaqListResponse>('/faq/governance/revisions')
+    let items = response.data.items
+    if (params?.domain) items = items.filter(item => item.domain === params.domain)
+    if (params?.review_status) items = items.filter(item => item.public_state === params.review_status)
+    if (params?.q) {
+      const query = params.q.toLocaleLowerCase('vi')
+      items = items.filter(item => `${item.question} ${item.answer}`.toLocaleLowerCase('vi').includes(query))
+    }
+    const offset = params?.offset ?? 0
+    const limit = params?.limit ?? 200
+    return { total: items.length, items: items.slice(offset, offset + limit) }
   },
 
   /** Get a single FAQ by ID */
@@ -110,13 +128,48 @@ export const faqAdminApi = {
 
   /** Create a new FAQ (admin only) */
   create: async (data: FaqCreatePayload): Promise<FaqItem> => {
-    const response = await apiClient.post<FaqItem>('/faq', data)
+    const response = await apiClient.post<FaqItem>('/faq/governance/revisions', {
+      faq_key: data.faq_key,
+      question: data.question,
+      answer: data.answer,
+      canonical_domain: data.domain,
+      confirmed_procedure_id: data.confirmed_procedure_id,
+      requires_forms: data.requires_forms,
+      submission_place: data.submission_place,
+      legal_basis: data.legal_basis,
+      guidance_label: data.guidance_label,
+      steps: data.steps,
+      ward_scope: data.ward_scope,
+      evidence: {},
+    })
     return response.data
   },
 
   /** Update an existing FAQ (admin only) */
   update: async (id: string, data: FaqUpdatePayload): Promise<FaqItem> => {
-    const response = await apiClient.put<FaqItem>(`/faq/${id}`, data)
+    if (!data.confirmed_procedure_id || !data.domain || !data.question || !data.answer) {
+      throw new Error('FAQ_REVISION_INCOMPLETE')
+    }
+    return faqAdminApi.create({ ...data, faq_key: id } as FaqCreatePayload)
+  },
+
+  confirm: async (revisionId: string): Promise<FaqItem> => {
+    const response = await apiClient.post<FaqItem>(`/faq/governance/revisions/${encodeURIComponent(revisionId)}/confirm`)
+    return response.data
+  },
+
+  previewRelease: async (revisionIds: string[]): Promise<FaqRelease> => {
+    const response = await apiClient.post<FaqRelease>('/faq/governance/releases/preview', { revision_ids: revisionIds })
+    return response.data
+  },
+
+  validateRelease: async (releaseId: string): Promise<FaqRelease> => {
+    const response = await apiClient.post<FaqRelease>(`/faq/governance/releases/${encodeURIComponent(releaseId)}/validate`)
+    return response.data
+  },
+
+  activateRelease: async (releaseId: string): Promise<FaqRelease> => {
+    const response = await apiClient.post<FaqRelease>(`/faq/governance/releases/${encodeURIComponent(releaseId)}/activate`)
     return response.data
   },
 

@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "citizen-birth-registration",
+      "role": "citizen",
+      "question": "Tôi đăng ký khai sinh cho con mới sinh tại Hải Phòng thì nộp ở đâu, cần hồ sơ gì, thời hạn và lệ phí bao nhiêu, cho tôi tờ khai chính thức?",
+      "required_facets": ["authority", "documents", "deadline", "fee", "form"],
+      "required_citations_all": [
+        {"law_number": "60/2014/QH13", "article_number": "13"},
+        {"law_number": "60/2014/QH13", "article_number": "16"}
+      ],
+      "requests_form": true,
+      "requires_official_form": true
+    },
+    {
+      "id": "citizen-land-transfer",
+      "role": "citizen",
+      "question": "Tôi mua nhà đất đã có Giấy chứng nhận tại Hải Phòng, cần làm các bước sang tên nào, nộp ở đâu, hồ sơ và thuế phí ra sao, cho tôi Mẫu 09/ĐK?",
+      "required_facets": ["procedure", "authority", "documents", "fee", "form"],
+      "required_citations_all": [
+        {"law_number": "31/2024/QH15"},
+        {"law_number": "101/2024/NĐ-CP"}
+      ],
+      "requests_form": true,
+      "requires_official_form": true,
+      "allows_verified_form_gap": true
+    },
+    {
+      "id": "citizen-marital-status",
+      "role": "citizen",
+      "question": "Tôi xin Giấy xác nhận tình trạng hôn nhân tại Hải Phòng nhưng trước đây cư trú ở nhiều nơi, cần hồ sơ gì, cơ quan xác minh thế nào, thời hạn bao lâu và dùng biểu mẫu nào?",
+      "required_facets": ["documents", "procedure", "deadline", "form"],
+      "required_citations_all": [
+        {"law_number": "123/2015/NĐ-CP", "article_number": "21"},
+        {"law_number": "123/2015/NĐ-CP", "article_number": "22"}
+      ],
+      "requests_form": true,
+      "requires_official_form": true
+    },
+    {
+      "id": "officer-foreign-birth",
+      "role": "officer",
+      "question": "Trẻ sinh ở nước ngoài, cha cư trú tại Hải Phòng và mẹ là người nước ngoài thì phân biệt thẩm quyền theo Điều 13 và Điều 35 Luật Hộ tịch thế nào; hồ sơ, quy trình và tờ khai cần dùng là gì?",
+      "required_facets": ["authority", "documents", "procedure", "form"],
+      "required_citations_all": [
+        {"law_number": "60/2014/QH13", "article_number": "13"},
+        {"law_number": "60/2014/QH13", "article_number": "35"}
+      ],
+      "requests_form": true,
+      "requires_official_form": true
+    },
+    {
+      "id": "officer-unlicensed-construction",
+      "role": "officer",
+      "question": "Nhà ở riêng lẻ trong đô thị đang xây dựng không phép thì cấp xã/phường có thẩm quyền gì; việc lập biên bản, ngăn chặn, xử phạt và buộc khắc phục thực hiện theo căn cứ hiện hành nào?",
+      "required_facets": ["authority", "procedure", "rule"],
+      "required_citations_all": [
+        {"law_number": "15/2012/QH13"},
+        {"law_number": "16/2022/NĐ-CP"}
+      ],
+      "requests_form": false
+    },
+    {
+      "id": "officer-complaint-no-record",
+      "role": "officer",
+      "question": "Quyết định xử phạt vi phạm hành chính không lập biên bản trong trường hợp nào là hợp pháp; khi khiếu nại thì ai giải quyết, thời hạn và quy trình ra sao, cần dùng mẫu đơn nào?",
+      "required_facets": ["condition", "authority", "deadline", "procedure", "form"],
+      "required_citations_all": [
+        {"law_number": "15/2012/QH13", "article_number": "56"},
+        {"law_number": "02/2011/QH13"}
+      ],
+      "requests_form": true,
+      "requires_official_form": true
+    },
+    {
+      "id": "admin-foreign-marriage",
+      "role": "admin",
+      "question": "Đăng ký kết hôn có yếu tố nước ngoài tại Hải Phòng cần căn cứ, hồ sơ, thẩm quyền, thời hạn và biểu mẫu nào?",
+      "required_facets": ["authority", "documents", "deadline", "form"],
+      "required_citations_all": [
+        {"law_number": "60/2014/QH13", "article_number": "37"},
+        {"law_number": "60/2014/QH13", "article_number": "38"}
+      ],
+      "requests_form": true,
+      "requires_official_form": true,
+      "requires_trace": true
+    },
+    {
+      "id": "admin-building-permit",
+      "role": "admin",
+      "question": "Cấp giấy phép xây dựng nhà ở riêng lẻ tại Hải Phòng áp dụng văn bản trung ương và địa phương nào; thẩm quyền, hồ sơ, thời hạn, lệ phí và biểu mẫu ra sao?",
+      "required_facets": ["rule", "authority", "documents", "deadline", "fee", "form"],
+      "required_citations_all": [
+        {"law_number": "50/2014/QH13"},
+        {"law_number": "175/2024/NĐ-CP"}
+      ],
+      "requests_form": true,
+      "requires_official_form": true,
+      "requires_trace": true
+    },
+    {
+      "id": "admin-meritorious-person-support",
+      "role": "admin",
+      "question": "Hồ sơ đề nghị trợ cấp đối với người có công tại Hải Phòng gồm gì, nộp ở đâu, thời hạn và biểu mẫu nào; nếu kho thiếu nguồn hãy nêu rõ phần thiếu và hướng bổ sung dữ liệu?",
+      "required_facets": ["documents", "authority", "deadline", "form"],
+      "requires_clarification": true,
+      "requests_form": true,
+      "requires_trace": true
+    }
+  ]
+}

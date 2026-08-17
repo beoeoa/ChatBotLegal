@@ -58,3 +58,17 @@ def test_partial_guidance_cannot_contain_legal_claim_or_citation():
             limitation="Thiếu nguồn đầy đủ.",
             sources=[],
         )
+
+
+def test_sufficient_section_deduplicates_identical_public_citations():
+    duplicate = dict(_source(), source_id="source-duplicate")
+
+    section = validate_answer_section(
+        request_id="request-1",
+        issue_id="issue-1",
+        title="Hồ sơ",
+        answer="Nội dung đã xác minh.",
+        sources=[_source(), duplicate],
+    )
+
+    assert len(section.citations) == 1

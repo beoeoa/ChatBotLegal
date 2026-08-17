@@ -217,6 +217,27 @@ class TestListAskHistory:
         results = await list_ask_history(limit=10, grounding_status="partially_grounded")
         assert len(results) == 1
         assert results[0]["grounding_status"] == "partially_grounded"
+        query, params = mock_svc_query.await_args.args
+        assert "grounding_status = $grounding_status" in query
+        assert params["grounding_status"] == "partially_grounded"
+
+    @patch("open_notebook.database.repository.repo_query", new_callable=_mock_repo_query)
+    @patch("api.user_service.repo_query")
+    async def test_list_ask_history_filters_by_account_and_department(self, mock_svc_query, mock_db_query):
+        from api.user_service import list_ask_history
+
+        mock_svc_query.return_value = []
+        await list_ask_history(
+            limit=25,
+            user_id="user_account:citizen-1",
+            department="Tư pháp - Hộ tịch",
+        )
+
+        query, params = mock_svc_query.await_args.args
+        assert "owner_user = type::record($owner_user_id)" in query
+        assert "department = $department" in query
+        assert params["owner_user_id"] == "user_account:citizen-1"
+        assert params["department"] == "Tư pháp - Hộ tịch"
 
     @patch("open_notebook.database.repository.repo_query", new_callable=_mock_repo_query)
     @patch("api.user_service.repo_query")

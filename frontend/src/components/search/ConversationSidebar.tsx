@@ -28,6 +28,8 @@ export type ConversationMessage = AskMessage
 
 export interface ConversationDetail extends ConversationSummary {
   messages: ConversationMessage[]
+  next_cursor?: string | null
+  has_older_messages?: boolean
 }
 
 interface ConversationSidebarProps {
@@ -69,6 +71,10 @@ export function ConversationSidebar({
       setLoading(false)
     }
   }, [])
+
+  useEffect(() => {
+    setItems([])
+  }, [role])
 
   useEffect(() => {
     void load()

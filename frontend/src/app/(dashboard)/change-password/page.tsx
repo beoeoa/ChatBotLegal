@@ -36,8 +36,8 @@ export default function ChangePasswordPage() {
         new_password: newPassword,
       })
       toast.success('Đã đổi mật khẩu thành công. Đang đăng xuất...')
-      setTimeout(() => {
-        useAuthStore.getState().logout()
+      setTimeout(async () => {
+        await useAuthStore.getState().logout()
         router.push('/login')
       }, 1500)
     } catch (error: unknown) {

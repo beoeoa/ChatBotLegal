@@ -9,18 +9,6 @@ export interface SourceInsightResponse {
   updated: string
 }
 
-export interface CreateSourceInsightRequest {
-  transformation_id: string
-}
-
-export interface InsightCreationResponse {
-  status: 'pending'
-  message: string
-  source_id: string
-  transformation_id: string
-  command_id?: string
-}
-
 export interface CommandJobStatusResponse {
   job_id: string
   status: string
@@ -37,18 +25,6 @@ export const insightsApi = {
   get: async (insightId: string) => {
     const response = await apiClient.get<SourceInsightResponse>(`/insights/${insightId}`)
     return response.data
-  },
-
-  create: async (sourceId: string, data: CreateSourceInsightRequest) => {
-    const response = await apiClient.post<InsightCreationResponse>(
-      `/sources/${sourceId}/insights`,
-      data
-    )
-    return response.data
-  },
-
-  delete: async (insightId: string) => {
-    await apiClient.delete(`/insights/${insightId}`)
   },
 
   getCommandStatus: async (commandId: string) => {

@@ -1,0 +1,19 @@
+-- Feature 009: operational legal-validity observations and audit workflow.
+-- These tables are separate from the imported PostgreSQL legal corpus.
+DEFINE TABLE IF NOT EXISTS legal_validity_observation SCHEMALESS;
+DEFINE INDEX IF NOT EXISTS idx_legal_validity_observation_key ON TABLE legal_validity_observation COLUMNS observation_key UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_legal_validity_observation_law_time ON TABLE legal_validity_observation COLUMNS law_number, observed_at;
+
+DEFINE TABLE IF NOT EXISTS legal_validity_event SCHEMALESS;
+DEFINE INDEX IF NOT EXISTS idx_legal_validity_event_key ON TABLE legal_validity_event COLUMNS event_key UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_legal_validity_event_review ON TABLE legal_validity_event COLUMNS review_status, severity, created_at;
+
+DEFINE TABLE IF NOT EXISTS legal_validity_decision SCHEMALESS;
+DEFINE INDEX IF NOT EXISTS idx_legal_validity_decision_replay ON TABLE legal_validity_decision COLUMNS replay_key UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_legal_validity_decision_event_time ON TABLE legal_validity_decision COLUMNS event, created_at;
+
+DEFINE TABLE IF NOT EXISTS legal_validity_sync_run SCHEMALESS;
+DEFINE INDEX IF NOT EXISTS idx_legal_validity_sync_run_status_time ON TABLE legal_validity_sync_run COLUMNS status, started_at;
+
+DEFINE TABLE IF NOT EXISTS legal_validity_sync_lease SCHEMALESS;
+DEFINE INDEX IF NOT EXISTS idx_legal_validity_sync_lease_name ON TABLE legal_validity_sync_lease COLUMNS name UNIQUE;

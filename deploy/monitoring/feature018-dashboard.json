@@ -1,0 +1,30 @@
+{
+  "title": "Feature 018 · Production Readiness",
+  "uid": "feature018-readiness",
+  "schemaVersion": 39,
+  "tags": ["feature018", "content-free"],
+  "time": {"from": "now-6h", "to": "now"},
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Thành phần sẵn sàng",
+      "targets": [{"expr": "sum(probe_success{job=\"feature018-blackbox\"})", "legendFormat": "ready"}],
+      "gridPos": {"x": 0, "y": 0, "w": 8, "h": 5}
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Thời gian health/readiness",
+      "targets": [{"expr": "probe_duration_seconds{job=\"feature018-blackbox\"}", "legendFormat": "{{instance}}"}],
+      "gridPos": {"x": 8, "y": 0, "w": 16, "h": 8}
+    },
+    {
+      "id": 3,
+      "type": "state-timeline",
+      "title": "Trạng thái từng thành phần",
+      "targets": [{"expr": "probe_success{job=\"feature018-blackbox\"}", "legendFormat": "{{instance}}"}],
+      "gridPos": {"x": 0, "y": 8, "w": 24, "h": 8}
+    }
+  ]
+}

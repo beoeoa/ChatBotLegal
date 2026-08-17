@@ -36,6 +36,8 @@ interface AskState {
   suggestedDomain: string | null
   suggestedAgency: string | null
   groundingStatus: string | null
+  answerCompleteness: AskResponse['answer_completeness'] | null
+  answerMode: AskResponse['answer_mode'] | null
   citations: AskResponse['citations'] | null
   answerSections: AskResponse['answer_sections'] | null
   error: string | null
@@ -86,6 +88,8 @@ export function useAsk() {
     suggestedDomain: null,
     suggestedAgency: null,
     groundingStatus: null,
+    answerCompleteness: null,
+    answerMode: null,
     citations: null,
     answerSections: null,
     error: null,
@@ -145,6 +149,8 @@ export function useAsk() {
       suggestedDomain: null,
       suggestedAgency: null,
       groundingStatus: null,
+      answerCompleteness: null,
+      answerMode: null,
       citations: null,
       answerSections: null,
       error: null,
@@ -229,6 +235,8 @@ export function useAsk() {
         suggestedDomain: response.suggested_domain || null,
         suggestedAgency: response.suggested_agency || null,
         groundingStatus: response.grounding_status || null,
+        answerCompleteness: response.answer_completeness || null,
+        answerMode: response.answer_mode || 'normal',
         citations: response.citations || null,
         answerSections: response.answer_sections || null,
         answers: [],
@@ -280,6 +288,8 @@ export function useAsk() {
       suggestedDomain: null,
       suggestedAgency: null,
       groundingStatus: null,
+      answerCompleteness: null,
+      answerMode: null,
       citations: null,
       answerSections: null,
       error: null,

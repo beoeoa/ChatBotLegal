@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "legal-retrieval-metrics-v2.schema.json",
+  "title": "Dataset-aware legal retrieval metrics",
+  "type": "object",
+  "required": [
+    "metric_contract_version", "dataset_case_count", "valid_case_count",
+    "dataset_error_count", "dataset_errors", "case_count", "answer_required_count",
+    "expected_refusal_count", "recall_at_10", "mrr_at_10", "top5_rate",
+    "correct_refusal_rate", "false_blocked_answer_count", "issue_count",
+    "issue_recall_at_10", "all_required_sources_coverage", "per_domain",
+    "per_intent", "per_temporal_scope", "miss_count", "misses"
+  ],
+  "properties": {
+    "metric_contract_version": {"const": "legal-retrieval-metrics-v2"},
+    "dataset_case_count": {"type": "integer", "minimum": 1},
+    "valid_case_count": {"type": "integer", "minimum": 0},
+    "dataset_error_count": {"type": "integer", "minimum": 0},
+    "dataset_errors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["case_id", "code", "legal_as_of", "query_dates", "mismatched_query_dates"]
+      }
+    },
+    "case_count": {"type": "integer", "minimum": 1},
+    "answer_required_count": {"type": "integer", "minimum": 0},
+    "expected_refusal_count": {"type": "integer", "minimum": 0},
+    "recall_at_10": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+    "mrr_at_10": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+    "top5_rate": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+    "correct_refusal_rate": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+    "false_blocked_answer_count": {"type": "integer", "minimum": 0},
+    "issue_count": {"type": "integer", "minimum": 0},
+    "issue_recall_at_10": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+    "all_required_sources_coverage": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+    "per_domain": {"type": "object"},
+    "per_intent": {"type": "object"},
+    "per_temporal_scope": {"type": "object"},
+    "miss_count": {"type": "integer", "minimum": 0},
+    "misses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["case_id", "domain", "reason", "error_code"]
+      }
+    }
+  },
+  "additionalProperties": true
+}

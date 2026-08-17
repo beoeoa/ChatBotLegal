@@ -15,6 +15,8 @@ from typing import Any
 import httpx
 from loguru import logger
 
+from api.crawlers.legal_document_pipeline import build_pdf_text_blocks
+
 try:
     import fitz  # type: ignore[import-untyped]
 
@@ -45,7 +47,7 @@ def extract_pdf_bytes_for_review(
     pdf_bytes: bytes,
     *,
     filename: str = "document.pdf",
-    max_pages: int = 50,
+    max_pages: int | None = None,
 ) -> dict[str, Any]:
     """Extract a PDF byte stream and optionally OCR a probable scan.
 
@@ -60,6 +62,11 @@ def extract_pdf_bytes_for_review(
         "text_fingerprint": None,
         "file_fingerprint": hashlib.sha256(pdf_bytes).hexdigest(),
         "page_count": 0,
+        "processed_pages": 0,
+        "total_pages": 0,
+        "failed_pages": [],
+        "complete": False,
+        "truncated": False,
         "language": "unknown",
         "pdf_kind": "unknown",
         "extractor_used": "pymupdf",
@@ -68,6 +75,9 @@ def extract_pdf_bytes_for_review(
         "title": None,
         "reason": "",
         "filename": filename,
+        "extraction_blocks": [],
+        "layout_status": "unavailable",
+        "layout_reason": "PDF_LAYOUT_NOT_EXTRACTED",
     }
     if not pdf_bytes:
         result["reason"] = "PDF rỗng."
@@ -78,8 +88,21 @@ def extract_pdf_bytes_for_review(
 
     try:
         document = fitz.open(stream=pdf_bytes, filetype="pdf")
-        result["page_count"] = min(document.page_count, max(1, max_pages))
-        parts = [document.load_page(index).get_text("text") for index in range(result["page_count"])]
+        total_pages = int(document.page_count)
+        pages_to_read = total_pages if max_pages is None else min(
+            total_pages, max(1, int(max_pages))
+        )
+        result.update({
+            "page_count": pages_to_read,
+            "processed_pages": pages_to_read,
+            "total_pages": total_pages,
+            "complete": pages_to_read == total_pages,
+            "truncated": pages_to_read < total_pages,
+        })
+        parts = [
+            document.load_page(index).get_text("text")
+            for index in range(pages_to_read)
+        ]
         document.close()
     except Exception as exc:
         logger.warning("PDF extraction failure for {}: {}", filename, exc)
@@ -87,10 +110,17 @@ def extract_pdf_bytes_for_review(
         return result
 
     text = _normalize_pdf_text("\n\n".join(parts))
+    normalized_pages = [_normalize_pdf_text(part) for part in parts]
+    extraction_blocks = build_pdf_text_blocks(
+        normalized_pages,
+        source_asset_sha256=str(result["file_fingerprint"]),
+        extractor="pymupdf",
+        extractor_version=str(getattr(fitz, "VersionBind", "unknown")),
+    )
     average_chars = len(text) / max(1, result["page_count"])
     # A real text layer can be short (for example a one-page decision title),
     # but is still text-based. OCR is reserved for empty or nearly empty layers.
-    if text and average_chars >= 20:
+    if text and average_chars >= 20 and result["complete"]:
         result.update({
             "status": "ok",
             "text": text,
@@ -100,6 +130,9 @@ def extract_pdf_bytes_for_review(
             "pdf_kind": "text_based",
             "ocr_status": "not_required",
             "title": _extract_title(text),
+            "extraction_blocks": extraction_blocks,
+            "layout_status": "available" if extraction_blocks else "fallback",
+            "layout_reason": "" if extraction_blocks else "PDF_TEXT_BLOCKS_UNAVAILABLE",
         })
         return result
 
@@ -124,8 +157,18 @@ def extract_pdf_bytes_for_review(
         "ocr_confidence": ocr.get("ocr_confidence"),
         "language": ocr.get("language") or "vie+eng",
         "page_count": int(ocr.get("page_count") or result["page_count"]),
+        "processed_pages": int(ocr.get("processed_pages") or 0),
+        "total_pages": int(ocr.get("total_pages") or result["total_pages"]),
+        "failed_pages": list(ocr.get("failed_pages") or []),
+        "complete": bool(ocr.get("complete")),
+        "truncated": bool(ocr.get("truncated")),
         "extractor_used": "pymupdf+ocr" if ocr_text else "pymupdf",
         "reason": str(ocr.get("reason") or result["reason"]),
+        "extraction_blocks": list(ocr.get("extraction_blocks") or []),
+        "layout_status": str(ocr.get("layout_status") or "fallback"),
+        "layout_reason": str(
+            ocr.get("layout_reason") or "OCR_LAYOUT_DATA_MISSING"
+        ),
     })
     if ocr_text:
         result.update({
@@ -141,7 +184,12 @@ def extract_pdf_bytes_for_review(
     return result
 
 
-async def extract_pdf(url: str, *, timeout_ms: int = 30000, max_pages: int = 50) -> dict[str, Any]:
+async def extract_pdf(
+    url: str,
+    *,
+    timeout_ms: int = 30000,
+    max_pages: int | None = None,
+) -> dict[str, Any]:
     """Download an allowed PDF and return the same review extraction schema."""
     if not url.startswith(("http://", "https://")):
         return {"status": "error", "text": "", "page_count": 0, "reason": "URL PDF không hợp lệ."}

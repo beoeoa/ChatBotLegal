@@ -52,7 +52,12 @@ export default function NotebookPage() {
     }
   }, [notebookId, role, reasonKey])
 
-  const { data: notebook, isLoading: notebookLoading } = useNotebook(notebookId)
+  const {
+    data: notebook,
+    isLoading: notebookLoading,
+    isError: notebookFailed,
+    error: notebookError,
+  } = useNotebook(notebookId)
   const {
     sources,
     isLoading: sourcesLoading,
@@ -165,6 +170,23 @@ export default function NotebookPage() {
     )
   }
 
+  if (notebookFailed) {
+    const status = (notebookError as { response?: { status?: number } })?.response?.status
+    const forbidden = status === 401 || status === 403
+    return (
+      <AppShell>
+        <ForbiddenState
+          title={forbidden ? 'Không thể mở hồ sơ này' : t('notebooks.notFound')}
+          description={forbidden
+            ? 'Hồ sơ pháp lý thuộc một tài khoản khác. Hãy chọn hồ sơ trong danh sách của tài khoản đang đăng nhập.'
+            : t('notebooks.notFoundDesc')}
+          onBack={() => router.replace('/notebooks')}
+          backLabel="Về danh sách hồ sơ"
+        />
+      </AppShell>
+    )
+  }
+
   if (!notebook) {
     return (
       <AppShell>
@@ -172,6 +194,7 @@ export default function NotebookPage() {
           title={t('notebooks.notFound')}
           description={t('notebooks.notFoundDesc')}
           onBack={() => router.replace('/notebooks')}
+          backLabel="Về danh sách hồ sơ"
         />
       </AppShell>
     )

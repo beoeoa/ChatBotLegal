@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "retrieval-metadata-attestation-v1.schema.json",
+  "title": "Retrieval Release V2 metadata correction attestation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "queue_file_sha256",
+    "inventory_file_sha256",
+    "decision",
+    "reviewer_user_id",
+    "reviewed_at",
+    "corrections",
+    "attestation_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "legal-retrieval-metadata-attestation-v1"},
+    "queue_file_sha256": {"$ref": "#/$defs/sha256"},
+    "inventory_file_sha256": {"$ref": "#/$defs/sha256"},
+    "decision": {"const": "APPROVE_CORRECTIONS"},
+    "reviewer_user_id": {"type": "string", "minLength": 1},
+    "reviewed_at": {"type": "string", "format": "date-time"},
+    "corrections": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/correction"}},
+    "attestation_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "correction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "document_id", "field_name", "old_value", "proposed_value",
+        "evidence_url", "evidence_sha256", "review_note"
+      ],
+      "properties": {
+        "document_id": {"type": "integer", "minimum": 1},
+        "field_name": {"enum": [
+          "law_number", "status_observed", "effective_date", "expired_date",
+          "source_url", "scope_included_observed", "serving_state"
+        ]},
+        "old_value": {},
+        "proposed_value": {},
+        "evidence_url": {"type": "string", "format": "uri", "minLength": 1},
+        "evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "review_note": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

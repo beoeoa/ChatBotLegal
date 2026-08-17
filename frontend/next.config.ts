@@ -1,6 +1,10 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  // Release gates can build beside a running standalone server without
+  // touching the live .next directory that Windows keeps locked.
+  distDir: process.env.NEXT_DIST_DIR || ".next",
+
   // Enable standalone output for optimized Docker deployment
   output: "standalone",
 

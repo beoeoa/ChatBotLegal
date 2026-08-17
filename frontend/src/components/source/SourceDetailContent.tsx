@@ -1,22 +1,18 @@
 'use client'
 
 import { useState, useEffect, useCallback, useMemo } from 'react'
-import { useQueryClient } from '@tanstack/react-query'
 import { isAxiosError } from 'axios'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { sourcesApi } from '@/lib/api/sources'
 import { insightsApi, SourceInsightResponse } from '@/lib/api/insights'
-import { transformationsApi } from '@/lib/api/transformations'
 import { embeddingApi } from '@/lib/api/embedding'
 import { SourceDetailResponse } from '@/lib/types/api'
-import { Transformation } from '@/lib/types/transformations'
 import { LoadingSpinner } from '@/components/common/LoadingSpinner'
 import { InlineEdit } from '@/components/common/InlineEdit'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
-import { Label } from '@/components/ui/label'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import {
@@ -26,23 +22,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from '@/components/ui/alert-dialog'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import {
   Link as LinkIcon,
   Upload,
@@ -54,8 +33,6 @@ import {
   Youtube,
   MoreVertical,
   Trash2,
-  Sparkles,
-  Plus,
   Lightbulb,
   Database,
   AlertCircle,
@@ -65,8 +42,6 @@ import { formatDistanceToNow } from 'date-fns'
 import { getDateLocale } from '@/lib/utils/date-locale'
 import { toast } from 'sonner'
 import { useTranslation } from '@/lib/hooks/use-translation'
-import { useAuthStore } from '@/lib/stores/auth-store'
-import { canLoadTransformations } from '@/components/source/transformation-access'
 import { SourceInsightDialog } from '@/components/source/SourceInsightDialog'
 import { NotebookAssociations } from '@/components/source/NotebookAssociations'
 
@@ -84,24 +59,16 @@ export function SourceDetailContent({
   onClose
 }: SourceDetailContentProps) {
   const { t, language } = useTranslation()
-  const role = useAuthStore((state) => state.role)
-  const canManageTransformations = canLoadTransformations(role)
-  const queryClient = useQueryClient()
   const [source, setSource] = useState<SourceDetailResponse | null>(null)
   const [insights, setInsights] = useState<SourceInsightResponse[]>([])
-  const [transformations, setTransformations] = useState<Transformation[]>([])
-  const [selectedTransformation, setSelectedTransformation] = useState<string>('')
   const [loading, setLoading] = useState(true)
   const [loadingInsights, setLoadingInsights] = useState(false)
-  const [creatingInsight, setCreatingInsight] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
   const [isEmbedding, setIsEmbedding] = useState(false)
   const [isDownloadingFile, setIsDownloadingFile] = useState(false)
   const [fileAvailable, setFileAvailable] = useState<boolean | null>(null)
   const [selectedInsight, setSelectedInsight] = useState<SourceInsightResponse | null>(null)
-  const [insightToDelete, setInsightToDelete] = useState<string | null>(null)
-  const [deletingInsight, setDeletingInsight] = useState(false)
 
   const fetchSource = useCallback(async () => {
     try {
@@ -135,95 +102,12 @@ export function SourceDetailContent({
     }
   }, [sourceId])
 
-  const fetchTransformations = useCallback(async () => {
-    // /transformations is deliberately admin-only. Do not call it for
-    // citizen/officer roles just to render an empty insight selector.
-    if (!canManageTransformations) {
-      setTransformations([])
-      return
-    }
-    try {
-      const data = await transformationsApi.list()
-      setTransformations(data)
-    } catch (err) {
-      if (!isAxiosError(err) || err.response?.status !== 403) {
-        console.error('Failed to fetch transformations:', err)
-      }
-      setTransformations([])
-    }
-  }, [canManageTransformations])
-
   useEffect(() => {
     if (sourceId) {
       void fetchSource()
       void fetchInsights()
-      void fetchTransformations()
     }
-  }, [fetchInsights, fetchSource, fetchTransformations, sourceId])
-
-  const createInsight = async () => {
-    if (!selectedTransformation) {
-      toast.error(t('sources.selectTransformation'))
-      return
-    }
-
-    try {
-      setCreatingInsight(true)
-      const response = await insightsApi.create(sourceId, {
-        transformation_id: selectedTransformation
-      })
-      // Show toast for async operation
-      toast.success(t('sources.insightGenerationStarted'))
-      setSelectedTransformation('')
-
-      // Poll for command completion if we have a command_id
-      if (response.command_id) {
-        // Poll in background (don't block UI)
-        insightsApi.waitForCommand(response.command_id, {
-          maxAttempts: 120, // Up to 4 minutes (120 * 2s)
-          intervalMs: 2000
-        }).then(success => {
-          if (success) {
-            void fetchInsights()
-            // Invalidate sources queries so notebook page refreshes with updated insights_count
-            queryClient.invalidateQueries({ queryKey: ['sources'] })
-          }
-        }).catch(err => {
-          console.error('Error waiting for insight command:', err)
-        })
-      } else {
-        // Fallback: refresh after delay if no command_id
-        setTimeout(() => {
-          void fetchInsights()
-          // Also invalidate sources queries
-          queryClient.invalidateQueries({ queryKey: ['sources'] })
-        }, 5000)
-      }
-    } catch (err) {
-      console.error('Failed to create insight:', err)
-      toast.error(t('common.error'))
-    } finally {
-      setCreatingInsight(false)
-    }
-  }
-
-  const handleDeleteInsight = async (e?: React.MouseEvent) => {
-    e?.preventDefault()
-    if (!insightToDelete) return
-
-    try {
-      setDeletingInsight(true)
-      await insightsApi.delete(insightToDelete)
-      toast.success(t('common.success'))
-      setInsightToDelete(null)
-      await fetchInsights()
-    } catch (err) {
-      console.error('Failed to delete insight:', err)
-      toast.error(t('common.error'))
-    } finally {
-      setDeletingInsight(false)
-    }
-  }
+  }, [fetchInsights, fetchSource, sourceId])
 
   const handleUpdateTitle = async (title: string) => {
     if (!source || title === source.title) return
@@ -248,8 +132,9 @@ export function SourceDetailContent({
       toast.success(response.message || t('common.success'))
       await fetchSource()
     } catch (err) {
-      console.error('Failed to embed content:', err)
-      toast.error(t('common.error'))
+      const detail = isAxiosError(err) ? err.response?.data?.detail : undefined
+      console.warn('Unable to embed content:', detail || err)
+      toast.error(typeof detail === 'string' ? detail : t('common.error'))
     } finally {
       setIsEmbedding(false)
     }
@@ -578,53 +463,6 @@ export function SourceDetailContent({
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
-                {/* Create New Insight: transformations are intentionally admin-only. */}
-                {canManageTransformations && <div className="rounded-lg border bg-muted/30 p-4">
-                  <Label 
-                    htmlFor="transformation-select"
-                    className="mb-3 text-sm font-semibold flex items-center gap-2"
-                  >
-                    <Sparkles className="h-4 w-4" />
-                    {t('sources.generateNewInsight')}
-                  </Label>
-                  <div className="flex gap-2">
-                    <Select
-                      name="transformation"
-                      value={selectedTransformation}
-                      onValueChange={setSelectedTransformation}
-                      disabled={creatingInsight}
-                    >
-                      <SelectTrigger id="transformation-select" className="flex-1">
-                        <SelectValue placeholder={t('sources.selectTransformation')} />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {transformations.map((trans) => (
-                          <SelectItem key={trans.id} value={trans.id}>
-                            {trans.title || trans.name}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    <Button
-                      size="sm"
-                      onClick={createInsight}
-                      disabled={!selectedTransformation || creatingInsight}
-                    >
-                      {creatingInsight ? (
-                        <>
-                          <LoadingSpinner className="mr-2 h-3 w-3" />
-                          {t('common.creating')}
-                        </>
-                      ) : (
-                        <>
-                          <Plus className="mr-2 h-4 w-4" />
-                          {t('common.create')}
-                        </>
-                      )}
-                    </Button>
-                  </div>
-                </div>}
-
                 {/* Insights List */}
                 {loadingInsights ? (
                   <div className="flex items-center justify-center py-8">
@@ -653,14 +491,6 @@ export function SourceDetailContent({
                         <div className="mt-3 flex justify-end gap-2">
                           <Button size="sm" variant="outline" onClick={() => setSelectedInsight(insight)}>
                             {t('sources.viewInsight')}
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => setInsightToDelete(insight.id)}
-                            className="text-destructive hover:text-destructive"
-                          >
-                            <Trash2 className="h-4 w-4" />
                           </Button>
                         </div>
                       </div>
@@ -833,41 +663,7 @@ export function SourceDetailContent({
           }
         }}
         insight={selectedInsight ?? undefined}
-        onDelete={async (insightId) => {
-          try {
-            await insightsApi.delete(insightId)
-            toast.success(t('common.success'))
-            setSelectedInsight(null)
-            await fetchInsights()
-          } catch (err) {
-            console.error('Failed to delete insight:', err)
-            toast.error(t('common.error'))
-          }
-        }}
       />
-
-      <AlertDialog open={!!insightToDelete} onOpenChange={() => setInsightToDelete(null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>{t('sources.deleteInsight')}</AlertDialogTitle>
-            <AlertDialogDescription>
-              {t('sources.deleteInsightConfirm')}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={deletingInsight}>{t('common.cancel')}</AlertDialogCancel>
-            <AlertDialogAction asChild>
-              <Button
-                onClick={handleDeleteInsight}
-                disabled={deletingInsight}
-                variant="destructive"
-              >
-                {deletingInsight ? t('common.deleting') : t('common.delete')}
-              </Button>
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
     </div>
   )
 }

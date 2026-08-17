@@ -15,6 +15,8 @@ TARGET_INDEXES = {
     "ix_legal_retrieval_documents_law_number_trgm",
     "ix_legal_retrieval_chunks_article_id",
     "ix_legal_retrieval_articles_active_document_id",
+    "ix_legal_retrieval_relationships_source_document_id",
+    "ix_legal_retrieval_relationships_target_document_id",
 }
 
 
@@ -49,6 +51,8 @@ def test_up_migration_adds_only_concurrent_indexes_for_current_query_expressions
     upper = sql.upper()
 
     assert "CREATE EXTENSION IF NOT EXISTS PG_TRGM" in upper
+    assert "CREATE EXTENSION IF NOT EXISTS UNACCENT" in upper
+    assert "FUNCTION LEGAL_NORMALIZE_TEXT" in upper
     assert upper.count("CREATE INDEX CONCURRENTLY IF NOT EXISTS") == len(
         TARGET_INDEXES
     )
@@ -56,10 +60,10 @@ def test_up_migration_adds_only_concurrent_indexes_for_current_query_expressions
         assert f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {index_name}" in sql
 
     # These expressions mirror the existing leading-wildcard lexical query.
-    assert "LOWER(COALESCE(content, ''))" in sql
-    assert "LOWER(COALESCE(heading, ''))" in sql
-    assert "LOWER(COALESCE(title, ''))" in sql
-    assert "LOWER(COALESCE(law_number, ''))" in sql
+    assert "legal_normalize_text(content)" in sql
+    assert "legal_normalize_text(heading)" in sql
+    assert "legal_normalize_text(title)" in sql
+    assert "legal_normalize_text(law_number)" in sql
     assert upper.count("GIN_TRGM_OPS") == 5
 
     for destructive_keyword in ("INSERT ", "UPDATE ", "DELETE ", "TRUNCATE "):
@@ -88,4 +92,3 @@ def test_down_migration_only_removes_objects_owned_by_this_migration():
         "TRUNCATE ",
     ):
         assert forbidden not in down_upper
-

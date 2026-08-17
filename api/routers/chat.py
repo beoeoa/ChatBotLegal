@@ -7,13 +7,16 @@ from langchain_core.runnables import RunnableConfig
 from loguru import logger
 from pydantic import BaseModel, Field
 
-from api.auth import get_request_role, get_request_user_id
-from api.legal_profile_access import assert_chat_session_access, assert_legal_profile_list_access, assert_notebook_access
+from api.auth import get_request_user_id
+from api.legal_profile_access import (
+    assert_chat_session_access,
+    assert_legal_profile_list_access,
+    assert_notebook_access,
+)
 from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.domain.notebook import ChatSession, Note, Notebook, Source
-from open_notebook.exceptions import (
-    NotFoundError,
-)
+from open_notebook.exceptions import NotFoundError
+from open_notebook.graphs.chat import generate_chat_message
 from open_notebook.graphs.chat import graph as chat_graph
 from open_notebook.utils.graph_utils import get_session_message_count
 
@@ -139,6 +142,8 @@ async def get_sessions(
             )
 
         return results
+    except HTTPException:
+        raise
     except NotFoundError:
         raise HTTPException(status_code=404, detail="Notebook not found")
     except Exception as e:
@@ -166,7 +171,7 @@ async def create_session(request: CreateSessionRequest, raw_request: Request):
         )
         await session.save()
         owner_user = get_request_user_id(raw_request)
-        if owner_user and get_request_role(raw_request) != "admin":
+        if owner_user:
             await repo_query(
                 "UPDATE $session_id SET owner_user = type::record($owner_user);",
                 {"session_id": ensure_record_id(session.id), "owner_user": owner_user},
@@ -184,6 +189,8 @@ async def create_session(request: CreateSessionRequest, raw_request: Request):
             message_count=0,
             model_override=session.model_override,
         )
+    except HTTPException:
+        raise
     except NotFoundError:
         raise HTTPException(status_code=404, detail="Notebook not found")
     except Exception as e:
@@ -262,6 +269,8 @@ async def get_session(session_id: str, request: Request):
             messages=messages,
             model_override=getattr(session, "model_override", None),
         )
+    except HTTPException:
+        raise
     except NotFoundError:
         raise HTTPException(status_code=404, detail="Session not found")
     except Exception as e:
@@ -319,6 +328,8 @@ async def update_session(session_id: str, request: UpdateSessionRequest, raw_req
             message_count=msg_count,
             model_override=session.model_override,
         )
+    except HTTPException:
+        raise
     except NotFoundError:
         raise HTTPException(status_code=404, detail="Session not found")
     except Exception as e:
@@ -344,6 +355,8 @@ async def delete_session(session_id: str, request: Request):
         await session.delete()
 
         return SuccessResponse(success=True, message="Session deleted successfully")
+    except HTTPException:
+        raise
     except NotFoundError:
         raise HTTPException(status_code=404, detail="Session not found")
     except Exception as e:
@@ -391,8 +404,8 @@ async def execute_chat(request: ExecuteChatRequest, raw_request: Request):
         )
 
         # Prepare state for execution
-        state_values = current_state.values if current_state else {}
-        state_values["messages"] = state_values.get("messages", [])
+        state_values = dict(current_state.values) if current_state else {}
+        existing_messages = list(state_values.get("messages", []))
         state_values["context"] = request.context
         state_values["notebook"] = notebook
         state_values["model_override"] = model_override
@@ -401,17 +414,29 @@ async def execute_chat(request: ExecuteChatRequest, raw_request: Request):
         from langchain_core.messages import HumanMessage
 
         user_message = HumanMessage(content=request.message)
-        state_values["messages"].append(user_message)
+        state_values["messages"] = [*existing_messages, user_message]
 
-        # Execute chat graph
-        result = chat_graph.invoke(
-            input=state_values,  # type: ignore[arg-type]
-            config=RunnableConfig(
-                configurable={
-                    "thread_id": full_session_id,
-                    "model_id": model_override,
-                }
-            ),
+        graph_config = RunnableConfig(
+            configurable={
+                "thread_id": full_session_id,
+                "model_id": model_override,
+            }
+        )
+        ai_message = await generate_chat_message(state_values, graph_config)  # type: ignore[arg-type]
+
+        # Persist only the new turn. The message reducer retains prior history
+        # without running the graph's synchronous model node inside FastAPI's
+        # active event loop.
+        await asyncio.to_thread(
+            chat_graph.update_state,
+            graph_config,
+            {
+                "messages": [user_message, ai_message],
+                "context": request.context,
+                "notebook": notebook,
+                "model_override": model_override,
+            },
+            as_node="agent",
         )
 
         # Update session timestamp
@@ -419,7 +444,7 @@ async def execute_chat(request: ExecuteChatRequest, raw_request: Request):
 
         # Convert messages to response format
         messages: list[ChatMessage] = []
-        for msg in result.get("messages", []):
+        for msg in [*existing_messages, user_message, ai_message]:
             messages.append(
                 ChatMessage(
                     id=getattr(msg, "id", f"msg_{len(messages)}"),
@@ -430,6 +455,8 @@ async def execute_chat(request: ExecuteChatRequest, raw_request: Request):
             )
 
         return ExecuteChatResponse(session_id=request.session_id, messages=messages)
+    except HTTPException:
+        raise
     except NotFoundError:
         raise HTTPException(status_code=404, detail="Session not found")
     except Exception as e:

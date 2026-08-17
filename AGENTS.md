@@ -72,8 +72,19 @@ Rules:
 If a change affects ingestion strategy, retrieval architecture, answer grounding, or background jobs, add or update a doc under `docs/7-DEVELOPMENT/`.
 
 <!-- SPECKIT START -->
-Current Spec Kit implementation context: `specs/005-calibrated-grounded-answers/plan.md`.
-Read that plan, its contracts, research, quickstart and tasks before changing
-Ask issue splitting, evidence eligibility, grounding, citation rendering or
-section-level answer behavior.
+Current Spec Kit implementation context:
+`specs/018-production-release-readiness/plan.md`. Read that plan, its contracts,
+research, data model, quickstart and tasks before changing production readiness,
+support, lifecycle, dashboard, answer presentation or deployment behavior. For
+procedure/form workflow, form selection, release manifests, coverage or Golden
+V3, also read all design and task artifacts under
+`specs/017-procedure-form-governance/`. Preserve the answer-trust contract from
+spec 016, lifecycle baseline in specs 014-015, crawler governance from spec 007,
+validity from spec 009, hierarchy from spec 010, parent hydration from spec 011,
+multi-issue orchestration from spec 012 and role-scoped crawl/import behavior
+from spec 013. Code, additive PostgreSQL migration definitions and isolated
+rehearsal are approved; do not apply a live migration, mutate live source/corpus
+history, move/delete/re-index real vectors, add a worker or paid service, switch
+support/FAQ/vector/public pointers, activate production, run browser UAT, or
+hard-delete records without the corresponding approved task slice and gates.
 <!-- SPECKIT END -->

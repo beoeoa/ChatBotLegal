@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://chatbotlegal.local/schemas/structured-qa-run.schema.json",
+  "title": "StructuredQARun",
+  "type": "object",
+  "required": ["run_id", "case_id", "question_hash", "role", "domain", "legal_as_of", "question", "answer", "answer_mode", "grounding_status", "citations", "validity_result", "latency_stages", "trace_id", "versions", "evaluation"],
+  "properties": {
+    "run_id": {"type": "string", "minLength": 1},
+    "case_id": {"type": "string", "minLength": 1},
+    "question_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "role": {"enum": ["citizen", "officer", "admin"]},
+    "domain": {"type": "string"},
+    "legal_as_of": {"type": "string", "format": "date"},
+    "question": {"type": "string"},
+    "answer": {"type": "string"},
+    "answer_mode": {"enum": ["grounded_answer", "verified_source_condensed", "source_view_only"]},
+    "grounding_status": {"type": "string"},
+    "completeness": {"type": ["object", "null"]},
+    "citations": {"type": "array", "items": {"type": "object"}},
+    "validity_result": {"type": "object"},
+    "claim_validation_summary": {"type": ["object", "null"]},
+    "fallback_reason": {"type": ["string", "null"]},
+    "error": {"type": ["object", "null"]},
+    "latency_stages": {"type": "object"},
+    "trace_id": {"type": "string"},
+    "versions": {"type": "object"},
+    "provider_label": {"type": ["string", "null"]},
+    "evaluation": {"type": "object", "required": ["passed"], "properties": {"passed": {"type": "boolean"}}, "additionalProperties": true}
+  },
+  "additionalProperties": true
+}

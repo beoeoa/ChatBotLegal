@@ -20,9 +20,12 @@ NEVER returns actual API key values - only metadata.
 
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from loguru import logger
 from pydantic import SecretStr
+
+from api.auth import get_request_role, get_request_user_id
+from api.user_service import write_audit_log
 
 from api.credentials_service import (
     credential_to_response,
@@ -57,7 +60,28 @@ from api.models import (
 from open_notebook.database.repository import ensure_record_id, repo_delete, repo_query
 from open_notebook.domain.credential import Credential
 
-router = APIRouter(prefix="/credentials", tags=["credentials"])
+async def _require_admin(request: Request) -> None:
+    if get_request_role(request) != "admin":
+        raise HTTPException(status_code=403, detail="Chỉ Admin được quản lý model và API key.")
+
+
+async def _audit_credential(request: Request, action: str, credential_id: str, **details) -> None:
+    await write_audit_log(
+        action=action,
+        entity_type="credential",
+        entity_id=credential_id,
+        actor_user_id=get_request_user_id(request),
+        actor_role="admin",
+        details={"result": "success", **details},
+        request=request,
+    )
+
+
+router = APIRouter(
+    prefix="/credentials",
+    tags=["credentials"],
+    dependencies=[Depends(_require_admin)],
+)
 
 
 def _handle_value_error(e: ValueError, status_code: int = 400) -> HTTPException:
@@ -137,7 +161,7 @@ async def list_credentials_by_provider(provider: str):
 
 
 @router.post("", response_model=CredentialResponse, status_code=201)
-async def create_credential(request: CreateCredentialRequest):
+async def create_credential(request: CreateCredentialRequest, raw_request: Request):
     """Create a new credential."""
     try:
         require_encryption_key()
@@ -174,6 +198,10 @@ async def create_credential(request: CreateCredentialRequest):
             num_ctx=request.num_ctx,
         )
         await cred.save()
+        await _audit_credential(
+            raw_request, "admin.credential.create", str(cred.id or "credential"),
+            provider=cred.provider,
+        )
         return credential_to_response(cred, 0)
 
     except Exception as e:
@@ -194,7 +222,7 @@ async def get_credential(credential_id: str):
 
 
 @router.put("/{credential_id}", response_model=CredentialResponse)
-async def update_credential(credential_id: str, request: UpdateCredentialRequest):
+async def update_credential(credential_id: str, request: UpdateCredentialRequest, raw_request: Request):
     """Update an existing credential."""
     try:
         require_encryption_key()
@@ -247,6 +275,10 @@ async def update_credential(credential_id: str, request: UpdateCredentialRequest
 
         await cred.save()
         models = await cred.get_linked_models()
+        await _audit_credential(
+            raw_request, "admin.credential.update", credential_id,
+            updated_fields=sorted(request.model_fields_set),
+        )
         return credential_to_response(cred, len(models))
 
     except HTTPException:
@@ -259,6 +291,7 @@ async def update_credential(credential_id: str, request: UpdateCredentialRequest
 @router.delete("/{credential_id}", response_model=CredentialDeleteResponse)
 async def delete_credential(
     credential_id: str,
+    raw_request: Request,
     migrate_to: Optional[str] = Query(
         None, description="Migrate linked models to this credential ID"
     ),
@@ -312,6 +345,11 @@ async def delete_credential(
             # Delete the credential itself
             await repo_delete(credential_id)
 
+            await _audit_credential(
+                raw_request, "admin.credential.delete", credential_id,
+                deleted_models=deleted_models,
+            )
+
             return CredentialDeleteResponse(
                 message="Credential deleted successfully",
                 deleted_models=deleted_models,
@@ -336,6 +374,11 @@ async def delete_credential(
 
         # Delete the credential
         await cred.delete()
+
+        await _audit_credential(
+            raw_request, "admin.credential.delete", credential_id,
+            deleted_models=deleted_models,
+        )
 
         return CredentialDeleteResponse(
             message="Credential deleted successfully",
@@ -396,6 +439,8 @@ async def register_models_for_credential(
     try:
         result = await register_models(credential_id, request.models)
         return RegisterModelsResponse(**result)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         logger.error(f"Error registering models for credential {credential_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to register models")

@@ -1,0 +1,4 @@
+-- Migration 38: persist the optional structured Ask snapshot used by history.
+-- Additive only; existing conversation messages are not rewritten.
+DEFINE FIELD IF NOT EXISTS answer_sections ON TABLE conversation_message TYPE option<array<object>> FLEXIBLE;
+DEFINE FIELD IF NOT EXISTS forms_unavailable ON TABLE conversation_message TYPE option<bool>;

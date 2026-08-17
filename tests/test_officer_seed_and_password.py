@@ -48,8 +48,8 @@ def test_seed_five_officers_domain_restriction():
         "officer_hotich": "ho_tich_chung_thuc",
         "officer_daidai": "dat_dai_xay_dung",
         "officer_ansinh": "an_sinh_y_te_giao_duc",
-        "officer_hanhchinh": "hanh_chinh_cong",
-        "officer_trattu": "trat_tu_do_thi",
+        "officer_cutru": "cu_tru_an_ninh",
+        "officer_khieunai": "khieu_nai_to_cao_xu_phat",
     }
     assert {item["username"]: item["domain"] for item in OFFICERS} == expected
     assert WARD_SCOPE == "Phường Lê Chân, Hải Phòng"
@@ -115,6 +115,7 @@ def test_first_login_password_enforcement_on_auth(monkeypatch):
         }
 
     monkeypatch.setattr("api.routers.auth.authenticate_user_account", fake_auth)
+    monkeypatch.setattr("api.routers.auth.ensure_bootstrap_admin_user", _async_noop)
     app = FastAPI()
     app.include_router(auth_router, prefix="/api")
     with TestClient(app) as client:

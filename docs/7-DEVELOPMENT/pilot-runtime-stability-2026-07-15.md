@@ -32,7 +32,7 @@ rebuilding embeddings.
 - Conversation/idempotency/auth tests pass.
 - FAQ/form runtime and data-path tests pass.
 - Citation viewer and generated PDF tests pass.
-- Officer proposal, weekly crawler and realtime support tests pass.
+- Officer manual-proposal, Admin-only weekly crawler and realtime support tests pass.
 - Frontend TypeScript check passes.
 - Direct retrieval PDF smoke for document `402311`, article `16`, returns a
   valid PDF response.

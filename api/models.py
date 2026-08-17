@@ -49,10 +49,13 @@ class SearchResponse(BaseModel):
 
 
 class AskRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     question: str = Field(..., description="Question to ask the knowledge base")
     role: Literal["officer", "citizen", "admin"] = Field(
         "citizen", description="Answer profile selected by the user"
     )
+    user_role: Optional[str] = Field(None, description="Request user role override")
     strategy_model: str = Field("", description="Model ID for query strategy")
     answer_model: str = Field("", description="Model ID for individual answers")
     final_answer_model: str = Field("", description="Model ID for final answer")
@@ -68,6 +71,10 @@ class AskRequest(BaseModel):
     event_date: Optional[date] = Field(None, description="Date the legal event occurred, when known")
     legal_as_of: Optional[date] = Field(None, description="Legal validity date; defaults to event_date then today")
     idempotency_key: Optional[str] = Field(None, min_length=8, max_length=128, description="Client-generated key preventing duplicate Ask execution")
+    detected_topics: Optional[List[str]] = Field(None, description="Internal field for routing taxonomy")
+    topic_confidence: Optional[str] = Field(None, description="Internal: taxonomy classification confidence")
+    topic_domain: Optional[str] = Field(None, description="Internal: primary LegalDomain inferred by topic taxonomy")
+    pre_persisted_user_message: bool = Field(False, description="True when frontend pre-persisted the user message")
 
 
 class CitationDisplayItem(BaseModel):
@@ -126,6 +133,8 @@ class AnswerSection(BaseModel):
 
 
 class AskResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     answer: str = Field(..., description="Final answer from the knowledge base")
     question: str = Field(..., description="Original question")
     rag_trace: Optional[Dict[str, Any]] = Field(
@@ -164,6 +173,26 @@ class AskResponse(BaseModel):
         None,
         description="Optional independently grounded answer sections; omitted for legacy responses and when the feature is disabled",
     )
+    canonical_domain: Optional[str] = Field(None, description="Canonical legal domain slug")
+    answer_status: Optional[str] = Field(None, description="Public answer delivery status")
+    fallback_tier: Optional[str] = Field(None, description="Retrieval/fallback tier")
+    evidence_count: Optional[int] = Field(None, description="Number of evidence chunks retrieved")
+    coverage_warning: Optional[str] = Field(None, description="Coverage warning text")
+    blocked_reason: Optional[str] = Field(None, description="Blocked reason code if any")
+    answer_completeness: Optional[Dict[str, Any]] = Field(None, description="Answer completeness detail")
+    answer_mode: Optional[str] = Field(None, description="Answer mode decision")
+    timing_summary: Optional[Dict[str, Any]] = Field(None, description="Detailed stage timing summary")
+    response_mode: Optional[str] = Field(None, description="V3 response mode")
+    reason_codes: List[str] = Field(default_factory=list, description="Reason codes for response mode")
+    answer_route: Optional[str] = Field(None, description="Deterministic answer route")
+    pipeline_version: Optional[str] = Field(None, description="Pipeline version string")
+    presentation_version: Optional[str] = Field(None, description="Presentation schema version")
+    data_release_id: Optional[str] = Field(None, description="Active data release ID")
+    index_fingerprint: Optional[str] = Field(None, description="Active index fingerprint")
+    validity_snapshot: Optional[str] = Field(None, description="Active validity snapshot hash")
+    verification_label: Optional[str] = Field(None, description="Presentation verification label")
+    historical_label: Optional[str] = Field(None, description="Presentation historical label")
+    sections: Optional[Any] = Field(None, description="Structured presentation sections")
 
 
 # Models API models

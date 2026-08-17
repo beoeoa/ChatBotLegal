@@ -4,7 +4,25 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { LoadingSpinner } from '@/components/common/LoadingSpinner'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
-import { CheckCircle, Sparkles, Lightbulb, ChevronDown, BookOpen } from 'lucide-react'
+import {
+  AlertCircle,
+  ArrowRight,
+  BookOpen,
+  CheckCircle,
+  ChevronDown,
+  CircleHelp,
+  Clock3,
+  ExternalLink,
+  FileCheck2,
+  FileText,
+  Landmark,
+  Lightbulb,
+  ListChecks,
+  Scale,
+  ShieldCheck,
+  Sparkles,
+  WalletCards,
+} from 'lucide-react'
 import { useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
@@ -17,12 +35,14 @@ import { useTranslation } from '@/lib/hooks/use-translation'
 import { toast } from 'sonner'
 import type { AskResponse, RagTrace } from '@/lib/types/search'
 import { FAQAccordion } from './FAQAccordion'
+import { LegalAnswerCard } from './LegalAnswerCard'
 
 type ProcedureDetail = NonNullable<AskResponse['procedure_detail']>
 type ProcedureForm = ProcedureDetail['forms'][number]
 type RecommendedForm = NonNullable<AskResponse['recommended_forms']>[number]
 type DisplayForm = ProcedureForm | RecommendedForm
 type LegalCitation = NonNullable<AskResponse['citations']>[number]
+type LegalAnswerSection = NonNullable<AskResponse['answer_sections']>[number]
 
 export function sanitizeDisplayAnswer(content: string, citations?: LegalCitation[]): string {
   // Keep answer clean for citizens/officers: no internal ids or technical bracket citations.
@@ -70,7 +90,7 @@ export function sanitizeDisplayAnswer(content: string, citations?: LegalCitation
     const cleanBody = String(body || '').trim()
     const natural = toNaturalCitation(cleanBody)
     if (!natural || /^\d+$/.test(natural.trim())) return ''
-    
+
     return `**${natural}**`
   })
   // bare legal:123
@@ -293,9 +313,22 @@ interface StreamingResponseProps {
   ragTrace?: RagTrace | null
   procedureDetail?: ProcedureDetail | null
   recommendedForms?: AskResponse['recommended_forms'] | null
+  formsUnavailable?: boolean
   citations?: AskResponse['citations']
   answerSections?: AskResponse['answer_sections']
   groundingStatus?: string | null
+  answerCompleteness?: AskResponse['answer_completeness'] | null
+  answerMode?: AskResponse['answer_mode'] | null
+  answerStatus?: AskResponse['answer_status'] | null
+  fallbackTier?: AskResponse['fallback_tier'] | null
+  evidenceCount?: number | null
+  coverageWarning?: string | null
+  blockedReason?: string | null
+  presentationVersion?: AskResponse['presentation_version'] | null
+  presentationSections?: AskResponse['sections'] | null
+  answerRoute?: AskResponse['answer_route'] | null
+  verificationLabel?: string | null
+  historicalLabel?: string | null
   role?: 'citizen' | 'officer' | 'admin'
   showRagTrace?: boolean
   faqs?: Array<{ id: string; question: string; answer: string; steps?: string[]; form_ids?: string[]; domain?: string; ward_scope?: string | null }> | null
@@ -309,8 +342,22 @@ export function StreamingResponse({
   ragTrace,
   procedureDetail,
   recommendedForms,
+  formsUnavailable = false,
   citations,
   answerSections,
+  groundingStatus,
+  answerCompleteness,
+  answerMode,
+  answerStatus,
+  fallbackTier,
+  evidenceCount,
+  coverageWarning,
+  blockedReason,
+  presentationVersion,
+  presentationSections,
+  answerRoute,
+  verificationLabel,
+  historicalLabel,
   role = 'citizen',
   showRagTrace = false,
   faqs,
@@ -442,8 +489,18 @@ export function StreamingResponse({
   }
 
   const hasAnswerSections = Boolean(answerSections?.length)
+  const hasPresentation = presentationVersion === 'legal-answer-v1' && Boolean(presentationSections)
+  const effectiveGroundingStatus = evidenceCount === 0 ? 'insufficient_evidence' : groundingStatus
+  const statusCopy = answerStatus ? {
+    grounded: ['Đã xác minh', 'Câu trả lời dựa trên nguồn hiện hành đã duyệt.'],
+    partial_grounded: ['Đã xác minh một phần', coverageWarning || 'Các phần có căn cứ được giữ lại; phần còn thiếu được nêu rõ.'],
+    broad_grounded: ['Quy định khung đã xác minh', 'Hệ thống đã mở rộng tra cứu toàn kho hiện hành; cần xác định thêm thủ tục trước khi gắn biểu mẫu.'],
+    clarifying: ['Cần làm rõ', 'Vui lòng bổ sung lựa chọn hoặc tình huống cụ thể để xác định đúng thủ tục.'],
+    source_gap: ['Cần bổ sung nguồn', 'Chưa đủ căn cứ hiện hành để kết luận; hệ thống không tự suy đoán nội dung pháp luật.'],
+    provider_error: ['Tạm thời chưa thể tổng hợp', 'Nguồn đã được kiểm tra nhưng dịch vụ tạo câu trả lời đang gặp lỗi.'],
+  }[answerStatus] : null
 
-  if (!strategy && !answers.length && !finalAnswer && !hasAnswerSections && !isStreaming) {
+  if (!strategy && !answers.length && !finalAnswer && !hasAnswerSections && !hasPresentation && !isStreaming) {
     return null
   }
 
@@ -513,7 +570,11 @@ export function StreamingResponse({
               <CardContent className="space-y-2 pt-0">
                 {answers.map((answer, i) => (
                   <div key={i} className="p-3 rounded-md bg-muted">
-                    <p className="text-sm">{answer}</p>
+                    <FinalAnswerContent
+                      content={sanitizeDisplayAnswer(answer, citations)}
+                      onReferenceClick={handleReferenceClick}
+                      citations={citations}
+                    />
                   </div>
                 ))}
               </CardContent>
@@ -523,77 +584,60 @@ export function StreamingResponse({
       )}
 
       {/* Structured sections replace the aggregate prose when available. */}
-      {hasAnswerSections && answerSections?.map((section) => {
-        const content = section.status === 'sufficiently_evidenced'
-          ? section.answer
-          : section.status === 'partially_evidenced'
-            ? section.guidance
-            : section.limitation
-        const statusLabel = section.status === 'sufficiently_evidenced'
-          ? 'Đã xác minh'
-          : section.status === 'partially_evidenced'
-            ? 'Hướng dẫn tham khảo'
-            : 'Chưa đủ căn cứ'
-        return (
-          <Card key={section.issue_id} className="border-primary" data-testid="answer-section">
-            <CardHeader>
-              <CardTitle className="text-base flex items-center gap-2">
-                <CheckCircle className="h-4 w-4 text-primary" />
-                {section.title}
-              </CardTitle>
-              <Badge variant="outline" data-testid={`answer-section-status-${section.status}`}>{statusLabel}</Badge>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              {content && <FinalAnswerContent content={sanitizeDisplayAnswer(content)} onReferenceClick={handleReferenceClick} />}
-              {section.limitation && section.status !== 'insufficiently_evidenced' && (
-                <p className="text-sm text-muted-foreground">{section.limitation}</p>
-              )}
-              {section.clarifying_question && (
-                <p className="text-sm text-muted-foreground">{section.clarifying_question}</p>
-              )}
-              {section.status === 'sufficiently_evidenced' && section.citations.length > 0 && (
-                <div className="space-y-1" data-testid="answer-section-citations">
-                  <p className="text-xs font-medium text-muted-foreground">Căn cứ đã xác minh</p>
-                  <div className="flex flex-wrap gap-2">
-                    {section.citations.map((citation, index) => {
-                      const sourceName = [citation.document_title, citation.law_number]
-                        .filter(Boolean)
-                        .join(' ')
-                      const label = [sourceName, citation.article_number ? `Điều ${citation.article_number}` : '']
-                        .filter(Boolean)
-                        .join(', ')
-                      return citation.source_url ? (
-                        <a
-                          key={`${citation.law_number || citation.document_title || 'source'}-${index}`}
-                          href={citation.source_url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-xs text-primary hover:underline"
-                        >
-                          {label || 'Xem nguồn chính thức'}
-                        </a>
-                      ) : (
-                        <span key={`${citation.law_number || citation.document_title || 'source'}-${index}`} className="text-xs text-muted-foreground">
-                          {label || 'Nguồn đã xác minh'}
-                        </span>
-                      )
-                    })}
-                  </div>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        )
-      })}
+      {statusCopy && (
+        <div className="rounded-lg border bg-muted/30 px-4 py-3" data-testid="answer-status-banner">
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant={answerStatus === 'grounded' ? 'default' : 'outline'}>{statusCopy[0]}</Badge>
+            {fallbackTier && <span className="text-xs text-muted-foreground">Tầng tra cứu: {fallbackTier}</span>}
+          </div>
+          <p className="mt-2 text-sm text-muted-foreground">{statusCopy[1]}</p>
+          {blockedReason && evidenceCount === 0 && (
+            <p className="mt-1 text-xs text-muted-foreground">Lý do: {blockedReason}</p>
+          )}
+        </div>
+      )}
+      {hasPresentation && presentationSections && (
+        <LegalAnswerCard
+          sections={presentationSections}
+          answerStatus={answerStatus}
+          answerRoute={answerRoute}
+          evidenceCount={evidenceCount}
+          verificationLabel={verificationLabel}
+          historicalLabel={historicalLabel}
+          role={role}
+        />
+      )}
+      {!hasPresentation && hasAnswerSections && answerSections && (
+        <StructuredLegalAnswer
+          sections={answerSections}
+          role={role}
+          groundingStatus={effectiveGroundingStatus}
+          answerCompleteness={answerCompleteness}
+          answerMode={answerMode}
+          onReferenceClick={handleReferenceClick}
+        />
+      )}
 
       {/* Legacy flat Answer Section - Always Open */}
-      {!hasAnswerSections && finalAnswer && (
+      {!hasPresentation && !hasAnswerSections && finalAnswer && (
         <Card className="border-primary">
-          <CardHeader>
+          <CardHeader className="flex flex-row items-center justify-between gap-3">
             <CardTitle className="text-base flex items-center gap-2">
               <CheckCircle className="h-4 w-4 text-primary" />
               {t('common.finalAnswer')}
             </CardTitle>
+            <div className="flex flex-wrap justify-end gap-2">
+              {answerMode && answerMode !== 'normal' ? (
+                <Badge variant="outline" data-testid="answer-mode-badge">
+                  {providerFallbackLabel()}
+                </Badge>
+              ) : (
+                <Badge variant="secondary">{answerGroundingLabel(effectiveGroundingStatus)}</Badge>
+              )}
+              <Badge variant={answerCompleteness?.status === 'complete' ? 'default' : 'outline'}>
+                {answerCompletenessLabel(answerCompleteness)}
+              </Badge>
+            </div>
           </CardHeader>
           <CardContent className="max-h-[80vh] md:max-h-[85vh] overflow-y-auto pr-4">
             <FinalAnswerContent
@@ -606,86 +650,95 @@ export function StreamingResponse({
       )}
 
       {/* Widget Thủ tục Hành chính Cấu trúc */}
-      
+
       {/* Căn cứ pháp lý - compact citation links (internal only) */}
-      {citations && citations.length > 0 && (
-        <div className="space-y-2">
-          <h4 className="text-sm font-semibold text-muted-foreground flex items-center gap-1.5">
-            <BookOpen className="h-4 w-4" />
-            Căn cứ pháp lý
-          </h4>
-          <div className="flex flex-wrap gap-2">
-            {citations.slice(0, 3).map((cit, idx) => {
-              const lawNum = cit.law_number || ""
-              const artNum = cit.article_number || ""
-              const docTitle = cit.document_title || ""
-              
-              // Tạo nhãn tự nhiên dạng: Số hiệu — Điều X
-              const labelParts = []
-              if (lawNum) {
-                labelParts.push(lawNum)
-              } else if (docTitle) {
-                labelParts.push(docTitle)
-              }
-              if (artNum) {
-                labelParts.push("Điều " + artNum)
-              }
-              const displayLabel = labelParts.join(" — ") || cit.label || "Văn bản pháp luật"
-              const docId = cit.doc_id ? String(cit.doc_id).replace(/^legal:/, "").trim() : ""
-              
-              const viewerUrl = String(cit.internal_url || '').trim() || (docId
-                ? `/legal-documents/${encodeURIComponent(docId)}${artNum ? `?article=${encodeURIComponent(artNum)}` : ''}`
-                : '')
-              const sourceUrl = String(cit.source_url || '').trim()
-              const hasSourceUrl = /^https?:\/\//i.test(sourceUrl)
-                
+      {!hasPresentation && !hasAnswerSections && citations && citations.some((citation) => (
+        Boolean(citation.doc_id) || /^https?:\/\//i.test(String(citation.source_url || ''))
+      )) && (
+          <div className="space-y-2">
+            <h4 className="text-sm font-semibold text-muted-foreground flex items-center gap-1.5">
+              <BookOpen className="h-4 w-4" />
+              Căn cứ pháp lý
+            </h4>
+            <div className="flex flex-wrap gap-2">
+              {citations.slice(0, 3).map((cit, idx) => {
+                const lawNum = cit.law_number || ""
+                const artNum = cit.article_number || ""
+                const docTitle = cit.document_title || ""
 
-              return (
-                <div key={idx} className="flex items-center gap-2 flex-wrap rounded-md border border-border/50 bg-card/50 px-3 py-1.5 text-xs transition-colors hover:bg-card">
-                  <span className="font-medium text-foreground">{displayLabel}</span>
-                  <span className="text-muted-foreground/30">|</span>
-                  {docId ? (
-                    <div className="flex items-center gap-2.5">
-                      <Link
-                        href={viewerUrl}
-                        className="text-primary font-semibold hover:underline flex items-center gap-0.5"
-                      >
-                        Xem văn bản
-                      </Link>
-                      {hasSourceUrl && (
-                        <a
-                          href={sourceUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-muted-foreground hover:text-foreground hover:underline"
+                // Tạo nhãn tự nhiên dạng: Số hiệu — Điều X
+                const labelParts = []
+                if (lawNum) {
+                  labelParts.push(lawNum)
+                } else if (docTitle) {
+                  labelParts.push(docTitle)
+                }
+                if (artNum) {
+                  labelParts.push("Điều " + artNum)
+                }
+                const displayLabel = labelParts.join(" — ") || cit.label || "Văn bản pháp luật"
+                const docId = cit.doc_id ? String(cit.doc_id).replace(/^legal:/, "").trim() : ""
+
+                const viewerUrl = String(cit.internal_url || '').trim() || (docId
+                  ? `/legal-documents/${encodeURIComponent(docId)}${artNum ? `?article=${encodeURIComponent(artNum)}` : ''}`
+                  : '')
+                const sourceUrl = String(cit.source_url || '').trim()
+                const hasSourceUrl = /^https?:\/\//i.test(sourceUrl)
+
+
+                return (
+                  <div key={idx} className="flex items-center gap-2 flex-wrap rounded-md border border-border/50 bg-card/50 px-3 py-1.5 text-xs transition-colors hover:bg-card">
+                    <span className="font-medium text-foreground">{displayLabel}</span>
+                    <span className="text-muted-foreground/30">|</span>
+                    {docId ? (
+                      <div className="flex items-center gap-2.5">
+                        <Link
+                          href={viewerUrl}
+                          className="text-primary font-semibold hover:underline flex items-center gap-0.5"
                         >
-                          Nguồn gốc
-                        </a>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => void downloadLegalPdf(docId, artNum || undefined, lawNum || docTitle || docId)}
-                        className="text-muted-foreground hover:text-foreground hover:underline flex items-center gap-0.5"
+                          Xem văn bản
+                        </Link>
+                        {hasSourceUrl && (
+                          <a
+                            href={sourceUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-muted-foreground hover:text-foreground hover:underline"
+                          >
+                            Nguồn gốc
+                          </a>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => void downloadLegalPdf(docId, artNum || undefined, lawNum || docTitle || docId)}
+                          className="text-muted-foreground hover:text-foreground hover:underline flex items-center gap-0.5"
+                        >
+                          Tải PDF
+                        </button>
+                      </div>
+                    ) : hasSourceUrl ? (
+                      <a
+                        href={sourceUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-primary font-semibold hover:underline"
                       >
-                        Tải PDF
-                      </button>
-                    </div>
-                  ) : (
-                    <span className="text-muted-foreground italic">Không có link xem</span>
-                  )}
-                </div>
-              )
-            })}
+                        Xem nguồn chính thức
+                      </a>
+                    ) : null}
+                  </div>
+                )
+              })}
+            </div>
           </div>
-        </div>
-      )}
+        )}
 
-{faqs && faqs.length > 0 && (
+      {faqs && faqs.length > 0 && (
         <FAQAccordion faqs={faqs} />
       )}
 
-{((procedureDetail?.forms && procedureDetail.forms.length > 0) || (recommendedForms && recommendedForms.length > 0)) && (
-        <Card className="border-primary/20 bg-primary/5">
+      {!hasPresentation && ((procedureDetail?.forms && procedureDetail.forms.length > 0) || (recommendedForms && recommendedForms.length > 0)) && (
+        <Card data-testid="official-forms" className="border-primary/20 bg-primary/5">
           <CardHeader className="pb-3">
             <CardTitle className="text-base flex items-center gap-2 text-primary">
               <Sparkles className="h-4 w-4" />
@@ -703,6 +756,11 @@ export function StreamingResponse({
                 const canDownload = Boolean(form.download_url) && hasOfficialFile && !isReference
                 const displayName = normalizeFormDisplayName(form)
                 const procedureId = 'procedure_id' in form ? form.procedure_id : undefined
+                const procedureName = 'procedure_name' in form ? form.procedure_name : undefined
+                const formCode = 'form_code' in form ? form.form_code : undefined
+                const sourceUrl = 'source_url' in form ? form.source_url : undefined
+                const effectiveFrom = 'effective_from' in form ? form.effective_from : undefined
+                const effectiveTo = 'effective_to' in form ? form.effective_to : undefined
                 return (
                   <div key={idx} className="flex flex-col gap-3 rounded-lg border bg-background p-3 hover:border-primary/50 transition-all">
                     <div className="flex items-start justify-between gap-2">
@@ -710,6 +768,31 @@ export function StreamingResponse({
                       <Badge variant={canDownload ? 'default' : 'secondary'} className="shrink-0 text-[10px] px-1.5 py-0.5">
                         {canDownload ? 'Chính thức' : 'Chưa có file hợp lệ'}
                       </Badge>
+                    </div>
+                    <div className="space-y-1 text-xs text-muted-foreground">
+                      {formCode && <p><span className="font-medium text-foreground">Mã mẫu:</span> {formCode}</p>}
+                      {(procedureName || procedureId) && (
+                        <p><span className="font-medium text-foreground">Thủ tục:</span> {procedureName || procedureId}</p>
+                      )}
+                      {form.file_type && (
+                        <p><span className="font-medium text-foreground">Định dạng:</span> {form.file_type.replace(/^\./, '').toUpperCase()}</p>
+                      )}
+                      {effectiveFrom && (
+                        <p>
+                          <span className="font-medium text-foreground">Hiệu lực:</span> từ {effectiveFrom}
+                          {effectiveTo ? ` đến ${effectiveTo}` : ''}
+                        </p>
+                      )}
+                      {sourceUrl && isExternalUrl(sourceUrl) && (
+                        <a
+                          href={sourceUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex font-medium text-primary hover:underline"
+                        >
+                          Nguồn biểu mẫu
+                        </a>
+                      )}
                     </div>
                     <div className="flex justify-end border-t border-muted/50 pt-2">
                       {canDownload ? (
@@ -738,6 +821,17 @@ export function StreamingResponse({
         </Card>
       )}
 
+      {formsUnavailable && !(recommendedForms?.length) && !(procedureDetail?.forms?.length) && (
+        <Card data-testid="forms-unavailable" className="border-amber-300/60 bg-amber-50/70 dark:bg-amber-950/20">
+          <CardContent className="pt-6 text-sm">
+            <p className="font-medium">Chưa có biểu mẫu chính thức đã duyệt để tải.</p>
+            <p className="mt-1 text-muted-foreground">
+              Vui lòng kiểm tra cổng dịch vụ công hoặc cơ quan tiếp nhận được nêu trong nguồn chính thức; hệ thống không tạo mẫu thay thế.
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
       {ragTrace && role === 'admin' && showRagTrace && (
         <Collapsible open={traceOpen} onOpenChange={setTraceOpen}>
           <Card>
@@ -762,6 +856,16 @@ export function StreamingResponse({
                       Nhận diện: {ragTrace.detected_domain?.name || 'Chưa rõ'}
                     </Badge>
                   </div>
+                </TraceBlock>
+                <TraceBlock title="Mức độ bao phủ nội dung được hỏi">
+                  <pre data-testid="admin-evidence-coverage" className="max-h-56 overflow-auto rounded-md bg-muted p-3 text-xs">
+                    {JSON.stringify(ragTrace.evidence_coverage || {}, null, 2)}
+                  </pre>
+                </TraceBlock>
+                <TraceBlock title="Nguồn gốc và trạng thái biểu mẫu">
+                  <pre data-testid="form-provenance" className="max-h-56 overflow-auto rounded-md bg-muted p-3 text-xs">
+                    {JSON.stringify(ragTrace.form_provenance || { requested: false }, null, 2)}
+                  </pre>
                 </TraceBlock>
                 <TraceBlock title="Chunk được truy xuất">
                   <div className="space-y-2 max-h-80 overflow-y-auto pr-2">
@@ -813,6 +917,352 @@ export function StreamingResponse({
         </div>
       )}
     </div>
+  )
+}
+
+const CITIZEN_SECTION_ORDER = [
+  'rule',
+  'condition',
+  'documents',
+  'authority',
+  'procedure',
+  'deadline',
+  'fee',
+  'dispute',
+  'form',
+  'unknown',
+]
+
+const OFFICER_SECTION_ORDER = [
+  'rule',
+  'condition',
+  'documents',
+  'authority',
+  'dispute',
+  'procedure',
+  'deadline',
+  'fee',
+  'form',
+  'unknown',
+]
+
+const SECTION_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
+  rule: Scale,
+  condition: ListChecks,
+  authority: Landmark,
+  documents: FileCheck2,
+  procedure: ArrowRight,
+  deadline: Clock3,
+  fee: WalletCards,
+  dispute: ShieldCheck,
+  form: FileText,
+  unknown: CircleHelp,
+}
+
+function sectionStatus(section: LegalAnswerSection) {
+  if (section.status === 'sufficiently_evidenced') {
+    return {
+      label: 'Đã xác minh',
+      className: 'border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-200',
+      icon: CheckCircle,
+    }
+  }
+  if (section.status === 'partially_evidenced') {
+    return {
+      label: 'Kết luận có điều kiện',
+      className: 'border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200',
+      icon: AlertCircle,
+    }
+  }
+  return {
+    label: section.clarifying_question ? 'Cần bổ sung thông tin' : 'Chưa đủ nguồn',
+    className: 'border-slate-200 bg-slate-50 text-slate-700 dark:border-slate-800 dark:bg-slate-900/60 dark:text-slate-200',
+    icon: CircleHelp,
+  }
+}
+
+function answerGroundingLabel(value?: string | null): string {
+  if (value === 'fully_grounded') return 'Căn cứ hợp lệ'
+  if (value === 'partially_grounded') return 'Căn cứ hợp lệ một phần'
+  if (value === 'insufficient_evidence') return 'Cần bổ sung nguồn'
+  return 'Đang đối chiếu căn cứ'
+}
+
+function answerCompletenessLabel(value?: AskResponse['answer_completeness'] | null): string {
+  if (value?.status === 'complete') return 'Trả lời đầy đủ'
+  if (value?.status === 'incomplete') return 'Trả lời chưa đầy đủ'
+  return 'Chưa xác định độ đầy đủ'
+}
+
+function providerFallbackLabel(): string {
+  return 'Nguồn đã xác minh nhưng câu trả lời đang ở chế độ rút gọn'
+}
+
+function citationLabel(citation: LegalAnswerSection['citations'][number]): string {
+  const provision = [
+    citation.article_number ? `Điều ${citation.article_number}` : '',
+    citation.clause_number ? `Khoản ${citation.clause_number}` : '',
+    citation.point_number ? `Điểm ${citation.point_number}` : '',
+  ].filter(Boolean).join(', ')
+  return [citation.law_number || citation.document_title || 'Nguồn pháp lý', provision]
+    .filter(Boolean)
+    .join(' · ')
+}
+
+function SectionCitations({ citations }: { citations: LegalAnswerSection['citations'] }) {
+  if (!citations.length) return null
+  return (
+    <div className="space-y-2" data-testid="answer-section-citations">
+      <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        Căn cứ trực tiếp
+      </p>
+      <div className="flex flex-wrap gap-2">
+        {citations.map((citation, index) => {
+          const label = citationLabel(citation)
+          const key = `${citation.law_number || citation.document_title || 'source'}-${citation.article_number || ''}-${index}`
+          if (!citation.source_url) {
+            return (
+              <span
+                key={key}
+                className="inline-flex max-w-full items-center rounded-full border bg-muted/40 px-3 py-1.5 text-xs font-medium text-muted-foreground"
+              >
+                {label}
+              </span>
+            )
+          }
+          return (
+            <a
+              key={key}
+              href={citation.source_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-primary/20 bg-primary/5 px-3 py-1.5 text-xs font-semibold text-primary transition-colors hover:border-primary/40 hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+            >
+              <span className="truncate">{label}</span>
+              <ExternalLink className="h-3 w-3 shrink-0" aria-hidden="true" />
+            </a>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function AnswerSectionBlock({
+  section,
+  role,
+  isSummary = false,
+  onReferenceClick,
+}: {
+  section: LegalAnswerSection
+  role: 'citizen' | 'officer' | 'admin'
+  isSummary?: boolean
+  onReferenceClick: (type: string, id: string) => void
+}) {
+  const facet = section.facet || 'unknown'
+  const Icon = SECTION_ICONS[facet] || CircleHelp
+  const status = sectionStatus(section)
+  const StatusIcon = status.icon
+  const isImmediateAction = section.claim_types?.includes('next_action') === true
+  const content = section.status === 'sufficiently_evidenced'
+    ? section.answer
+    : section.status === 'partially_evidenced'
+      ? section.guidance
+      : section.limitation
+  const heading = isSummary
+    ? role === 'officer'
+      ? 'Kết luận nghiệp vụ'
+      : 'Kết luận ngắn'
+    : isImmediateAction
+      ? 'Việc nên làm ngay'
+      : section.title
+
+  return (
+    <section
+      data-testid="answer-section"
+      className={[
+        'px-4 py-5 sm:px-6',
+        isSummary ? 'bg-primary/[0.045]' : '',
+        isImmediateAction && !isSummary ? 'bg-sky-50/60 dark:bg-sky-950/15' : '',
+      ].filter(Boolean).join(' ')}
+    >
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="flex min-w-0 items-start gap-3">
+          <div className={[
+            'mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl',
+            isSummary || isImmediateAction ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground',
+          ].join(' ')}>
+            <Icon className="h-[18px] w-[18px]" aria-hidden="true" />
+          </div>
+          <div className="min-w-0">
+            <h3 className={isSummary ? 'text-lg font-semibold tracking-tight' : 'text-base font-semibold'}>
+              {heading}
+            </h3>
+            {isSummary && section.title !== heading && (
+              <p className="mt-0.5 text-xs text-muted-foreground">{section.title}</p>
+            )}
+          </div>
+        </div>
+        <Badge
+          variant="outline"
+          className={`w-fit shrink-0 gap-1.5 ${status.className}`}
+          data-testid={`answer-section-status-${section.status}`}
+        >
+          <StatusIcon className="h-3.5 w-3.5" aria-hidden="true" />
+          {status.label}
+        </Badge>
+      </div>
+
+      <div className="mt-4 space-y-4 pl-0 sm:pl-12">
+        {content && (
+          <FinalAnswerContent
+            content={sanitizeDisplayAnswer(content, section.citations)}
+            onReferenceClick={onReferenceClick}
+            citations={section.citations}
+          />
+        )}
+        {section.limitation && section.status !== 'insufficiently_evidenced' && (
+          <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50/70 px-3 py-2.5 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100">
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+            <div className="flex-1 min-w-0">
+              <FinalAnswerContent
+                content={sanitizeDisplayAnswer(section.limitation, section.citations)}
+                onReferenceClick={onReferenceClick}
+                citations={section.citations}
+              />
+            </div>
+          </div>
+        )}
+        {section.clarifying_question && (
+          <div className="rounded-xl border border-violet-200 bg-violet-50/60 p-3 text-sm dark:border-violet-900 dark:bg-violet-950/20">
+            <p className="mb-1 font-semibold text-violet-900 dark:text-violet-100">Điểm cần xác minh</p>
+            <FinalAnswerContent
+              content={sanitizeDisplayAnswer(section.clarifying_question, section.citations)}
+              onReferenceClick={onReferenceClick}
+              citations={section.citations}
+            />
+          </div>
+        )}
+        {section.status === 'sufficiently_evidenced' && (
+          <SectionCitations citations={section.citations} />
+        )}
+      </div>
+    </section>
+  )
+}
+
+function StructuredLegalAnswer({
+  sections,
+  role,
+  groundingStatus,
+  answerCompleteness,
+  answerMode,
+  onReferenceClick,
+}: {
+  sections: LegalAnswerSection[]
+  role: 'citizen' | 'officer' | 'admin'
+  groundingStatus?: string | null
+  answerCompleteness?: AskResponse['answer_completeness'] | null
+  answerMode?: AskResponse['answer_mode'] | null
+  onReferenceClick: (type: string, id: string) => void
+}) {
+  const order = role === 'officer' ? OFFICER_SECTION_ORDER : CITIZEN_SECTION_ORDER
+  const ordered = sections
+    .map((section, index) => ({ section, index }))
+    .sort((left, right) => {
+      const priorityRank = { critical: 0, high: 1, normal: 2 } as const
+      const leftFacet = order.indexOf(left.section.facet || 'unknown')
+      const rightFacet = order.indexOf(right.section.facet || 'unknown')
+      const facetDelta = (leftFacet < 0 ? order.length : leftFacet) - (rightFacet < 0 ? order.length : rightFacet)
+      if (facetDelta !== 0) return facetDelta
+      const leftPriority = priorityRank[left.section.priority || 'normal']
+      const rightPriority = priorityRank[right.section.priority || 'normal']
+      return leftPriority - rightPriority || left.index - right.index
+    })
+    .map(({ section }) => section)
+  const summary = ordered.find((section) => (
+    section.status === 'sufficiently_evidenced'
+    && (section.facet === 'rule' || section.priority === 'critical')
+  )) || ordered.find((section) => section.status === 'sufficiently_evidenced') || ordered[0]
+  const normalizedSummaryAnswer = (summary?.answer || '')
+    .replace(/^\s*(?:[-*]\s*)?(?:kết luận|điều kiện(?: áp dụng)?|hướng dẫn nghiệp vụ)\s*:\s*/iu, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  const details = ordered
+    .filter((section) => section !== summary)
+    .map((section) => {
+      if (section.status !== 'sufficiently_evidenced' || !section.answer || !normalizedSummaryAnswer) {
+        return section
+      }
+      const normalizedAnswer = section.answer
+        .replace(/^\s*(?:[-*]\s*)?(?:kết luận|điều kiện(?: áp dụng)?|hướng dẫn nghiệp vụ)\s*:\s*/iu, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+      if (normalizedAnswer !== normalizedSummaryAnswer) return section
+      return {
+        ...section,
+        answer: role === 'officer'
+          ? 'Nội dung này sử dụng cùng căn cứ đã nêu trong kết luận nghiệp vụ ở trên.'
+          : 'Nội dung này áp dụng cùng căn cứ đã nêu trong kết luận ngắn ở trên.',
+      }
+    })
+  const roleLabel = role === 'officer'
+    ? 'Hướng dẫn nghiệp vụ cán bộ'
+    : role === 'admin'
+      ? 'Kết quả kiểm chứng quản trị'
+      : 'Hướng dẫn dành cho người dân'
+
+  return (
+    <section
+      className="overflow-hidden rounded-2xl border border-border/80 bg-card shadow-sm"
+      aria-label={roleLabel}
+      data-testid="structured-legal-answer"
+    >
+      <header className="flex flex-col gap-2 border-b bg-muted/25 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+        <div className="flex items-center gap-2 text-sm font-semibold">
+          <ShieldCheck className="h-4 w-4 text-primary" aria-hidden="true" />
+          {roleLabel}
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {answerMode && answerMode !== 'normal' ? (
+            <Badge variant="outline" className="w-fit" data-testid="answer-mode-badge">
+              {providerFallbackLabel()}
+            </Badge>
+          ) : (
+            <Badge variant="secondary" className="w-fit" data-testid="grounding-status-badge">
+              {answerGroundingLabel(groundingStatus)}
+            </Badge>
+          )}
+          <Badge
+            variant={answerCompleteness?.status === 'complete' ? 'default' : 'outline'}
+            className="w-fit"
+            data-testid="answer-completeness-badge"
+          >
+            {answerCompletenessLabel(answerCompleteness)}
+          </Badge>
+        </div>
+      </header>
+      {summary && (
+        <AnswerSectionBlock
+          section={summary}
+          role={role}
+          isSummary
+          onReferenceClick={onReferenceClick}
+        />
+      )}
+      {details.length > 0 && (
+        <div className="divide-y divide-border/70">
+          {details.map((section) => (
+            <AnswerSectionBlock
+              key={section.issue_id}
+              section={section}
+              role={role}
+              onReferenceClick={onReferenceClick}
+            />
+          ))}
+        </div>
+      )}
+    </section>
   )
 }
 

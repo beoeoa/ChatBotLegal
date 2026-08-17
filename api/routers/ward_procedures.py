@@ -3,14 +3,21 @@ import json
 from pathlib import Path
 import re
 import unicodedata
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 from api.auth import get_request_role, get_request_user_id
 from api.observability import telemetry
 from api.data_paths import notebook_data_dir
+from api.upload_security import (
+    DOCUMENT_UPLOAD_POLICY,
+    UploadPolicy,
+    UploadSecurityError,
+    safe_storage_path,
+    validate_upload,
+)
 from time import perf_counter
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 router = APIRouter(prefix="/procedures", tags=["ward-procedures"])
 
@@ -43,6 +50,11 @@ PRIORITY_FORMS_FILES_DIR = (
     PROJECT_ROOT / "data" / "uploads" / "forms" / "priority_official"
 )
 FORMS_QUARANTINE_DIR = PROJECT_ROOT / "data" / "quarantine" / "forms_synthetic"
+CANONICAL_FORMS_CATALOG_PATH = FORMS_DATA_DIR / "canonical_forms_catalog_v1.json"
+CANONICAL_FORM_BINDINGS_PATH = FORMS_DATA_DIR / "procedure_form_bindings_v1.json"
+FORM_REVIEW_ATTESTATIONS_PATH = FORMS_DATA_DIR / "legal_review_attestations_v1.json"
+FORM_CHECKSUM_MANIFEST_PATH = FORMS_DATA_DIR / "canonical_form_checksums_v1.json"
+FORM_RELEASE_GATE_STATUS_PATH = PROJECT_ROOT / "data" / "form_release_gate" / "status_v1.json"
 
 class FormTemplate(BaseModel):
     name: str = Field(..., description="Tên biểu mẫu (ví dụ: Tờ khai đăng ký kết hôn)")
@@ -298,10 +310,23 @@ async def list_procedures(
     query: Optional[str] = Query(None, description="Tìm kiếm theo tên thủ tục")
 ):
     try:
-        # Load from SurrealDB dynamically
-        db_procs = await repo_query("SELECT * FROM ward_procedure ORDER BY name ASC;", {})
-        if not db_procs:
-            # Fallback to seed list if database is empty
+        conditions = []
+        params = {}
+        if department:
+            conditions.append("string::lowercase(department) CONTAINS string::lowercase($department)")
+            params["department"] = department.strip()
+        if domain:
+            conditions.append("domain_slug = $domain")
+            params["domain"] = domain.strip()
+        if query:
+            conditions.append("string::lowercase(name) CONTAINS string::lowercase($query)")
+            params["query"] = query.strip()
+
+        where_sql = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+        sql = f"SELECT * FROM ward_procedure{where_sql} ORDER BY name ASC;"
+        db_procs = await repo_query(sql, params)
+        if not db_procs and not conditions:
+            # Fallback to seed list if database is empty and no filters requested
             db_procs = HAI_PHONG_PROCEDURES_SEED
         
         results = []
@@ -901,6 +926,24 @@ def _normalized_search_text(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", value).strip()
 
 
+def _is_form_runtime_approved(form: Dict[str, Any]) -> bool:
+    """Whether a legacy record has passed the canonical legal-release gate.
+
+    A preliminary queue decision is not a legal attestation. Historical
+    Every record on a public surface must carry an explicit runtime release.
+    """
+    return (
+        form.get("review_status") == "approved"
+        and form.get("legal_review_status") == "approved"
+        and form.get("is_canonical") is True
+        and form.get("catalog_status") == "available_official_source"
+        and form.get("approved") is True
+        and form.get("is_quarantined") is not True
+        and form.get("quarantined") is not True
+        and form.get("runtime_eligible") is True
+    )
+
+
 def _get_approved_form_ids() -> set[str]:
     """IDs that are safe for citizen/officer official form surfaces.
 
@@ -911,24 +954,22 @@ def _get_approved_form_ids() -> set[str]:
     Pending/rejected never included.
     """
     approved_ids: set[str] = set()
-    manifest = _load_forms_json(FORMS_MANIFEST_PATH, {})
-    for _domain, forms in (manifest.get("forms") or {}).items():
-        for form in forms or []:
-            if form.get("review_status") == "approved":
-                approved_ids.add(str(form.get("id")))
-
-    index_payload = _load_forms_json(OFFICIAL_FORMS_INDEX_PATH, {"forms": []})
-    for form in index_payload.get("forms") or []:
-        if form.get("review_status") == "approved" or form.get("is_approved") is True:
-            approved_ids.add(str(form.get("id")))
-
-    classified = _load_forms_json(
-        CLASSIFIED_FORMS_CANDIDATES_PATH,
-        {"records": []},
-    )
-    for form in classified.get("records") or []:
-        if form.get("review_status") == "approved" or form.get("is_approved") is True:
-            approved_ids.add(str(form.get("id")))
+    forms_payload = _load_forms_json(CANONICAL_FORMS_CATALOG_PATH, {"forms": []})
+    bindings_payload = _load_forms_json(CANONICAL_FORM_BINDINGS_PATH, {"bindings": []})
+    bound_form_ids = {
+        str(binding.get("form_id"))
+        for binding in bindings_payload.get("bindings") or []
+        if binding.get("approved") is True
+        and binding.get("binding_status") == "approved"
+        and binding.get("review_status") == "approved"
+    }
+    for form in forms_payload.get("forms") or []:
+        form_id = str(form.get("form_id") or "")
+        # Canonical records use ``form_id`` rather than legacy ``id``.
+        legacy_shape = {**form, "id": form_id, "is_canonical": True,
+                        "catalog_status": "available_official_source"}
+        if form_id in bound_form_ids and _is_form_runtime_approved(legacy_shape):
+            approved_ids.add(form_id)
     return approved_ids
 
 
@@ -1597,6 +1638,618 @@ def _save_classified_candidates(payload: Dict[str, Any]) -> None:
     )
 
 
+def bridge_officer_form_candidate(candidate: Dict[str, Any]) -> Dict[str, Any]:
+    """Mirror an uploaded officer form into the dedicated Admin form queue.
+
+    This is queue synchronization only. It deliberately leaves the form
+    non-public and non-canonical until an Admin review and legal attestation
+    have both completed.
+    """
+    import hashlib
+    from datetime import datetime, timezone
+
+    uploaded = candidate.get("uploaded_file") or {}
+    raw = candidate.get("raw_metadata") or {}
+    candidate_id = str(candidate.get("id") or "").strip()
+    if not candidate_id:
+        raise ValueError("OFFICER_FORM_CANDIDATE_ID_REQUIRED")
+    raw_path = str(uploaded.get("path") or "").strip()
+    if not raw_path:
+        raise ValueError("OFFICER_FORM_UPLOAD_REQUIRED")
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = (PROJECT_ROOT / path).resolve()
+    else:
+        path = path.resolve()
+    try:
+        path.relative_to(PROJECT_ROOT.resolve())
+    except ValueError as exc:
+        raise ValueError("OFFICER_FORM_UPLOAD_OUTSIDE_PROJECT") from exc
+    if not path.is_file():
+        raise ValueError("OFFICER_FORM_UPLOAD_NOT_FOUND")
+
+    content = path.read_bytes()
+    digest = hashlib.sha256(content).hexdigest()
+    token = candidate_id.split(":", 1)[-1]
+    form_id = f"officer-{token}"
+    relative_path = str(path.relative_to(PROJECT_ROOT)).replace("\\", "/")
+    now = datetime.now(timezone.utc).isoformat()
+    title = str(candidate.get("title") or uploaded.get("filename") or form_id).strip()
+    record = {
+        "id": form_id,
+        "candidate_id": candidate_id,
+        "officer_candidate_id": candidate_id,
+        "detected_form_name": title,
+        "form_title": title,
+        "domain": candidate.get("domain"),
+        "suggested_domain": candidate.get("domain"),
+        "procedure_id": raw.get("procedure_id"),
+        "suggested_procedure_id": raw.get("procedure_id"),
+        "file_name": uploaded.get("filename") or path.name,
+        "file_path": relative_path,
+        "local_path": relative_path,
+        "source_package_path": relative_path,
+        "size_bytes": len(content),
+        "sha256": digest,
+        "review_status": "candidate_pending_review",
+        "legal_review_status": "pending",
+        "official_level": "official",
+        "is_approved": False,
+        "is_canonical": False,
+        "catalog_status": "candidate_pending_review",
+        "runtime_eligible": False,
+        "publisher": candidate.get("issuing_agency") or "Cán bộ đề xuất",
+        "source_url": candidate.get("source_url"),
+        "source_page_url": raw.get("source_page_url") or candidate.get("source_url"),
+        "source_download_url": candidate.get("source_url"),
+        "issued_date": raw.get("issued_date"),
+        "effective_date": raw.get("effective_date"),
+        "submitted_by": str(candidate.get("submitted_by") or ""),
+        "candidate_origin": "officer_document_proposal",
+        "retrieved_at": now,
+        "uploaded_at": now,
+        "uploaded_by_role": "officer",
+    }
+
+    payload = _load_classified_candidates()
+    records = list(payload.get("records") or [])
+    replaced = False
+    for index, existing in enumerate(records):
+        if (
+            str(existing.get("id")) == form_id
+            or str(existing.get("candidate_id")) == candidate_id
+            or str(existing.get("sha256")) == digest
+        ):
+            records[index] = {**existing, **record}
+            replaced = True
+            break
+    if not replaced:
+        records.append(record)
+    status_counts = Counter(
+        str(item.get("review_status") or "unknown") for item in records
+    )
+    payload["records"] = records
+    payload["generated_at"] = now
+    payload["summary"] = {
+        **(payload.get("summary") or {}),
+        "review_status_counts": dict(status_counts),
+        "total": len(records),
+    }
+    _save_classified_candidates(payload)
+    return record
+
+
+def _require_form_review_admin(request: Request) -> str:
+    """Keep review previews and legal decisions inside the Admin workflow."""
+    if get_request_role(request) != "admin":
+        raise HTTPException(status_code=403, detail="Admin role required")
+    reviewer_id = get_request_user_id(request)
+    if not reviewer_id:
+        raise HTTPException(status_code=403, detail="Admin reviewer identity required")
+    return reviewer_id
+
+
+def _next_form_resolution_campaign_batch(
+    run_id: str,
+) -> tuple[Dict[str, Any], int]:
+    """Return the first batch not yet decided by an Admin.
+
+    ``review-shortlist.json`` is the first-batch compatibility artifact.  A
+    campaign can contain more than one batch, so using that file after the
+    first decision would submit the same records again with a new attestation
+    identifier.  The full batch list plus the recorded decisions is the
+    authoritative cursor for the review UI.
+    """
+    from api import form_resolution_campaign
+
+    run_dir = form_resolution_campaign.CAMPAIGN_DIR / "runs" / run_id
+    batches_payload = _load_forms_json(run_dir / "review-batches.json", {})
+    batches = [
+        dict(item)
+        for item in batches_payload.get("batches") or []
+        if isinstance(item, dict)
+    ]
+    if not batches:
+        payload = _load_forms_json(run_dir / "review-shortlist.json", {})
+        if not payload:
+            raise HTTPException(status_code=404, detail="FORM_RESOLUTION_RUN_NOT_FOUND")
+        return payload, 1
+
+    campaign_status = form_resolution_campaign.load_campaign_status(
+        project_root=PROJECT_ROOT
+    )
+    attested_batch_ids = set()
+    if str(campaign_status.get("run_id") or "") == run_id:
+        attested_batch_ids = {
+            str(item.get("batch_id"))
+            for item in campaign_status.get("attested_batches") or []
+            if isinstance(item, dict) and item.get("batch_id")
+        }
+    for batch in batches:
+        if str(batch.get("batch_id") or "") not in attested_batch_ids:
+            return batch, len(batches)
+
+    raise HTTPException(
+        status_code=409,
+        detail="FORM_RESOLUTION_ALL_BATCHES_ATTESTED",
+    )
+
+
+def _has_matching_campaign_attestation(
+    attestations_payload: Dict[str, Any],
+    attestation: Dict[str, Any],
+    shortlist_records: List[Dict[str, Any]],
+) -> bool:
+    """Recognize a previously completed, identical human decision.
+
+    A release-gate handoff can fail after the file transaction has atomically
+    recorded an attestation.  Retrying the page then supplies a different
+    timestamp for the same checksum-bound batch, which is rightly rejected by
+    the lower-level idempotency guard.  This narrow comparison lets the route
+    finish the campaign handoff only when the prior audit record proves that
+    the same Admin already approved the exact same batch.
+    """
+    expected_items = {
+        (
+            str(item.get("candidate_id") or ""),
+            str(item.get("canonical_form_id") or ""),
+            str(item.get("procedure_id") or ""),
+        )
+        for item in shortlist_records
+    }
+    for existing in attestations_payload.get("attestations") or []:
+        if not isinstance(existing, dict):
+            continue
+        if any(
+            str(existing.get(field) or "") != str(attestation.get(field) or "")
+            for field in (
+                "attestation_id",
+                "reviewer_id",
+                "decision",
+                "batch_id",
+                "preview_fingerprint",
+                "manifest_sha256",
+                "source_snapshot_sha256",
+            )
+        ):
+            continue
+        audited_items = {
+            (
+                str(item.get("candidate_id") or ""),
+                str(item.get("canonical_form_id") or ""),
+                str(item.get("procedure_id") or ""),
+            )
+            for item in existing.get("items") or []
+            if isinstance(item, dict)
+        }
+        if (
+            int(existing.get("item_count") or 0) == len(shortlist_records)
+            and audited_items == expected_items
+        ):
+            return True
+    return False
+
+
+def _form_resolution_shortlist_payload(run_id: str) -> Dict[str, Any]:
+    """Read the current, privacy-safe review batch without changing its state."""
+    from api import form_resolution_campaign
+
+    run_dir = form_resolution_campaign.CAMPAIGN_DIR / "runs" / run_id
+    payload, batch_count = _next_form_resolution_campaign_batch(run_id)
+    report = _load_forms_json(run_dir / "report.json", {})
+    if report and str(report.get("status") or "") != "READY_FOR_HUMAN_ATTESTATION":
+        raise HTTPException(status_code=409, detail="FORM_RESOLUTION_NOT_READY_FOR_REVIEW")
+
+    records: List[Dict[str, Any]] = []
+    invalid_record_count = 0
+    for raw in payload.get("records") or []:
+        if not isinstance(raw, dict):
+            continue
+        from api.form_resolution_registry import has_invalid_unicode_metadata
+        if has_invalid_unicode_metadata(
+            raw.get("canonical_name") or raw.get("canonical_form_name") or raw.get("form_name")
+        ):
+            invalid_record_count += 1
+            continue
+        # Do not expose local locations, OCR, or extractor internals in the UI.
+        record = {
+            "candidate_id": raw.get("candidate_id") or raw.get("id"),
+            "requirement_identity_id": raw.get("requirement_identity_id"),
+            "canonical_form_id": raw.get("canonical_form_id") or raw.get("proposed_canonical_form_id") or raw.get("candidate_id") or raw.get("id"),
+            "canonical_name": raw.get("canonical_name") or raw.get("canonical_form_name"),
+            "procedure_id": raw.get("procedure_id"),
+            "form_code": raw.get("form_code"),
+            "issuing_instrument": raw.get("issuing_instrument"),
+            "source_page_url": raw.get("source_page_url"),
+            "source_download_url": raw.get("source_download_url") or raw.get("official_download_url"),
+            "sha256": raw.get("sha256"),
+            "legal_basis": raw.get("legal_basis") or [],
+            "effective_from": raw.get("effective_from"),
+            "effective_to": raw.get("effective_to"),
+            "jurisdiction": raw.get("jurisdiction") or "Hai Phong",
+            "administrative_level": raw.get("administrative_level") or raw.get("executing_level") or "commune",
+            "review_status": "candidate_pending_review",
+            "legal_review_status": "not_reviewed",
+            "reason_codes": [],
+            "source_domain": raw.get("source_domain"),
+            "effectivity_reason_code": raw.get("effectivity_reason_code"),
+            "has_official_file": bool(raw.get("has_official_file") or raw.get("source_download_url") or raw.get("official_download_url")),
+            "approved": False,
+            "runtime_eligible": False,
+        }
+        if not record["candidate_id"] or not record["canonical_form_id"]:
+            continue
+        records.append(record)
+
+    from api.form_resolution_campaign import review_batch_fingerprint
+    manifest_sha256 = payload.get("manifest_sha256") or ""
+    source_snapshot_sha256 = payload.get("source_snapshot_sha256") or ""
+    preview_fingerprint = payload.get("preview_fingerprint") or review_batch_fingerprint(
+        records,
+        manifest_sha256=str(manifest_sha256),
+        source_snapshot_sha256=str(source_snapshot_sha256),
+    )
+    identity_ids = {str(item.get("requirement_identity_id") or item.get("candidate_id")) for item in records}
+    if not 1 <= len(identity_ids) <= 25:
+        raise HTTPException(status_code=422, detail="FORM_REVIEW_BATCH_SIZE_INVALID")
+    canonical_ids = {str(item.get("canonical_form_id")) for item in records}
+    return {
+        "run_id": run_id,
+        "legal_as_of": report.get("legal_as_of"),
+        "batch_id": payload.get("batch_id") or f"form-review-001-{preview_fingerprint[:16]}",
+        "batch_count": batch_count,
+        "identity_count": len(identity_ids),
+        "canonical_form_count": len(canonical_ids),
+        "procedure_binding_count": len(records),
+        "invalid_record_count": invalid_record_count,
+        "preview_fingerprint": preview_fingerprint,
+        "attestation_id": f"form-resolution-{run_id}-{preview_fingerprint[:24]}",
+        "manifest_sha256": manifest_sha256,
+        "source_snapshot_sha256": source_snapshot_sha256,
+        "records": records,
+        "feature_flag_enabled": False,
+        "automated_approval": False,
+        "human_attestation_required": True,
+    }
+
+
+@router.get("/forms-catalog/form-resolution/current")
+@router.get("/forms-catalog/form-resolution/status/current")
+async def get_current_form_resolution_status(request: Request):
+    _require_form_review_admin(request)
+    from api.form_resolution_campaign import load_campaign_status
+
+    return load_campaign_status(project_root=PROJECT_ROOT)
+
+
+@router.get("/forms-catalog/form-resolution/{run_id}")
+@router.get("/forms-catalog/form-resolution/{run_id}/status")
+async def get_form_resolution_status(run_id: str, request: Request):
+    _require_form_review_admin(request)
+    from api import form_resolution_campaign
+
+    report = _load_forms_json(form_resolution_campaign.CAMPAIGN_DIR / "runs" / run_id / "report.json", {})
+    if not report:
+        raise HTTPException(status_code=404, detail="FORM_RESOLUTION_RUN_NOT_FOUND")
+    return report
+
+
+@router.get("/forms-catalog/form-resolution/{run_id}/review-shortlist")
+@router.get("/forms-catalog/form-resolution/{run_id}/shortlist")
+async def get_form_resolution_shortlist(run_id: str, request: Request):
+    _require_form_review_admin(request)
+    return _form_resolution_shortlist_payload(run_id)
+
+
+@router.get("/forms-catalog/form-resolution/{run_id}/gaps")
+async def get_form_resolution_gaps(run_id: str, request: Request):
+    _require_form_review_admin(request)
+    from api import form_resolution_campaign
+
+    payload = _load_forms_json(
+        form_resolution_campaign.CAMPAIGN_DIR / "runs" / run_id / "gaps.json", {}
+    )
+    if not payload:
+        raise HTTPException(status_code=404, detail="FORM_RESOLUTION_RUN_NOT_FOUND")
+    return {
+        "run_id": run_id,
+        "records": [
+            {
+                "occurrence_id": item.get("occurrence_id"),
+                "procedure_id": item.get("procedure_id"),
+                "reason_code": item.get("reason_code"),
+                "source_attempt_count": len(item.get("source_attempts") or []),
+            }
+            for item in payload.get("records") or []
+            if isinstance(item, dict)
+        ],
+        "feature_flag_enabled": False,
+        "automated_approval": False,
+    }
+
+
+@router.post("/forms-catalog/form-resolution/run")
+async def run_form_resolution_campaign(
+    request: Request,
+    legal_as_of: str = Query(...),
+    manifest_sha256: str = Query(...),
+    source_snapshot_sha256: str = Query(...),
+):
+    _require_form_review_admin(request)
+    from api import form_resolution_campaign
+
+    try:
+        return form_resolution_campaign.launch_form_resolution_campaign(
+            project_root=PROJECT_ROOT,
+            legal_as_of=legal_as_of,
+            manifest_sha256=manifest_sha256,
+            source_snapshot_sha256=source_snapshot_sha256,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/forms-catalog/legal-review-attestations/preview")
+async def get_form_legal_review_preview(
+    request: Request,
+    legal_as_of: str = Query(...),
+):
+    """Compatibility preview backed by the checksum-bound campaign shortlist."""
+    _require_form_review_admin(request)
+    from api.form_resolution_campaign import load_campaign_status
+
+    status = load_campaign_status(project_root=PROJECT_ROOT)
+    if str(status.get("status") or "") != "READY_FOR_HUMAN_ATTESTATION":
+        return {
+            "legal_as_of": legal_as_of,
+            "preview_fingerprint": "",
+            "attestation_id": "form-batch-empty",
+            "summary": {"total_forms": 0, "active_catalog_forms": 0, "eligible_forms": 0, "excluded_forms": 0, "already_approved_forms": 0, "excluded_no_official_forms": 0},
+            "reason_counts": {}, "catalog_exclusion_reason_counts": {},
+            "eligible_items": [], "excluded_items": [], "catalog_excluded_items": [],
+            "automated_approval": False,
+        }
+    shortlist = _form_resolution_shortlist_payload(str(status.get("run_id")))
+    records = shortlist["records"]
+    return {
+        "legal_as_of": shortlist.get("legal_as_of") or legal_as_of,
+        "preview_fingerprint": shortlist["preview_fingerprint"],
+        "attestation_id": shortlist["attestation_id"],
+        "summary": {"total_forms": shortlist["canonical_form_count"], "active_catalog_forms": shortlist["canonical_form_count"], "eligible_forms": shortlist["canonical_form_count"], "excluded_forms": 0, "already_approved_forms": 0, "excluded_no_official_forms": 0},
+        "reason_counts": {}, "catalog_exclusion_reason_counts": {},
+        "eligible_items": records, "excluded_items": [], "catalog_excluded_items": [],
+        "automated_approval": False,
+    }
+
+
+class FormResolutionAttestationItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_id: str
+    canonical_form_id: str
+    procedure_id: str
+    effective_from: Optional[str] = None
+    effective_to: Optional[str] = None
+    jurisdiction: str = "Hai Phong"
+    administrative_level: str = "commune"
+
+
+class FormResolutionAttestationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    attestation_id: str
+    reviewed_at: str
+    legal_as_of: str
+    preview_fingerprint: str
+    batch_id: str
+    manifest_sha256: str
+    source_snapshot_sha256: str
+    decision: Literal["approved"]
+    review_note: str = Field(default="", max_length=2000)
+    items: List[FormResolutionAttestationItem] = Field(min_length=1)
+
+
+class FormLegalReviewAttestationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    attestation_id: str
+    reviewed_at: str
+    legal_as_of: str = ""
+    preview_fingerprint: str = ""
+    decision: Literal["approved", "rejected"]
+    review_note: str = Field(default="", max_length=2000)
+    items: List[FormResolutionAttestationItem] = Field(min_length=1)
+
+
+@router.post("/forms-catalog/legal-review-attestations")
+async def review_form_legal_attestation(
+    payload: FormLegalReviewAttestationRequest,
+    request: Request,
+):
+    """Legacy attestation route retained for previously rendered Admin pages."""
+    if get_request_role(request) != "admin":
+        raise HTTPException(status_code=403, detail="Admin role required")
+    reviewer_id = get_request_user_id(request)
+    if not reviewer_id:
+        raise HTTPException(status_code=422, detail="REVIEWER_ID_REQUIRED")
+    from api import form_review_sync
+
+    candidates = _load_forms_json(CLASSIFIED_FORMS_CANDIDATES_PATH, {"records": []})
+    forms = _load_forms_json(CANONICAL_FORMS_CATALOG_PATH, {"forms": []})
+    bindings = _load_forms_json(CANONICAL_FORM_BINDINGS_PATH, {"bindings": []})
+    try:
+        preview = form_review_sync.build_form_review_preview(
+            candidate_payload=candidates,
+            canonical_forms_payload=forms,
+            bindings_payload=bindings,
+            project_root=PROJECT_ROOT,
+            legal_as_of=payload.legal_as_of,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if payload.preview_fingerprint != preview["preview_fingerprint"]:
+        raise HTTPException(status_code=422, detail="PREVIEW_STALE_OR_TAMPERED")
+    attestation = {
+        **payload.model_dump(),
+        "reviewer_id": reviewer_id,
+        "automated_approval": False,
+    }
+    try:
+        result = form_review_sync.apply_form_review_sync_files(
+            candidate_path=CLASSIFIED_FORMS_CANDIDATES_PATH,
+            canonical_forms_path=CANONICAL_FORMS_CATALOG_PATH,
+            bindings_path=CANONICAL_FORM_BINDINGS_PATH,
+            attestations_path=FORM_REVIEW_ATTESTATIONS_PATH,
+            official_index_path=OFFICIAL_FORMS_INDEX_PATH,
+            checksum_manifest_path=FORM_CHECKSUM_MANIFEST_PATH,
+            attestation=attestation,
+            project_root=PROJECT_ROOT,
+        )
+    except form_review_sync.FormReviewSyncError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {
+        "status": result["status"],
+        "attestation_id": payload.attestation_id,
+        "reviewer_id": reviewer_id,
+        "decision": payload.decision,
+        "item_count": len(payload.items),
+        "automated_approval": False,
+    }
+
+
+@router.post("/forms-catalog/form-resolution/{run_id}/attest")
+async def attest_form_resolution(
+    run_id: str,
+    payload: FormResolutionAttestationRequest,
+    request: Request,
+):
+    """Apply one explicit Admin decision for one checksum-bound review batch."""
+    reviewer_id = _require_form_review_admin(request)
+    from api import form_release_gate, form_resolution_campaign, form_review_sync
+
+    shortlist = _form_resolution_shortlist_payload(run_id)
+    expected_items = [item.model_dump() for item in payload.items]
+    if (
+        payload.attestation_id != shortlist["attestation_id"]
+        or payload.preview_fingerprint != shortlist["preview_fingerprint"]
+        or payload.batch_id != shortlist["batch_id"]
+        or payload.manifest_sha256 != shortlist["manifest_sha256"]
+        or payload.source_snapshot_sha256 != shortlist["source_snapshot_sha256"]
+        or expected_items != [
+            {
+                "candidate_id": item.get("candidate_id"),
+                "canonical_form_id": item.get("canonical_form_id"),
+                "procedure_id": item.get("procedure_id"),
+                "effective_from": item.get("effective_from"),
+                "effective_to": item.get("effective_to"),
+                "jurisdiction": item.get("jurisdiction") or "Hai Phong",
+                "administrative_level": item.get("administrative_level") or "commune",
+            }
+            for item in shortlist["records"]
+        ]
+    ):
+        raise HTTPException(status_code=422, detail="PREVIEW_STALE_OR_TAMPERED")
+
+    campaign_batch, _ = _next_form_resolution_campaign_batch(run_id)
+    campaign_batch = {
+        **campaign_batch,
+        "batch_id": campaign_batch.get("batch_id") or shortlist["batch_id"],
+        "preview_fingerprint": campaign_batch.get("preview_fingerprint") or shortlist["preview_fingerprint"],
+        "manifest_sha256": campaign_batch.get("manifest_sha256") or shortlist["manifest_sha256"],
+        "source_snapshot_sha256": campaign_batch.get("source_snapshot_sha256") or shortlist["source_snapshot_sha256"],
+    }
+    attestation = {
+        **payload.model_dump(),
+        "reviewer_id": reviewer_id,
+        "automated_approval": False,
+    }
+    try:
+        result = form_review_sync.apply_form_review_sync_files(
+            candidate_path=CLASSIFIED_FORMS_CANDIDATES_PATH,
+            canonical_forms_path=CANONICAL_FORMS_CATALOG_PATH,
+            bindings_path=CANONICAL_FORM_BINDINGS_PATH,
+            attestations_path=FORM_REVIEW_ATTESTATIONS_PATH,
+            official_index_path=OFFICIAL_FORMS_INDEX_PATH,
+            checksum_manifest_path=FORM_CHECKSUM_MANIFEST_PATH,
+            attestation=attestation,
+            campaign_batch=campaign_batch,
+            project_root=PROJECT_ROOT,
+        )
+    except form_review_sync.FormReviewSyncError as exc:
+        reason = str(exc)
+        prior_attestations = _load_forms_json(
+            FORM_REVIEW_ATTESTATIONS_PATH, {"attestations": []}
+        )
+        if reason == "ATTESTATION_ID_CONFLICT" and _has_matching_campaign_attestation(
+            prior_attestations, attestation, shortlist["records"]
+        ):
+            result = {"status": "already_applied"}
+        else:
+            raise HTTPException(status_code=422, detail=reason) from exc
+    except ValueError as exc:
+        reason = str(exc)
+        raise HTTPException(status_code=422, detail=reason) from exc
+
+    try:
+        gate = form_release_gate.launch_form_release_gates(
+            project_root=PROJECT_ROOT,
+            legal_as_of=payload.legal_as_of,
+            attestation_id=payload.attestation_id,
+            status_path=FORM_RELEASE_GATE_STATUS_PATH,
+        )
+    except ValueError as exc:
+        if str(exc) != "FORM_RELEASE_GATE_DIFFERENT_ATTESTATION_RUNNING":
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        gate = {
+            **form_release_gate.load_form_release_gate_status(
+                FORM_RELEASE_GATE_STATUS_PATH
+            ),
+            "launch_status": "deferred_existing_gate",
+        }
+    campaign = form_resolution_campaign.mark_campaign_batch_attested(
+        run_id=run_id,
+        batch_id=payload.batch_id,
+        attestation_id=payload.attestation_id,
+        release_gate_status=str(gate.get("status") or "queued"),
+        total_batch_count=int(shortlist["batch_count"]),
+    )
+    return {
+        "status": result["status"],
+        "attestation_id": payload.attestation_id,
+        "reviewer_id": reviewer_id,
+        "decision": payload.decision,
+        "item_count": len(shortlist["records"]),
+        "automated_approval": False,
+        "campaign_status": campaign.get("status"),
+        "release_gate": {
+            "status": gate.get("status"),
+            "stage": gate.get("stage"),
+            "launch_status": gate.get("launch_status"),
+            "feature_flag_enabled": False,
+        },
+    }
+
+
 def _find_classified_candidate(form_id: str) -> tuple[Optional[Dict[str, Any]], Dict[str, Any], Optional[int]]:
     payload = _load_classified_candidates()
     for idx, rec in enumerate(payload.get("records") or []):
@@ -1872,39 +2525,57 @@ async def upload_official_form(
     form_title: str = Query(..., min_length=3, max_length=300),
     domain: str = Query("unknown"),
     procedure_id: Optional[str] = Query(None),
-    review_status: str = Query("approved", pattern="^(approved|candidate_pending_review|rejected)$"),
+    review_status: str = Query("candidate_pending_review", pattern="^(approved|candidate_pending_review|rejected)$"),
     official_level: str = Query("official", pattern="^(official|reference)$"),
+    expected_sha256: Optional[str] = Query(None, min_length=64, max_length=64),
 ):
-    """Admin-only upload for real form files.
+    """Admin-only upload into the candidate queue.
 
-    - approved + official => copy into priority_official and become downloadable
-    - otherwise keep in official_candidates pending review
+    Uploading evidence is deliberately separate from legal attestation. A
+    newly uploaded file must remain non-public until the canonical review flow
+    verifies its binding, source, checksum and effectivity.
     """
     role = get_request_role(request)
     if role != "admin":
         raise HTTPException(status_code=403, detail="Chỉ admin mới được upload biểu mẫu")
+    if review_status == "approved":
+        raise HTTPException(status_code=409, detail="LEGAL_ATTESTATION_REQUIRED")
 
-    filename = file.filename or "form.bin"
-    ext = Path(filename).suffix.lower()
-    if ext not in {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".rtf", ".zip"}:
-        raise HTTPException(status_code=400, detail="Định dạng file không được hỗ trợ")
+    filename = file.filename or ""
+    content = await file.read(DOCUMENT_UPLOAD_POLICY.max_bytes + 1)
+    form_policy = UploadPolicy(
+        allowed_extensions=DOCUMENT_UPLOAD_POLICY.allowed_extensions,
+        max_bytes=DOCUMENT_UPLOAD_POLICY.max_bytes,
+        min_bytes=1024,
+    )
+    try:
+        validated = validate_upload(
+            filename=filename,
+            content=content,
+            policy=form_policy,
+            expected_sha256=expected_sha256,
+        )
+    except UploadSecurityError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
 
-    content = await file.read()
-    if not content or len(content) < 1024:
-        raise HTTPException(status_code=400, detail="File quá nhỏ hoặc rỗng; cần file biểu mẫu thật")
-
-    import hashlib
     from datetime import datetime, timezone
     import re as _re
 
-    digest = hashlib.sha256(content).hexdigest()
+    digest = validated.sha256
     form_id = digest[:24]
     safe = _re.sub(r"[^\w\-.]+", "-", filename).strip("-._") or "form"
     target_dir = PRIORITY_FORMS_FILES_DIR if (review_status == "approved" and official_level == "official") else OFFICIAL_FORMS_FILES_DIR
     target_dir.mkdir(parents=True, exist_ok=True)
     dest_name = f"{form_id}-{safe}"
-    dest = target_dir / dest_name
-    dest.write_bytes(content)
+    dest = safe_storage_path(target_dir, dest_name)
+    if dest.exists():
+        if dest.read_bytes() != content:
+            raise HTTPException(status_code=409, detail="UPLOAD_STORAGE_COLLISION")
+    else:
+        dest.write_bytes(content)
     rel = str(dest.relative_to(PROJECT_ROOT)).replace("\\", "/")
     now = datetime.now(timezone.utc).isoformat()
 
@@ -2003,36 +2674,17 @@ async def review_classified_form_candidate(
     request: FormReviewRequest,
     req_obj: Request,
 ):
-    """Approve/reject a classified candidate form.
+    """Record preliminary triage without publishing a form.
 
-    Approve:
-    - set review_status=approved
-    - copy file to data/uploads/forms/priority_official
-    - update haiphong_official_form_index.json (+ catalog)
-    Reject:
-    - set review_status=rejected
-    - keep reason/review_note
+    An approval here only moves a candidate toward checksum-bound legal
+    attestation. It never changes a public catalog, creates a download URL,
+    or makes the form eligible for answer retrieval.
     """
     record, payload, idx = _find_classified_candidate(form_id)
     if not record or idx is None:
         raise HTTPException(status_code=404, detail=f"Khong tim thay candidate form id={form_id}")
 
-    role = get_request_role(req_obj)
-    user_id = get_request_user_id(req_obj)
-    if role == "citizen":
-        raise HTTPException(status_code=403, detail="Chỉ admin hoặc cán bộ chuyên trách mới được duyệt biểu mẫu.")
-
-    if role == "officer" and user_id:
-        from api.user_service import get_user_profile
-        profile = await get_user_profile(user_id)
-        if profile:
-            allowed_domains = profile.get("allowed_domains") or []
-            rec_domain = record.get("suggested_domain") or record.get("domain")
-            if rec_domain and not _is_domain_allowed(rec_domain, allowed_domains):
-                raise HTTPException(
-                    status_code=403,
-                    detail="Bạn không có quyền duyệt biểu mẫu thuộc lĩnh vực này."
-                )
+    reviewer_id = _require_form_review_admin(req_obj)
 
     decision = request.decision
     review_note = (request.review_note or request.reason or record.get("reason") or "").strip()
@@ -2040,24 +2692,65 @@ async def review_classified_form_candidate(
     procedure_id = request.procedure_id if request.procedure_id is not None else record.get("suggested_procedure_id")
     domain = request.domain if request.domain is not None else record.get("suggested_domain")
 
-    package_paths: Dict[str, str] = {}
+    canonical_case = None
     if decision == "approved":
-        package_paths = _copy_candidate_to_priority(record)
+        source_url = str(record.get("source_url") or record.get("page_url") or "").strip()
+        blockers = {
+            "procedure_id": "Hãy chọn thủ tục từ danh mục chuẩn." if not procedure_id else "",
+            "domain": "Hãy chọn lĩnh vực của thủ tục." if not domain else "",
+            "form_name": "Hãy nhập tên biểu mẫu." if not form_name else "",
+            "source_url": "Hãy cung cấp URL nguồn chính thức." if not source_url else "",
+        }
+        blockers = {key: value for key, value in blockers.items() if value}
+        if blockers:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "FORM_LEGACY_INTAKE_INCOMPLETE", "fields": blockers},
+            )
+        from api.form_governance_models import ActorContext, FormReviewSubmission
+        from api.form_governance_service import get_form_governance_service
 
-    # update classified record
-    record = dict(record)
+        checksum = str(record.get("sha256") or record.get("source_sha256") or "").strip() or None
+        try:
+            submission = FormReviewSubmission(
+                procedure_id=str(procedure_id),
+                domain=str(domain),
+                title=form_name,
+                source_url=source_url,
+                source_checksum=checksum,
+                asset_kind="file",
+                note=f"Chuyển từ hàng chờ cũ: {form_id}",
+            )
+            canonical_case = get_form_governance_service().ingest_legacy_candidate(
+                ActorContext(user_id=reviewer_id, role="admin", domains=[]),
+                form_id,
+                submission,
+            )
+        except (ValueError, PermissionError, RuntimeError) as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": str(exc),
+                    "message": "Không thể chuyển biểu mẫu sang quy trình PostgreSQL chuẩn.",
+                },
+            ) from exc
+
+    from datetime import datetime, timezone
+    from api.form_review_sync import apply_candidate_queue_decision
+
+    # The canonical attestation endpoint is the only writer for official
+    # index, catalog and runtime state. This endpoint persists queue triage.
+    record = apply_candidate_queue_decision(
+        record,
+        decision=decision,
+        reviewer_id=reviewer_id,
+        reviewed_at=datetime.now(timezone.utc).isoformat(),
+        review_note=review_note,
+    )
     record["detected_form_name"] = form_name
     record["suggested_procedure_id"] = procedure_id
     record["suggested_domain"] = domain
-    record["review_status"] = "approved" if decision == "approved" else "rejected"
-    record["is_approved"] = decision == "approved"
-    record["review_note"] = review_note
     record["reason"] = review_note or record.get("reason")
-    if package_paths:
-        record["priority_path"] = package_paths.get("source_package_path")
-        record["local_path"] = package_paths.get("local_path")
-    from datetime import datetime, timezone
-    record["reviewed_at"] = datetime.now(timezone.utc).isoformat()
     payload["records"][idx] = record
     # refresh summary counts
     status_counts: Dict[str, int] = {}
@@ -2071,37 +2764,25 @@ async def review_classified_form_candidate(
     }
     _save_classified_candidates(payload)
 
-    official = _upsert_official_index_from_candidate(
-        record,
-        decision=decision,
-        review_note=review_note,
-        form_name=form_name,
-        procedure_id=procedure_id,
-        domain=domain,
-        package_paths=package_paths,
-    )
-    _update_manifest_review(
-        form_id,
-        decision=decision,
-        review_note=review_note,
-        form_name=form_name,
-        procedure_id=procedure_id,
-        domain=domain,
-    )
-
     return {
-        "status": "success",
+        "status": (
+            "queued_for_legal_attestation"
+            if decision == "approved"
+            else "rejected"
+        ),
         "form_id": form_id,
         "review_status": record["review_status"],
         "is_approved": record["is_approved"],
-        "priority_path": package_paths.get("source_package_path"),
-        "download_url": (
-            f"/api/procedures/forms-catalog/official/{form_id}/download"
-            if decision == "approved"
-            else None
-        ),
+        "legal_review_status": record["legal_review_status"],
+        "runtime_eligible": False,
+        "download_url": None,
         "record": record,
-        "official_index_entry": official,
+        "canonical_case": canonical_case.model_dump(mode="json") if canonical_case else None,
+        "message": (
+            "Candidate đang chờ xác nhận pháp lý; chưa được cung cấp cho người dùng."
+            if decision == "approved"
+            else "Candidate đã bị từ chối."
+        ),
     }
 
 
@@ -2119,6 +2800,12 @@ async def review_form_candidate(
     record, _payload, idx = _find_classified_candidate(form_id)
     if record is not None and idx is not None:
         return await review_classified_form_candidate(form_id, request, req_obj)
+
+    if request.decision == "approved":
+        raise HTTPException(
+            status_code=409,
+            detail="LEGAL_ATTESTATION_REQUIRED",
+        )
 
     role = get_request_role(req_obj)
     user_id = get_request_user_id(req_obj)

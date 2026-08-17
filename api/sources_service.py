@@ -133,7 +133,6 @@ class SourcesService:
         file_path: Optional[str] = None,
         content: Optional[str] = None,
         title: Optional[str] = None,
-        transformations: Optional[List[str]] = None,
         embed: bool = False,
         delete_source: bool = False,
         notebooks: Optional[List[str]] = None,
@@ -150,7 +149,6 @@ class SourcesService:
             file_path: File path for upload sources
             content: Text content for text sources
             title: Optional source title
-            transformations: List of transformation IDs to apply
             embed: Whether to embed content for vector search
             delete_source: Whether to delete uploaded file after processing
             notebooks: List of notebook IDs to add source to (preferred over notebook_id)
@@ -168,7 +166,6 @@ class SourcesService:
             file_path=file_path,
             content=content,
             title=title,
-            transformations=transformations,
             embed=embed,
             delete_source=delete_source,
             async_processing=async_processing,
@@ -231,7 +228,6 @@ class SourcesService:
         file_path: Optional[str] = None,
         content: Optional[str] = None,
         title: Optional[str] = None,
-        transformations: Optional[List[str]] = None,
         embed: bool = False,
         delete_source: bool = False,
         notebooks: Optional[List[str]] = None,
@@ -250,7 +246,6 @@ class SourcesService:
             file_path=file_path,
             content=content,
             title=title,
-            transformations=transformations,
             embed=embed,
             delete_source=delete_source,
             async_processing=True,

@@ -93,6 +93,54 @@ A successful fallback is marked with the non-fatal
 `error.code=LOCAL_MODEL_FALLBACK` and `quality_flags=local_model_fallback` for
 operator visibility without exposing provider exception text.
 
+### Windows local runtime binding (2026-07-30)
+
+`scripts/start_local.ps1` binds `OLLAMA_URL` to
+`http://127.0.0.1:11434` for its host-process API.  The application default
+`host.docker.internal` remains appropriate for container deployments, but is
+not reachable from every direct Windows host process.  This launcher-only
+binding keeps the reviewed `qwen2.5:3b` fallback available after a transient
+cloud-provider failure; it does not alter the primary provider, corpus or
+persisted rollout flags.
+
+### Default Ask model decision (2026-07-30)
+
+The release-quality run showed repeated 60-second V4-Pro generation timeouts
+while retrieval was healthy.  The existing, authenticated DeepSeek V4-Flash
+language-model record was therefore assigned to **`default_chat_model` only**.
+`default_transformation_model` and `large_context_model` remain V4-Pro.  This
+is a reversible provider-performance configuration change, not a legal-data
+or approval change: restore `default_chat_model` to
+`model:xsgzui5t2e2tftag48m1` to revert.  It must be accepted only after a clean
+five-domain quality run; otherwise the release remains blocked.
+
+### Citation provenance repair (2026-07-30)
+
+The five-domain run exposed two corpus citations whose law number and official
+VBPL URL did not identify the same document.  `scripts/repair_verified_legal_source_urls.py`
+uses exact expected prior URLs, active-status checks and an audit report before
+changing only those URLs.  It corrected the source records for Law
+60/2014/QH13 (Hộ tịch) and Law 02/2011/QH13 (Khiếu nại) after direct official
+VBPL verification.  It does not change legal text, effectivity, embeddings,
+approval state or forms.  A changed prior URL fails closed and requires a new
+human verification rather than an automatic overwrite.
+
+### Exact-provision answer fallback (2026-07-30)
+
+For an explicit legal provision, retrieval now retains up to two bounded chunks
+of that requested article before unrelated articles use the response budget.
+This preserves split provisions such as the dossier paragraph and subsequent
+processing paragraph of one article. The per-document cap remains three and
+the ordinary active-source, scope and effectivity filters still apply.
+
+If a generator omits the direct outcome even though those retrieved chunks
+contain it, Ask can return at most two source-verbatim passages for the
+requested authority, submission-place or dossier facet. It never synthesizes
+an additional legal fact. A generic mention of an agency cannot displace a
+direct competence passage, and an absent source still produces the normal
+insufficient-evidence behavior. This is intentionally a response-layer safety
+fallback; it does not mutate corpus content, source metadata or form approval.
+
 ## Compatibility and rollback
 
 - `/api/search/ask/simple` retains its request and response contract.

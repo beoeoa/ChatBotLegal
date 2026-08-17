@@ -1,5 +1,6 @@
 ﻿import axios, { AxiosResponse } from 'axios'
 import { getApiUrl } from '@/lib/config'
+import { sessionSecurityHeaders } from '@/lib/api/session-security'
 
 // API client with runtime-configurable base URL
 // The base URL is fetched from the API config endpoint on first request
@@ -12,7 +13,7 @@ export const apiClient = axios.create({
   headers: {
     'Content-Type': 'application/json',
   },
-  withCredentials: false,
+  withCredentials: true,
 })
 
 // Request interceptor to add base URL and auth header
@@ -60,6 +61,7 @@ apiClient.interceptors.request.use(async (config) => {
   } else if (config.method && ['post', 'put', 'patch'].includes(config.method.toLowerCase())) {
     config.headers['Content-Type'] = 'application/json'
   }
+  Object.assign(config.headers, sessionSecurityHeaders(config.method))
 
   return config
 })

@@ -3,6 +3,27 @@ import { describe, expect, it } from 'vitest'
 import { getAuthRedirect } from './route-guard'
 
 describe('getAuthRedirect', () => {
+  it('allows only Admin to open the operations dashboard', () => {
+    expect(getAuthRedirect({
+      isAuthenticated: true,
+      role: 'admin',
+      mustChangePassword: false,
+      pathname: '/admin',
+    })).toBeNull()
+    expect(getAuthRedirect({
+      isAuthenticated: true,
+      role: 'officer',
+      mustChangePassword: false,
+      pathname: '/admin',
+    })).toBe('/search')
+    expect(getAuthRedirect({
+      isAuthenticated: true,
+      role: 'citizen',
+      mustChangePassword: false,
+      pathname: '/admin',
+    })).toBe('/search')
+  })
+
   it('keeps a temporary-password officer on the change-password page', () => {
     expect(getAuthRedirect({
       isAuthenticated: true,
@@ -21,7 +42,7 @@ describe('getAuthRedirect', () => {
     })).toBe('/change-password')
   })
 
-  it('allows an officer to open proposals and the weekly monitor', () => {
+  it('allows an officer to open the manual proposal page', () => {
     expect(getAuthRedirect({
       isAuthenticated: true,
       role: 'officer',
@@ -73,6 +94,87 @@ describe('getAuthRedirect', () => {
       mustChangePassword: false,
       pathname: '/sources',
     })).toBeNull()
+  })
+
+  it('allows officer and admin legal profiles but redirects citizens', () => {
+    expect(getAuthRedirect({
+      isAuthenticated: true,
+      role: 'officer',
+      mustChangePassword: false,
+      pathname: '/notebooks',
+    })).toBeNull()
+    expect(getAuthRedirect({
+      isAuthenticated: true,
+      role: 'admin',
+      mustChangePassword: false,
+      pathname: '/notebooks',
+    })).toBeNull()
+    expect(getAuthRedirect({
+      isAuthenticated: true,
+      role: 'citizen',
+      mustChangePassword: false,
+      pathname: '/notebooks',
+    })).toBe('/search')
+  })
+
+  it.each(['/advanced', '/legal-quality'])(
+    'sends an admin on the retired route %s to the Admin dashboard',
+    (pathname) => {
+      expect(getAuthRedirect({
+        isAuthenticated: true,
+        role: 'admin',
+        mustChangePassword: false,
+        pathname,
+      })).toBe('/admin')
+    },
+  )
+
+  it.each(['/admin-dashboard', '/admin-control', '/admin-evil'])(
+    'does not treat the legacy or lookalike route %s as a child of /admin',
+    (pathname) => {
+      expect(getAuthRedirect({
+        isAuthenticated: true,
+        role: 'admin',
+        mustChangePassword: false,
+        pathname,
+      })).toBe('/admin')
+    },
+  )
+
+  it('does not expose an administration route to an officer', () => {
+    expect(getAuthRedirect({
+      isAuthenticated: true,
+      role: 'officer',
+      mustChangePassword: false,
+      pathname: '/admin-control',
+    })).toBe('/search')
+  })
+
+  it('keeps legal repository management Admin-only', () => {
+    expect(getAuthRedirect({
+      isAuthenticated: true,
+      role: 'admin',
+      mustChangePassword: false,
+      pathname: '/legal-management',
+    })).toBeNull()
+    expect(getAuthRedirect({
+      isAuthenticated: true,
+      role: 'admin',
+      mustChangePassword: false,
+      pathname: '/legal-management/validity',
+    })).toBeNull()
+    expect(getAuthRedirect({
+      isAuthenticated: true,
+      role: 'officer',
+      mustChangePassword: false,
+      pathname: '/legal-management/validity',
+    })).toBe('/search')
+    expect(getAuthRedirect({
+      isAuthenticated: true,
+      role: 'citizen',
+      mustChangePassword: false,
+      pathname: '/legal-management/42',
+    })).toBe('/search')
   })
 
   it.each(['citizen', 'officer'] as const)(

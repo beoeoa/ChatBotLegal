@@ -43,7 +43,13 @@ async def provision_langchain_model(
         selection_reason = f"default for type={default_type}"
         model = await model_manager.get_default_model(default_type, **kwargs)
 
-    logger.debug(f"Using model: {model}")
+    # Provider model reprs may contain decrypted API keys. Log only safe
+    # metadata and never stringify the live model instance.
+    logger.debug(
+        "Using model class={} selection_reason={}",
+        type(model).__name__ if model is not None else "None",
+        selection_reason,
+    )
 
     try:
         if model is None:

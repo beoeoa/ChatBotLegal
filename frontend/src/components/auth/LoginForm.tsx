@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation'
 import { AlertCircle, KeyRound, LogIn, UserPlus } from 'lucide-react'
 import { useAuth } from '@/lib/hooks/use-auth'
 import { useAuthStore } from '@/lib/stores/auth-store'
+import type { TotpSetup } from '@/lib/stores/auth-store'
 import { getApiUrl, getConfig } from '@/lib/config'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -36,6 +37,8 @@ export function LoginForm() {
   const [mode, setMode] = useState<AuthMode>('login')
   const [identifier, setIdentifier] = useState('')
   const [password, setPassword] = useState('')
+  const [totpCode, setTotpCode] = useState('')
+  const [totpSetup, setTotpSetup] = useState<TotpSetup | null>(null)
   const [registerUsername, setRegisterUsername] = useState('')
   const [registerEmail, setRegisterEmail] = useState('')
   const [registerFullName, setRegisterFullName] = useState('')
@@ -51,7 +54,14 @@ export function LoginForm() {
   const [configInfo, setConfigInfo] = useState<{ apiUrl: string; version: string; buildTime: string } | null>(null)
 
   const router = useRouter()
-  const { login, isLoading, error } = useAuth()
+  const {
+    login,
+    isLoading,
+    error,
+    mfaChallenge,
+    setupTotp,
+    confirmTotp,
+  } = useAuth()
   const { authRequired, checkAuthRequired, hasHydrated, isAuthenticated } = useAuthStore()
 
   useEffect(() => {
@@ -94,6 +104,13 @@ export function LoginForm() {
       void checkAuth()
     }
   }, [hasHydrated, authRequired, checkAuthRequired, router, isAuthenticated])
+
+  useEffect(() => {
+    if (mfaChallenge?.type !== 'setup' || totpSetup) return
+    void setupTotp(mfaChallenge.setupToken).then((result) => {
+      if (result) setTotpSetup(result)
+    })
+  }, [mfaChallenge, setupTotp, totpSetup])
 
   if (!hasHydrated || isCheckingAuth) {
     return (
@@ -139,7 +156,19 @@ export function LoginForm() {
       setLocalError('Vui lòng nhập username/email và mật khẩu.')
       return
     }
-    await login(identifier, password)
+    if (mfaChallenge?.type === 'setup' && totpSetup) {
+      if (!totpCode.trim()) {
+        setLocalError('Vui lòng nhập mã 6 số từ ứng dụng xác thực.')
+        return
+      }
+      await confirmTotp(totpSetup.confirmToken, totpCode)
+      return
+    }
+    if (mfaChallenge?.type === 'code' && !totpCode.trim()) {
+      setLocalError('Vui lòng nhập mã 6 số từ ứng dụng xác thực.')
+      return
+    }
+    await login(identifier, password, totpCode)
   }
 
   const handleRegisterSubmit = async (event: React.FormEvent) => {
@@ -283,9 +312,39 @@ export function LoginForm() {
                 disabled={busy}
                 autoComplete="current-password"
               />
+              {mfaChallenge?.type === 'setup' && totpSetup && (
+                <div className="space-y-2 rounded-md border p-3 text-sm">
+                  <p className="font-medium">Thiết lập xác thực hai lớp</p>
+                  <p className="text-muted-foreground">
+                    Thêm tài khoản vào ứng dụng xác thực bằng khóa dưới đây, sau đó nhập mã 6 số.
+                  </p>
+                  <code className="block break-all rounded bg-muted p-2 text-xs">
+                    {totpSetup.secret}
+                  </code>
+                </div>
+              )}
+              {mfaChallenge && (
+                <Input
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  maxLength={8}
+                  placeholder="Mã xác thực 6 số"
+                  value={totpCode}
+                  onChange={(event) => setTotpCode(event.target.value.replace(/\D/g, ''))}
+                  disabled={busy}
+                  autoComplete="one-time-code"
+                />
+              )}
               <Button type="submit" className="w-full gap-2" disabled={busy || !identifier.trim() || !password.trim()}>
                 <LogIn className="h-4 w-4" />
-                {busy ? 'Đang đăng nhập...' : 'Đăng nhập'}
+                {busy
+                  ? 'Đang xác thực...'
+                  : mfaChallenge?.type === 'setup'
+                    ? 'Xác nhận và đăng nhập'
+                    : mfaChallenge?.type === 'code'
+                      ? 'Xác thực và đăng nhập'
+                      : 'Đăng nhập'}
               </Button>
             </form>
           )}

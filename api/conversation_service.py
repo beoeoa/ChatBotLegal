@@ -11,6 +11,7 @@ so local pilot environments remain usable.
 """
 
 import json
+import base64
 import os
 import re
 import uuid
@@ -30,6 +31,7 @@ CHAT_RETENTION_MONTHS = 12
 DEFAULT_CONTEXT_MAX_CHARS = 3500
 DEFAULT_CONTEXT_MAX_MESSAGES = 12
 DEFAULT_TITLE = "Cuộc trò chuyện mới"
+DEFAULT_MESSAGE_PAGE_SIZE = 30
 JSON_FALLBACK_DIR = os.path.join(
     os.path.dirname(__file__), "..", "..", "data", "conversations"
 )
@@ -80,6 +82,30 @@ def retention_expires_at(from_dt: datetime | None = None) -> datetime:
 def estimate_tokens(text: str) -> int:
     # Rough Vietnamese/English hybrid estimate: ~3.5 chars/token.
     return max(1, int(len(text or "") / 3.5))
+
+
+def _encode_message_cursor(conversation_id: str, offset: int) -> str:
+    payload = json.dumps(
+        {"v": 1, "conversation_id": conversation_id, "offset": offset},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def _decode_message_cursor(cursor: str | None, conversation_id: str) -> int:
+    if not cursor:
+        return 0
+    try:
+        padding = "=" * (-len(cursor) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(cursor + padding).decode("utf-8"))
+        if payload.get("v") != 1 or payload.get("conversation_id") != conversation_id:
+            raise ValueError
+        offset = int(payload.get("offset"))
+        if offset < 0:
+            raise ValueError
+        return offset
+    except (ValueError, TypeError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ValueError("Invalid conversation message cursor") from exc
 
 
 def _json_owner_dir(owner_key: str) -> str:
@@ -141,8 +167,30 @@ def _message_to_public(msg: dict) -> dict[str, Any]:
     )
     real_attachments = [
         item for item in attachments
-        if not (isinstance(item, dict) and item.get("kind") == "message_snapshot")
+        if not (
+            isinstance(item, dict)
+            and item.get("kind") in {"message_snapshot", "legal_answer_presentation"}
+        )
     ]
+    answer_mode_item = next(
+        (
+            item for item in attachments
+            if isinstance(item, dict) and item.get("kind") == "answer_mode"
+        ),
+        {},
+    )
+    presentation_item = next(
+        (
+            item for item in attachments
+            if isinstance(item, dict) and item.get("kind") == "legal_answer_presentation"
+        ),
+        {},
+    )
+    presentation = (
+        presentation_item.get("value")
+        if isinstance(presentation_item.get("value"), dict)
+        else {}
+    )
     return {
         "id": record_id_str(msg.get("id")) or msg.get("id") or str(uuid.uuid4())[:12],
         "role": msg.get("sender_role") or msg.get("role") or "assistant",
@@ -153,8 +201,30 @@ def _message_to_public(msg: dict) -> dict[str, Any]:
         "faq_refs": msg.get("faq_refs") or legacy_snapshot.get("faq_refs"),
         "faqs": msg.get("faqs") or legacy_snapshot.get("faqs"),
         "procedure_detail": msg.get("procedure_detail") or legacy_snapshot.get("procedure_detail"),
+        "answer_sections": msg.get("answer_sections") or legacy_snapshot.get("answer_sections"),
+        "forms_unavailable": (
+            msg.get("forms_unavailable")
+            if msg.get("forms_unavailable") is not None
+            else legacy_snapshot.get("forms_unavailable")
+        ),
         "rag_trace": msg.get("rag_trace") or legacy_snapshot.get("rag_trace"),
         "grounding_status": msg.get("grounding_status") or legacy_snapshot.get("grounding_status"),
+        "answer_mode": msg.get("answer_mode") or answer_mode_item.get("value"),
+        "answer_status": msg.get("answer_status") or legacy_snapshot.get("answer_status"),
+        "fallback_tier": msg.get("fallback_tier") or legacy_snapshot.get("fallback_tier"),
+        "canonical_domain": msg.get("canonical_domain") or legacy_snapshot.get("canonical_domain"),
+        "evidence_count": msg.get("evidence_count") if msg.get("evidence_count") is not None else legacy_snapshot.get("evidence_count"),
+        "coverage_warning": msg.get("coverage_warning") or legacy_snapshot.get("coverage_warning"),
+        "blocked_reason": msg.get("blocked_reason") or legacy_snapshot.get("blocked_reason"),
+        "presentation_version": presentation.get("presentation_version"),
+        "answer_route": presentation.get("answer_route"),
+        "pipeline_version": presentation.get("pipeline_version"),
+        "data_release_id": presentation.get("data_release_id"),
+        "index_fingerprint": presentation.get("index_fingerprint"),
+        "validity_snapshot": presentation.get("validity_snapshot"),
+        "verification_label": presentation.get("verification_label"),
+        "historical_label": presentation.get("historical_label"),
+        "sections": presentation.get("sections"),
         "attachments": real_attachments or None,
         "created_at": str(msg.get("created_at") or msg.get("created") or utcnow_iso()),
     }
@@ -364,6 +434,82 @@ async def get_conversation(
     return public
 
 
+async def get_conversation_message_page(
+    conversation_id: str,
+    *,
+    owner_key: str,
+    role_context: str | None = None,
+    real_user_id: str | None = None,
+    is_admin: bool = False,
+    limit: int = DEFAULT_MESSAGE_PAGE_SIZE,
+    before: str | None = None,
+) -> dict[str, Any] | None:
+    """Return one newest-first cursor window, rendered chronologically.
+
+    The cursor is deliberately opaque to clients and scoped to one
+    conversation. The API returns at most 30 messages by default; older pages
+    are requested explicitly by passing ``before=next_cursor``.
+    """
+    page_size = max(1, min(int(limit), 100))
+    offset = _decode_message_cursor(before, conversation_id)
+    existing = await get_conversation(
+        conversation_id,
+        owner_key=owner_key,
+        role_context=role_context,
+        real_user_id=real_user_id,
+        is_admin=is_admin,
+        include_messages=False,
+    )
+    if not existing:
+        return None
+
+    fetch_limit = page_size + 1
+    if await _use_surreal() and (real_user_id or is_admin):
+        full_id = full_record_id("conversation", conversation_id)
+        rows = await repo_query(
+            """
+            SELECT * FROM conversation_message
+            WHERE conversation = $conversation
+            ORDER BY created_at DESC
+            LIMIT $fetch_limit START $offset;
+            """,
+            {
+                "conversation": ensure_record_id(full_id or conversation_id),
+                "fetch_limit": fetch_limit,
+                "offset": offset,
+            },
+        )
+        descending = [_message_to_public(msg) for msg in rows]
+    else:
+        detail = await get_conversation(
+            conversation_id,
+            owner_key=owner_key,
+            role_context=role_context,
+            real_user_id=real_user_id,
+            is_admin=is_admin,
+            include_messages=True,
+        )
+        all_messages = list((detail or {}).get("messages") or [])
+        all_messages.sort(
+            key=lambda msg: (str(msg.get("created_at") or ""), str(msg.get("id") or "")),
+            reverse=True,
+        )
+        descending = all_messages[offset : offset + fetch_limit]
+
+    has_more = len(descending) > page_size
+    window = descending[:page_size]
+    return {
+        "messages": list(reversed(window)),
+        "next_cursor": (
+            _encode_message_cursor(conversation_id, offset + page_size)
+            if has_more
+            else None
+        ),
+        "has_more": has_more,
+        "limit": page_size,
+    }
+
+
 async def rename_conversation(
     conversation_id: str,
     *,
@@ -457,8 +603,16 @@ async def add_message(
     faq_refs: list[str] | None = None,
     faqs: list[dict] | None = None,
     procedure_detail: dict | None = None,
+    answer_sections: list[dict] | None = None,
+    forms_unavailable: bool | None = None,
     rag_trace: dict | None = None,
     grounding_status: str | None = None,
+    answer_status: str | None = None,
+    fallback_tier: str | None = None,
+    canonical_domain: str | None = None,
+    evidence_count: int | None = None,
+    coverage_warning: str | None = None,
+    blocked_reason: str | None = None,
     attachments: list[dict] | None = None,
 ) -> dict[str, Any] | None:
     existing = await get_conversation(
@@ -491,6 +645,39 @@ async def add_message(
                 continue
             prior_content = " ".join(str(prior.get("content") or "").split()).strip()
             if normalized_content and prior_content == normalized_content:
+                presentation_items = [
+                    item for item in (attachments or [])
+                    if isinstance(item, dict)
+                    and item.get("kind") == "legal_answer_presentation"
+                ]
+                if presentation_items:
+                    previous_attachments = [
+                        item for item in (prior.get("attachments") or [])
+                        if not (
+                            isinstance(item, dict)
+                            and item.get("kind") == "legal_answer_presentation"
+                        )
+                    ]
+                    merged_attachments = [*previous_attachments, *presentation_items]
+                    if await _use_surreal() and (real_user_id or is_admin):
+                        prior_id = full_record_id(
+                            "conversation_message", str(prior.get("id") or "")
+                        )
+                        if prior_id:
+                            await repo_update(
+                                "conversation_message",
+                                prior_id,
+                                {"attachments": merged_attachments},
+                            )
+                    else:
+                        raw = _load_json_conversation(owner_key, conversation_id)
+                        if raw:
+                            for stored in reversed(raw.get("messages") or []):
+                                if str(record_id_str(stored.get("id")) or stored.get("id")) == str(prior.get("id")):
+                                    stored["attachments"] = merged_attachments
+                                    break
+                            _save_json_conversation(owner_key, conversation_id, raw)
+                    prior = {**prior, "attachments": merged_attachments}
                 return _message_to_public(prior)
             break
 
@@ -501,8 +688,16 @@ async def add_message(
         "faq_refs": faq_refs,
         "faqs": faqs,
         "procedure_detail": procedure_detail,
+        "answer_sections": answer_sections,
+        "forms_unavailable": forms_unavailable,
         "rag_trace": rag_trace,
         "grounding_status": grounding_status,
+        "answer_status": answer_status,
+        "fallback_tier": fallback_tier,
+        "canonical_domain": canonical_domain,
+        "evidence_count": evidence_count,
+        "coverage_warning": coverage_warning,
+        "blocked_reason": blocked_reason,
         "attachments": attachments,
         "status": message_status,
     }
@@ -523,8 +718,16 @@ async def add_message(
             "faq_refs": faq_refs,
             "faqs": faqs,
             "procedure_detail": procedure_detail,
+            "answer_sections": answer_sections,
+            "forms_unavailable": forms_unavailable,
             "rag_trace": rag_trace,
             "grounding_status": grounding_status,
+            "answer_status": answer_status,
+            "fallback_tier": fallback_tier,
+            "canonical_domain": canonical_domain,
+            "evidence_count": evidence_count,
+            "coverage_warning": coverage_warning,
+            "blocked_reason": blocked_reason,
             "created_at": now,
         }
         try:
@@ -629,8 +832,26 @@ async def recover_missing_assistant_message(
         if (msg.get("sender_role") or msg.get("role")) == "assistant"
     }
     restored_count = 0
-    for user_message in messages:
+    for index, user_message in enumerate(messages):
         if (user_message.get("sender_role") or user_message.get("role")) != "user":
+            continue
+        # Recovery belongs to one conversation turn, not to every historical
+        # answer with the same question text.  Once any assistant response
+        # follows this user message (up to the next user message), the turn is
+        # complete and must never receive a legacy answer from audit history.
+        following_turn = messages[index + 1 :]
+        next_user_offset = next(
+            (
+                offset
+                for offset, message in enumerate(following_turn)
+                if (message.get("sender_role") or message.get("role")) == "user"
+            ),
+            len(following_turn),
+        )
+        if any(
+            (message.get("sender_role") or message.get("role")) == "assistant"
+            for message in following_turn[:next_user_offset]
+        ):
             continue
         question = str(user_message.get("content") or "").strip()
         if not question:

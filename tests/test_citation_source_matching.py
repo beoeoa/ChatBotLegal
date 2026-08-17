@@ -14,6 +14,23 @@ def test_citations_follow_explicit_law_and_article_from_answer():
     assert citations[0]["internal_url"].startswith("/legal-documents/20")
 
 
+def test_citation_preserves_verified_document_status_from_retrieval():
+    from api.routers.search import _build_citations_from_retrieval
+
+    citations = _build_citations_from_retrieval([
+        {
+            "chunk_id": "active-article",
+            "doc_id": "20",
+            "law_number": "60/2014/QH13",
+            "article_number": "13",
+            "document_status": "active",
+            "source_url": "https://vbpl.vn/Pages/vbpq-toanvan.aspx?ItemID=46746",
+        }
+    ])
+
+    assert citations[0]["effective_status"] == "active"
+
+
 def test_explicit_unsupported_reference_never_links_a_different_document():
     from api.routers.search import _build_citations_from_retrieval
 

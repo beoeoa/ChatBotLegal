@@ -1,11 +1,46 @@
 import asyncio
 import os
+from pathlib import Path
 from typing import List, Any
 from loguru import logger
 import torch
 import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModel
 from esperanto import EmbeddingModel
+
+from api.model_modality import validate_embedding_output
+
+
+def _enabled(name: str, default: str = "false") -> bool:
+    return str(os.getenv(name) or default).strip().casefold() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def resolve_hf_model_source(model_name: str | None) -> tuple[Path | str, bool]:
+    """Resolve a portable local model path; remote downloads require opt-in."""
+
+    configured = str(
+        os.getenv("HUGGINGFACE_EMBEDDING_MODEL_PATH")
+        or os.getenv("VNLEGAL_LAL_MODEL_PATH")
+        or ""
+    ).strip()
+    if configured:
+        path = Path(configured).expanduser().resolve()
+        if not path.is_dir():
+            raise RuntimeError("embedding_model_path_missing")
+        return path, True
+    candidate = Path(str(model_name or ""))
+    if str(model_name or "").strip() and candidate.is_dir():
+        return candidate.resolve(), True
+    if _enabled("HUGGINGFACE_EMBEDDING_ALLOW_REMOTE"):
+        if not str(model_name or "").strip():
+            raise RuntimeError("embedding_model_name_missing")
+        return str(model_name), False
+    raise RuntimeError("embedding_model_path_not_configured")
 
 class HuggingFaceEmbeddingModel(EmbeddingModel):
     def __post_init__(self):
@@ -18,14 +53,16 @@ class HuggingFaceEmbeddingModel(EmbeddingModel):
         if self._model is not None:
             return
         
-        # Local model cache path
-        local_path = r"D:\legal-chatbot-data\sentence_transformers\models--darklethelong--vnlegal-lal\snapshots\de759324ef931a2475ae8db97137b6a6cbb98aa0"
-        path_to_load = local_path if os.path.exists(local_path) else self.model_name
+        path_to_load, local_only = resolve_hf_model_source(self.model_name)
         
         logger.info(f"Loading Hugging Face embedding model from: {path_to_load}")
         try:
-            self._tokenizer = AutoTokenizer.from_pretrained(path_to_load)
-            self._model = AutoModel.from_pretrained(path_to_load)
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                path_to_load, local_files_only=local_only
+            )
+            self._model = AutoModel.from_pretrained(
+                path_to_load, local_files_only=local_only
+            )
             self._model.eval()
             logger.info("Successfully loaded Hugging Face embedding model.")
         except Exception as e:
@@ -50,7 +87,9 @@ class HuggingFaceEmbeddingModel(EmbeddingModel):
                 torch.arange(len(inputs["input_ids"])), last_token
             ]
             embeddings = F.normalize(embeddings, p=2, dim=1)
-            return embeddings.cpu().tolist()
+            return validate_embedding_output(
+                embeddings.cpu().tolist(), expected_count=len(texts)
+            )
 
     async def aembed(self, texts: List[str]) -> List[List[float]]:
         async with self._lock:

@@ -26,7 +26,9 @@ from open_notebook.utils.text_utils import extract_text_content
 from api.legal_retrieval_policy import expanded_retrieval_reason
 from api.legal_answer_quality import build_evidence_coverage
 from api.legal_grounding import validate_legal_references
+from api.legal_parent_context import group_parent_child_evidence
 from api.legal_search_client import get_legal_search_client
+from api.legal_text_cleaning import project_legal_evidence_rows
 from api.legal_section_grounding import (
     LegalIssue,
     classify_issue_domain,
@@ -237,18 +239,9 @@ async def provide_answer(
         )
         payload = dict(state)
         
-        # Match only byte-verified official Hai Phong form source packages.
+        # Forms are attached only by the canonical resolver in the API
+        # response. Do not inject legacy catalog matches into an LLM prompt.
         form_context = ""
-        try:
-            from api.routers.ward_procedures import build_official_form_context
-
-            form_context = build_official_form_context(
-                str(state["question"]),
-                domain=state.get("domain"),
-            )
-        except Exception as e:
-            logger.warning(f"Failed to load matching forms for context: {str(e)}")
-
         payload["results"] = (
             _format_evidence_for_prompt(results) + ("\n\n" + form_context if form_context else "")
             if results
@@ -428,8 +421,23 @@ async def _legal_search(
             "expired_date": item.get("expired_date"),
             "article_number": item.get("article_number"),
             "article_title": item.get("article_title"),
+            "clause_number": item.get("clause_number"),
+            "point_number": item.get("point_number"),
             "chunk_heading": item.get("chunk_heading"),
             "content": item.get("content"),
+            "matched_child_heading": item.get("matched_child_heading"),
+            "matched_child_content": item.get("matched_child_content"),
+            "parent_context_ref": item.get("parent_context_ref"),
+            "parent_context_kind": item.get("parent_context_kind"),
+            "parent_context_heading": item.get("parent_context_heading"),
+            "parent_context": item.get("parent_context"),
+            "parent_context_chars": item.get("parent_context_chars"),
+            "parent_context_original_chars": item.get(
+                "parent_context_original_chars"
+            ),
+            "parent_context_truncated": item.get("parent_context_truncated"),
+            "parent_context_reason": item.get("parent_context_reason"),
+            "parent_context_primary": item.get("parent_context_primary"),
             "source_url": item.get("source_url"),
             "official_level": item.get("official_level"),
             "applicability_info": item.get("applicability_info"),
@@ -448,7 +456,11 @@ async def _legal_search(
 
 def _format_evidence_for_prompt(results: list[dict]) -> str:
     sections = []
-    for index, result in enumerate(results, start=1):
+    projected_results, _ = project_legal_evidence_rows(results)
+    for index, group in enumerate(
+        group_parent_child_evidence(projected_results), start=1
+    ):
+        result = group["source"]
         metadata = [
             ("Văn bản", result.get("law_number") or result.get("document_title")),
             ("Tên văn bản", result.get("document_title")),
@@ -461,7 +473,9 @@ def _format_evidence_for_prompt(results: list[dict]) -> str:
             ("Ngày hết hiệu lực", result.get("expired_date")),
             ("Điều", result.get("article_number")),
             ("Tên điều", result.get("article_title")),
-            ("Đề mục", result.get("chunk_heading")),
+            ("Khoản", result.get("clause_number")),
+            ("Điểm", result.get("point_number")),
+            ("Ngữ cảnh cha", group.get("parent_context_heading")),
         ]
         lines = [f"## Nguồn {index}"]
         lines.extend(
@@ -483,12 +497,40 @@ def _format_evidence_for_prompt(results: list[dict]) -> str:
                 lines.append(
                     f"  - {relation_type}: {related}; trạng thái: {status}"
                 )
-        lines.extend(
-            [
-                "- Nguyên văn đoạn nguồn:",
-                str(result.get("content") or "").strip(),
-            ]
-        )
+        matched_children = group.get("matched_children") or []
+        parent_context = str(group.get("parent_context") or "").strip()
+        reason = str(group.get("parent_context_reason") or "").strip()
+        if not result.get("parent_context_ref") and not reason:
+            # Preserve the established prompt contract for legacy evidence
+            # that has not passed through parent hydration.
+            lines.extend(
+                [
+                    "- Nguyên văn đoạn nguồn:",
+                    str(
+                        result.get("clean_content")
+                        or result.get("content")
+                        or ""
+                    ).strip(),
+                ]
+            )
+            sections.append("\n".join(lines))
+            continue
+
+        lines.append("- Các đoạn con được truy xuất:")
+        for child in matched_children:
+            heading = str(child.get("heading") or "Đoạn khớp").strip()
+            content = str(child.get("content") or "").strip()
+            lines.extend([f"  - {heading}", content])
+
+        if parent_context:
+            label = "- Ngữ cảnh Điều/Phụ lục cha cần thiết:"
+            if group.get("parent_context_truncated"):
+                label = "- Ngữ cảnh Điều/Phụ lục cha đã giới hạn theo child:"
+            lines.extend([label, parent_context])
+        elif reason:
+            lines.append(
+                f"- Không tải được ngữ cảnh cha; chỉ dùng đoạn con (lý do: {reason})."
+            )
         sections.append("\n".join(lines))
     return "\n\n".join(sections)
 
@@ -669,17 +711,9 @@ async def write_final_answer(
                 return {"final_answer": _enrich_citations(completed, evidence)}
             return {"final_answer": _no_answer_guidance()}
 
+        # Answer repair receives legal evidence only. Canonical recommended
+        # forms are rendered outside the generated answer payload.
         form_context = ""
-        try:
-            from api.routers.ward_procedures import build_official_form_context
-
-            form_context = build_official_form_context(
-                str(state["question"]),
-                domain=state.get("domain"),
-            )
-        except Exception as exc:
-            logger.warning("Failed to load forms for answer repair: {}", exc)
-
         repair_payload = {
             "question": state["question"],
             "role": state["role"],
@@ -960,10 +994,9 @@ def _safe_draft_after_failed_repair(
     """Keep grounded fragments while removing fragments with unsafe references.
 
     A single unsupported citation or law number must not turn an otherwise
-    useful answer into a global refusal.  This deterministic fallback removes
-    only the sentence/line that fails the same legal-reference validator used
-    by the normal answer path.  It succeeds only when at least one remaining
-    fragment is explicitly bound to evidence from the current request.
+    useful answer into a global refusal. This fail-closed fallback retains only
+    fragments that are themselves explicitly bound to evidence from the
+    current request.
     """
     normalized = normalize_answer_markdown(_normalize_answer_format(text))
     kept_lines: list[str] = []
@@ -988,11 +1021,6 @@ def _safe_draft_after_failed_repair(
                 pending_headings.clear()
             else:
                 pending_headings.append(line)
-                if (
-                    heading_validation.has_explicit_reference
-                    and heading_validation.matched_source_ids
-                ):
-                    has_grounded_fragment = True
             continue
 
         safe_fragments: list[str] = []
@@ -1007,12 +1035,14 @@ def _safe_draft_after_failed_repair(
             ):
                 removed_unsafe_fragment = True
                 continue
-            safe_fragments.append(fragment)
-            if (
+            if not (
                 fragment_validation.has_explicit_reference
                 and fragment_validation.matched_source_ids
             ):
-                has_grounded_fragment = True
+                removed_unsafe_fragment = True
+                continue
+            safe_fragments.append(fragment)
+            has_grounded_fragment = True
 
         if safe_fragments:
             if pending_headings:
@@ -1027,6 +1057,12 @@ def _safe_draft_after_failed_repair(
     if not cleaned or not has_grounded_fragment:
         return None
 
+    step_counter = iter(range(1, 10_000))
+    cleaned = re.sub(
+        r"(?im)^(\s*(?:[-*]\s*)?(?:\*\*)?Bước\s+)\d+",
+        lambda match: f"{match.group(1)}{next(step_counter)}",
+        cleaned,
+    )
     cleaned_validation = validate_legal_references(cleaned, evidence)
     if cleaned_validation.status == "ungrounded":
         return None
@@ -1063,6 +1099,8 @@ def _source_text(source: dict) -> str:
             source.get("article_title"),
             source.get("chunk_heading"),
             source.get("content"),
+            source.get("matched_child_content"),
+            source.get("parent_context"),
             source.get("relationships") or [],
         )
     )

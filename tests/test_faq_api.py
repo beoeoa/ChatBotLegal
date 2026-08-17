@@ -61,6 +61,19 @@ def test_empty_or_non_form_faq_does_not_expose_seed_forms(monkeypatch):
     assert missing["forms_unavailable"] is True
 
 
+def test_faq_form_gate_rejects_technical_quarantine():
+    from api.routers import faq
+
+    record = {
+        "official_level": "official",
+        "review_status": "approved",
+        "runtime_eligible": False,
+        "is_quarantined": True,
+        "local_path": "data/uploads/forms/official/form.pdf",
+    }
+    assert faq._is_valid_official_form(record) is False
+
+
 def test_form_limit_is_three(monkeypatch):
     from api.routers import faq
 

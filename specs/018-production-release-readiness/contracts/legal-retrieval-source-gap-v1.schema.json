@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "legal-retrieval-source-gap-v1.schema.json",
+  "title": "Candidate retrieval source gap manifest",
+  "type": "object",
+  "required": [
+    "schema_version", "generated_at", "candidate_collection",
+    "candidate_manifest_sha256", "expected_reference_count",
+    "missing_reference_count", "missing_law_count", "missing_references",
+    "candidate_collection_mutated", "active_pointer_changed",
+    "approval_status", "manifest_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "legal-retrieval-source-gap-v1"},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "candidate_collection": {"type": "string", "minLength": 1},
+    "candidate_manifest_sha256": {"type": ["string", "null"]},
+    "expected_reference_count": {"type": "integer", "minimum": 0},
+    "missing_reference_count": {"type": "integer", "minimum": 0},
+    "missing_law_count": {"type": "integer", "minimum": 0},
+    "missing_references": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "dataset", "case_id", "domain", "legal_as_of", "law_number",
+          "article", "official_source_url", "status", "effective_from",
+          "effective_to", "authority", "jurisdiction", "relationship",
+          "reason_missing", "required_action"
+        ]
+      }
+    },
+    "candidate_collection_mutated": {"const": false},
+    "active_pointer_changed": {"const": false},
+    "approval_status": {"enum": ["legal_review_required", "source_coverage_complete"]},
+    "manifest_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "inputs": {"type": "object"},
+    "inventory_enrichment": {"type": "object"}
+  },
+  "additionalProperties": false
+}

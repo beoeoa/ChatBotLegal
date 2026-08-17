@@ -9,11 +9,14 @@
   can see and claim only tickets in their assigned domains.
 - The browser connects WebSocket traffic directly to FastAPI. Local Next.js
   rewrites remain for HTTP but are not relied on for WebSocket upgrades.
-- Officers can propose a URL or upload PDF/DOCX/TXT/MD. Extraction and URL
-  preview are review aids only; the result becomes a pending candidate.
+- Officers can propose a URL, upload PDF/DOCX/TXT/MD, or paste content. The
+  Officer surface does not crawl or preview the URL; the result becomes a
+  pending candidate for Admin verification.
 - Only admin can approve a candidate for later import and embedding.
 - Default VBPL sources run every 10,080 minutes (seven days). The scheduler may
   check hourly, but a source is scanned only when its own interval is due.
+- The scheduled crawler is shared system infrastructure visible and controllable
+  only by Admin. There is no separate Officer crawler or Officer crawl monitor.
 - The former 1,440-minute default is migrated to weekly. Custom admin intervals
   are preserved.
 

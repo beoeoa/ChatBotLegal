@@ -33,10 +33,18 @@
     "**/*.ts",
     "**/*.tsx",
     ".next/types/**/*.ts",
-    ".next/dev/types/**/*.ts"
+    ".next/dev/types/**/*.ts",
+    ".next-legal-management-gate/types/**/*.ts",
+    ".next-legal-management-gate/dev/types/**/*.ts"
   ],
   "exclude": [
     "node_modules",
-    "vitest.config.ts"
+    "e2e",
+    "vitest.config.ts",
+    ".next-e2e-gate",
+    ".next-bulk-review-gate",
+    ".next-feature006-gate",
+    ".next-release-gate",
+    ".next-admin-control-gate"
   ]
 }

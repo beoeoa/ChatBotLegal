@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://chatbotlegal.local/schemas/capability-registry.schema.json",
+  "title": "SystemCapabilityRegistry",
+  "type": "object",
+  "required": ["schema_version", "generated_at", "capabilities"],
+  "properties": {
+    "schema_version": {"const": "capability-registry-v1"},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["capability_id", "kind", "path", "owner", "roles", "data_source", "sensitivity", "audit", "retention", "sla", "feature_flag", "tests", "rollback", "status"],
+        "properties": {
+          "capability_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]+$"},
+          "kind": {"enum": ["frontend_route", "api_route", "background_job"]},
+          "path": {"type": "string", "minLength": 1},
+          "owner": {"type": "string", "minLength": 1},
+          "roles": {"type": "array", "items": {"enum": ["public", "citizen", "officer", "admin", "system"]}, "minItems": 1, "uniqueItems": true},
+          "data_source": {"type": "string", "minLength": 1},
+          "sensitivity": {"enum": ["public", "internal", "personal", "restricted"]},
+          "audit": {"type": "string", "minLength": 1},
+          "retention": {"type": "string", "minLength": 1},
+          "sla": {"type": "string", "minLength": 1},
+          "feature_flag": {"type": ["string", "null"]},
+          "tests": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
+          "rollback": {"type": "string", "minLength": 1},
+          "status": {"enum": ["active", "internal", "deprecated", "disabled"]}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}
+

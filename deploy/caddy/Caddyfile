@@ -1,0 +1,91 @@
+{
+	admin off
+	servers {
+		max_header_size 32KB
+		timeouts {
+			read_header 10s
+			read_body 120s
+			idle 2m
+		}
+	}
+}
+
+# Stock Caddy has no supported rate-limit module. Its built-in forward_auth
+# delegates to a private, token-bound API gate before proxying the request.
+# The API keeps only SHA-256 client/class keys and never request content.
+(rate_gate) {
+	forward_auth api:5055 {
+		uri /internal/gateway-rate-limit
+		header_up X-Gateway-Token {$GATEWAY_RATE_LIMIT_TOKEN}
+		header_up X-Gateway-Client-IP {remote_host}
+		header_up X-Original-URI {uri}
+		header_up X-Original-Method {method}
+	}
+}
+
+{$PILOT_HOSTNAME:chatbotlegal.local} {
+	tls internal
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		Content-Security-Policy "default-src 'self'; img-src 'self' data: blob:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' wss:; font-src 'self' data:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+		Cross-Origin-Opener-Policy "same-origin"
+		Cross-Origin-Resource-Policy "same-origin"
+		-Server
+	}
+
+	# Authentication mutation routes also retain the stricter in-API auth
+	# limiter, giving independent edge-path and credential-attempt limits.
+	@auth_mutations {
+		method POST
+		path /api/auth/login /api/auth/register /api/auth/forgot-password /api/auth/reset-password /api/auth/totp/setup /api/auth/totp/confirm
+	}
+	handle @auth_mutations {
+		import rate_gate
+		request_body {
+			max_size 64KB
+		}
+		reverse_proxy api:5055 api_replica:5055 {
+			lb_try_duration 5s
+			health_uri /health
+			health_interval 10s
+			fail_duration 30s
+			transport http {
+				response_header_timeout 30s
+			}
+		}
+	}
+
+	handle /api/* {
+		import rate_gate
+		request_body {
+			max_size 251MB
+		}
+		reverse_proxy api:5055 api_replica:5055 {
+			lb_try_duration 5s
+			health_uri /health
+			health_interval 10s
+			fail_duration 30s
+			transport http {
+				response_header_timeout 300s
+			}
+		}
+	}
+
+	handle {
+		reverse_proxy frontend:8502 frontend_replica:8502 {
+			lb_try_duration 5s
+			health_uri /
+			health_interval 10s
+			fail_duration 30s
+			transport http {
+				response_header_timeout 30s
+			}
+		}
+	}
+}

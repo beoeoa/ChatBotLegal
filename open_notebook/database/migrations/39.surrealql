@@ -1,0 +1,7 @@
+-- Preserve dynamic legal-review evidence stored below SCHEMAFULL candidate fields.
+-- This migration changes field shape only; it does not rewrite candidate records.
+DEFINE FIELD OVERWRITE raw_metadata ON TABLE legal_crawl_candidate TYPE option<object> FLEXIBLE;
+DEFINE FIELD OVERWRITE uploaded_file ON TABLE legal_crawl_candidate TYPE option<object> FLEXIBLE;
+DEFINE FIELD OVERWRITE extraction_result ON TABLE legal_crawl_candidate TYPE option<object> FLEXIBLE;
+DEFINE FIELD OVERWRITE legal_validity_flags ON TABLE legal_crawl_candidate TYPE option<object> FLEXIBLE;
+DEFINE FIELD OVERWRITE review_recommendation ON TABLE legal_crawl_candidate TYPE option<object> FLEXIBLE;

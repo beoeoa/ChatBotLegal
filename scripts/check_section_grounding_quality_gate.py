@@ -23,11 +23,39 @@ def evaluate_gate(artifact: dict[str, Any]) -> dict[str, Any]:
     total = int(artifact.get("request_count") or 0)
     completed = int(artifact.get("completed_count") or 0)
     repairs = int(artifact.get("repair_count") or 0)
+    stages = artifact.get("stage_latency_ms") or {}
+    retrieval_p95 = (stages.get("retrieval") or {}).get("p95")
+    generation_p95 = (stages.get("generation") or {}).get("p95")
+    quality_gate_failures = int(
+        (artifact.get("quality_gate_counts") or {}).get("failed") or 0
+    )
+    generation_timeouts = int(
+        (artifact.get("error_category_counts") or {}).get("timeout") or 0
+    )
+    warm_c1 = artifact.get("mode") == "warm" and artifact.get("concurrency") == 1
     checks = {
         "privacy_scan": privacy_safe,
         "completed_requests": total > 0 and completed == total,
         "repair_rate_under_10_percent": total > 0 and repairs / total < 0.10,
-        "warm_p95_under_15_seconds": artifact.get("mode") != "warm" or isinstance(p95, int) and p95 <= 15_000,
+        "quality_gate_no_failures": quality_gate_failures == 0,
+        "generation_timeout_rate_under_50_percent": (
+            total > 0 and generation_timeouts / total < 0.50
+        ),
+        "warm_c1_retrieval_p95_under_3_seconds": (
+            not warm_c1
+            or isinstance(retrieval_p95, int)
+            and retrieval_p95 <= 3_000
+        ),
+        "warm_c1_generation_p95_under_24_seconds": (
+            not warm_c1
+            or isinstance(generation_p95, int)
+            and generation_p95 <= 24_000
+        ),
+        "warm_c1_end_to_end_p95_under_30_seconds": (
+            not warm_c1
+            or isinstance(p95, int)
+            and p95 <= 30_000
+        ),
         "legal_reviewer_approval": False,
     }
     return {

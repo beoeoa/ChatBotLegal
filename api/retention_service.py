@@ -17,6 +17,7 @@ from typing import Any
 from loguru import logger
 
 from api.user_service import write_audit_log
+from api.legal_audit_chain import is_critical_legal_action
 from open_notebook.database.repository import ensure_record_id, repo_query, repo_update
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -63,6 +64,10 @@ def case_files_expires_at(closed_at: datetime | None) -> datetime | None:
 
 def audit_expires_at(created_at: datetime) -> datetime:
     return created_at + timedelta(days=AUDIT_RETENTION_DAYS)
+
+
+def support_expires_at(closed_at: datetime | None) -> datetime | None:
+    return closed_at + timedelta(days=CASE_FILE_RETENTION_DAYS) if closed_at else None
 
 
 def _safe_remove(path: Path) -> bool:
@@ -233,7 +238,7 @@ def _purge_support_ticket_attachments(now: datetime, dry_run: bool) -> int:
 
 
 def _purge_support_ticket_chats(now: datetime, dry_run: bool) -> int:
-    """Purge live-support chat payload after 12 months of activity."""
+    """Purge support content 180 days after close; open tickets never expire."""
     if not SUPPORT_TICKETS_DIR.is_dir():
         return 0
     count = 0
@@ -241,8 +246,7 @@ def _purge_support_ticket_chats(now: datetime, dry_run: bool) -> int:
         data = _load_json(ticket_path)
         if not data or data.get("status") == "purged":
             continue
-        last = parse_datetime(data.get("updated_at") or data.get("closed_at") or data.get("created_at"))
-        expires = chat_expires_at(last) if last else None
+        expires = support_expires_at(parse_datetime(data.get("closed_at")))
         if not expires or expires > now:
             continue
         if dry_run:
@@ -310,17 +314,21 @@ async def _purge_audit_rows(now: datetime, dry_run: bool) -> int:
     for table in ("user_audit_log", "sensitive_access_audit"):
         try:
             rows = await repo_query(
-                f"SELECT id FROM {table} WHERE (expires_at <= $now OR (expires_at = NONE AND created <= $cutoff));",
+                f"SELECT id, action FROM {table} WHERE (expires_at <= $now OR (expires_at = NONE AND created <= $cutoff));",
                 {"now": now, "cutoff": cutoff},
             )
         except Exception as exc:
             # user_audit_log from migration 16 has no expires_at in older deployments.
             try:
-                rows = await repo_query(f"SELECT id FROM {table} WHERE created <= $cutoff;", {"cutoff": cutoff})
+                rows = await repo_query(f"SELECT id, action FROM {table} WHERE created <= $cutoff;", {"cutoff": cutoff})
             except Exception as nested:
                 logger.warning("Cannot enumerate expired {}: {} / {}", table, exc, nested)
                 continue
-        ids = [str(row.get("id")) for row in rows or [] if row.get("id")]
+        ids = [
+            str(row.get("id"))
+            for row in rows or []
+            if row.get("id") and not is_critical_legal_action(str(row.get("action") or ""))
+        ]
         if ids and not dry_run:
             for record_id in ids:
                 await repo_query(f"DELETE $id;", {"id": ensure_record_id(record_id)})
@@ -377,8 +385,7 @@ async def upcoming_expiration_report(now: datetime | None = None, within_days: i
             data = _load_json(path)
             if not data or data.get("status") == "purged":
                 continue
-            last = parse_datetime(data.get("updated_at") or data.get("closed_at") or data.get("created_at"))
-            expires = chat_expires_at(last) if last else None
+            expires = support_expires_at(parse_datetime(data.get("closed_at")))
             if expires and now <= expires <= deadline:
                 result["support_tickets"].append({
                     "id": data.get("id") or path.stem,

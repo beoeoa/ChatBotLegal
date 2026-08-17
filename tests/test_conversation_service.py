@@ -98,6 +98,87 @@ def test_build_token_limited_context_prefers_recent_conclusions():
     assert len(text) <= 2600
 
 
+def test_message_history_uses_opaque_30_message_cursor_pages(tmp_path, monkeypatch):
+    monkeypatch.setattr(svc, "JSON_FALLBACK_DIR", str(tmp_path / "conversations"))
+    monkeypatch.setattr(svc, "_use_surreal", lambda: asyncio.sleep(0, result=False))
+
+    owner = "user:pagination"
+    conversation = run(
+        svc.create_conversation(owner_key=owner, role_context="citizen", title="65 messages")
+    )
+    for index in range(65):
+        run(
+            svc.add_message(
+                conversation["id"],
+                owner_key=owner,
+                role="user" if index % 2 == 0 else "assistant",
+                content=f"message-{index:02d}",
+                role_context="citizen",
+            )
+        )
+
+    first = run(
+        svc.get_conversation_message_page(
+            conversation["id"], owner_key=owner, role_context="citizen"
+        )
+    )
+    assert first is not None
+    assert len(first["messages"]) == 30
+    assert first["messages"][0]["content"] == "message-35"
+    assert first["messages"][-1]["content"] == "message-64"
+    assert first["has_more"] is True
+    assert first["next_cursor"] and "pagination" not in first["next_cursor"]
+
+    second = run(
+        svc.get_conversation_message_page(
+            conversation["id"],
+            owner_key=owner,
+            role_context="citizen",
+            before=first["next_cursor"],
+        )
+    )
+    assert second is not None
+    assert [message["content"] for message in second["messages"]] == [
+        f"message-{index:02d}" for index in range(5, 35)
+    ]
+    assert second["has_more"] is True
+
+    third = run(
+        svc.get_conversation_message_page(
+            conversation["id"],
+            owner_key=owner,
+            role_context="citizen",
+            before=second["next_cursor"],
+        )
+    )
+    assert third is not None
+    assert [message["content"] for message in third["messages"]] == [
+        f"message-{index:02d}" for index in range(5)
+    ]
+    assert third["has_more"] is False
+    assert third["next_cursor"] is None
+
+
+def test_message_cursor_is_scoped_to_its_conversation(tmp_path, monkeypatch):
+    monkeypatch.setattr(svc, "JSON_FALLBACK_DIR", str(tmp_path / "conversations"))
+    monkeypatch.setattr(svc, "_use_surreal", lambda: asyncio.sleep(0, result=False))
+    owner = "user:pagination-scope"
+    first = run(svc.create_conversation(owner_key=owner, role_context="citizen"))
+    second = run(svc.create_conversation(owner_key=owner, role_context="citizen"))
+    cursor = svc._encode_message_cursor(first["id"], 30)
+
+    try:
+        run(
+            svc.get_conversation_message_page(
+                second["id"], owner_key=owner, role_context="citizen", before=cursor
+            )
+        )
+    except ValueError as exc:
+        assert "Invalid conversation message cursor" in str(exc)
+    else:
+        raise AssertionError("A cursor from another conversation must be rejected")
+
+
 def test_add_message_preserves_answer_when_snapshot_schema_rejects_nested_field(monkeypatch):
     async def use_surreal():
         return True
@@ -176,6 +257,52 @@ def test_duplicate_completed_assistant_snapshot_is_not_appended(tmp_path, monkey
     assert detail["message_count"] == 1
 
 
+def test_duplicate_answer_enriches_existing_message_with_v1_presentation(tmp_path, monkeypatch):
+    monkeypatch.setattr(svc, "JSON_FALLBACK_DIR", str(tmp_path / "conversations"))
+    monkeypatch.setattr(svc, "_use_surreal", lambda: asyncio.sleep(0, result=False))
+    owner = "user:presentation-history"
+    conversation = run(
+        svc.create_conversation(owner_key=owner, role_context="citizen")
+    )
+    first = run(
+        svc.add_message(
+            conversation["id"],
+            owner_key=owner,
+            role="assistant",
+            content="Kết luận đã kiểm chứng.",
+            status="complete",
+        )
+    )
+    enriched = run(
+        svc.add_message(
+            conversation["id"],
+            owner_key=owner,
+            role="assistant",
+            content="Kết luận đã kiểm chứng.",
+            status="complete",
+            attachments=[{
+                "kind": "legal_answer_presentation",
+                "value": {
+                    "presentation_version": "legal-answer-v1",
+                    "answer_route": "general_legal",
+                    "verification_label": "Đã kiểm chứng từ 1 nguồn",
+                    "sections": {"short_answer": "Kết luận đã kiểm chứng."},
+                },
+            }],
+        )
+    )
+
+    assert enriched["id"] == first["id"]
+    assert enriched["presentation_version"] == "legal-answer-v1"
+    detail = run(
+        svc.get_conversation(
+            conversation["id"], owner_key=owner, role_context="citizen"
+        )
+    )
+    assert detail["message_count"] == 1
+    assert detail["messages"][0]["sections"]["short_answer"] == "Kết luận đã kiểm chứng."
+
+
 def test_duplicate_assistant_error_is_not_appended(tmp_path, monkeypatch):
     monkeypatch.setattr(svc, "JSON_FALLBACK_DIR", str(tmp_path / "conversations"))
     monkeypatch.setattr(svc, "_use_surreal", lambda: asyncio.sleep(0, result=False))
@@ -215,3 +342,113 @@ def test_duplicate_assistant_error_is_not_appended(tmp_path, monkeypatch):
     )
     assert first["id"] == second["id"]
     assert detail["message_count"] == 1
+
+
+def test_recovery_does_not_append_historical_answer_to_completed_turn(monkeypatch):
+    """A repeated question must not revive an older legacy answer."""
+
+    async def use_surreal():
+        return True
+
+    queries = []
+
+    async def query(sql, params):
+        queries.append((sql, params))
+        if "conversation_message" in sql:
+            return [
+                {
+                    "id": "conversation_message:user",
+                    "sender_role": "user",
+                    "content": "Câu hỏi lặp lại",
+                    "created_at": "2026-07-25T01:00:00Z",
+                },
+                {
+                    "id": "conversation_message:assistant",
+                    "sender_role": "assistant",
+                    "content": "Câu trả lời structured đã kiểm chứng",
+                    "status": "complete",
+                    "created_at": "2026-07-25T01:00:01Z",
+                },
+            ]
+        return [
+            {
+                "answer": "Câu trả lời legacy cũ không được phục hồi",
+                "created": "2026-07-24T01:00:00Z",
+            }
+        ]
+
+    async def unexpected_add(*args, **kwargs):
+        raise AssertionError("Completed turn must not receive another assistant answer")
+
+    monkeypatch.setattr(svc, "_use_surreal", use_surreal)
+    monkeypatch.setattr(svc, "repo_query", query)
+    monkeypatch.setattr(svc, "add_message", unexpected_add)
+
+    restored = run(
+        svc.recover_missing_assistant_message(
+            "completed",
+            owner_key="user:citizen",
+            real_user_id="citizen",
+            role_context="citizen",
+        )
+    )
+
+    assert restored is False
+    assert len(queries) == 1
+
+
+def test_recovery_restores_only_turn_without_following_assistant(monkeypatch):
+    async def use_surreal():
+        return True
+
+    messages = [
+        {
+            "id": "conversation_message:user-1",
+            "sender_role": "user",
+            "content": "Câu hỏi đã trả lời",
+            "created_at": "2026-07-25T01:00:00Z",
+        },
+        {
+            "id": "conversation_message:assistant-1",
+            "sender_role": "assistant",
+            "content": "Câu trả lời hiện tại",
+            "status": "complete",
+            "created_at": "2026-07-25T01:00:01Z",
+        },
+        {
+            "id": "conversation_message:user-2",
+            "sender_role": "user",
+            "content": "Câu hỏi bị thiếu đáp án",
+            "created_at": "2026-07-25T01:01:00Z",
+        },
+    ]
+    history_questions = []
+
+    async def query(sql, params):
+        if "conversation_message" in sql:
+            return messages
+        history_questions.append(params["question"])
+        return [{"answer": "Đáp án được khôi phục"}]
+
+    restored_payloads = []
+
+    async def add(*args, **kwargs):
+        restored_payloads.append(kwargs)
+        return {"id": "conversation_message:restored", **kwargs}
+
+    monkeypatch.setattr(svc, "_use_surreal", use_surreal)
+    monkeypatch.setattr(svc, "repo_query", query)
+    monkeypatch.setattr(svc, "add_message", add)
+
+    restored = run(
+        svc.recover_missing_assistant_message(
+            "missing",
+            owner_key="user:citizen",
+            real_user_id="citizen",
+            role_context="citizen",
+        )
+    )
+
+    assert restored is True
+    assert history_questions == ["Câu hỏi bị thiếu đáp án"]
+    assert [item["content"] for item in restored_payloads] == ["Đáp án được khôi phục"]

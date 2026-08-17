@@ -8,7 +8,7 @@ def test_metric_contains_only_opaque_ids_status_counts_timing_and_error_category
     metric = build_section_grounding_metric(
         request_id="req-opaque-1",
         statuses=["sufficiently_evidenced", "insufficiently_evidenced"],
-        stage_timings_ms={"retrieval": 31, "validation": 12},
+        stage_timings_ms={"retrieval": 31, "provisioning": 7, "validation": 12},
         repair_count=1,
         completed=True,
         error_category="none",
@@ -20,7 +20,11 @@ def test_metric_contains_only_opaque_ids_status_counts_timing_and_error_category
             "sufficiently_evidenced": 1,
             "insufficiently_evidenced": 1,
         },
-        "stage_timings_ms": {"retrieval": 31, "validation": 12},
+        "stage_timings_ms": {
+            "retrieval": 31,
+            "provisioning": 7,
+            "validation": 12,
+        },
         "repair_count": 1,
         "completed": True,
         "error_category": "none",
