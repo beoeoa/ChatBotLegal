@@ -1,0 +1,31 @@
+{
+  "total": 1008,
+  "by_split": {
+    "train": 670,
+    "dev": 161,
+    "holdout": 177
+  },
+  "by_route": {
+    "chat_meta": 94,
+    "out_of_scope": 80,
+    "legal_query": 684,
+    "document_followup": 150
+  },
+  "by_tag": {
+    "meta": 94,
+    "exact": 666,
+    "citizen": 531,
+    "officer": 477,
+    "oos": 80,
+    "abbrev": 124,
+    "typo": 90,
+    "followup": 164,
+    "stale_ok": 12,
+    "stale_memory": 20,
+    "acl_must_not_overwrite": 5,
+    "multi_domain": 28,
+    "same_question": 16,
+    "paraphrase": 160
+  },
+  "needs_llm": 170
+}
