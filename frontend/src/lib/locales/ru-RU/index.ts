@@ -103,7 +103,6 @@ export const ruRU = {
     searchTerms: "Поисковые запросы",
     strategy: "Стратегия",
     individualAnswers: "Отдельные ответы ({count})",
-    finalAnswer: "Итоговый ответ",
     notebookLabel: "Блокнот: {name}",
     itemNotFound: "Этот {type} не найден",
     accessibility: {
@@ -818,7 +817,6 @@ export const ruRU = {
   },
   models: {
     embedding: "Модели эмбеддинга",
-    tts: "Озвучивание (TTS)",
     stt: "Распознавание речи (STT)",
     apiKey: "API-ключ",
     deleteSuccess: "Модель успешно удалена",
@@ -844,8 +842,6 @@ export const ruRU = {
     largeContextModelDesc: "Используется для обработки больших документов — рекомендуется Gemini",
     embeddingModelLabel: "Модель эмбеддинга",
     embeddingModelDesc: "Используется для семантического поиска и векторных эмбеддингов",
-    ttsModelLabel: "Модель озвучивания",
-    ttsModelDesc: "Используется для генерации подкастов",
     sttModelLabel: "Модель распознавания речи",
     sttModelDesc: "Используется для транскрибации аудио",
     embeddingChangeTitle: "Изменение модели эмбеддинга",

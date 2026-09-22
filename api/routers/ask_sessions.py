@@ -22,7 +22,10 @@ from api.auth import get_request_role, get_request_user_id, get_request_username
 
 router = APIRouter(prefix="/ask-sessions", tags=["Ask Sessions"])
 
-SESSIONS_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "data", "ask_sessions")
+SESSIONS_DIR = os.getenv(
+    "ASK_SESSIONS_DIR",
+    os.path.join(os.path.dirname(__file__), "..", "..", "data", "ask_sessions"),
+)
 
 def _resolve_user_key(request: Request) -> str:
     """Return the authenticated account ID used as the personal session owner."""

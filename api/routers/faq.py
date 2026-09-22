@@ -7,7 +7,9 @@ FAQ API Router - Câu hỏi thường gặp cho phường/xã (Hải Phòng / L�
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import os
 import uuid
 from datetime import datetime
@@ -28,14 +30,39 @@ from api.faq_governance_service import (
     get_faq_governance_service,
 )
 from api.user_service import write_audit_log
+from api.faq_public_safety import is_qa_faq
 
 router = APIRouter(prefix="/faq", tags=["FAQ"])
+logger = logging.getLogger(__name__)
 
 NOTEBOOK_DATA_DIR = notebook_data_dir()
 FAQ_DATA_FILE = NOTEBOOK_DATA_DIR / "faq_store.json"
 FAQ_SEED_FILE = NOTEBOOK_DATA_DIR / "faq" / "faq_seed_haiphong_lechan.json"
 FORMS_INDEX_FILE = NOTEBOOK_DATA_DIR / "forms" / "haiphong_official_form_index.json"
 MAX_FAQ_FORMS = 3
+
+
+async def _write_faq_audit(*, request: Request, action: str, entity_type: str,
+                           entity_id: str, actor: FaqActor, details: dict[str, Any]) -> None:
+    """Write the secondary audit projection without undoing a committed FAQ mutation.
+
+    The governance repository is the source of truth.  Audit-chain append and
+    the projection are still attempted, but a malformed legacy actor id or a
+    projection outage must not make the caller repeat a revision that already
+    committed successfully.
+    """
+    try:
+        await write_audit_log(
+            action=action,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            actor_user_id=actor.user_id,
+            actor_role="admin",
+            details=details,
+            request=request,
+        )
+    except Exception:
+        logger.exception("FAQ mutation committed but audit projection failed: %s %s", action, entity_id)
 
 
 class FaqCreate(BaseModel):
@@ -46,6 +73,9 @@ class FaqCreate(BaseModel):
     guidance_label: str = ""
     requires_forms: bool = False
     steps: List[str] = Field(default_factory=list)
+    documents_required: List[str] = Field(default_factory=list)
+    duration: str = ""
+    fee: str = ""
     form_ids: List[str] = Field(default_factory=list)
     domain: str
     ward_scope: Optional[str] = None
@@ -66,6 +96,9 @@ class FaqUpdate(BaseModel):
     guidance_label: Optional[str] = None
     requires_forms: Optional[bool] = None
     steps: Optional[List[str]] = None
+    documents_required: Optional[List[str]] = None
+    duration: Optional[str] = None
+    fee: Optional[str] = None
     form_ids: Optional[List[str]] = None
     domain: Optional[str] = None
     ward_scope: Optional[str] = None
@@ -89,6 +122,9 @@ class FaqResponse(BaseModel):
     guidance_label: str = ""
     requires_forms: bool = False
     steps: List[str]
+    documents_required: List[str] = Field(default_factory=list)
+    duration: str = ""
+    fee: str = ""
     form_ids: List[str]
     forms: List[dict] = Field(default_factory=list)
     forms_unavailable: bool = False
@@ -106,6 +142,9 @@ class FaqResponse(BaseModel):
     reviewed_corpus_revision: Optional[str] = None
     revision_id: Optional[str] = None
     confirmed_procedure_id: Optional[str] = None
+    primary_organization_unit_id: Optional[str] = None
+    supporting_organization_unit_ids: List[str] = Field(default_factory=list)
+    department: Optional[str] = None
     public_state: Optional[str] = None
 
 
@@ -122,17 +161,24 @@ class FaqRevisionCreate(BaseModel):
     answer: str = Field(min_length=10)
     canonical_domain: str = Field(min_length=1, max_length=160)
     confirmed_procedure_id: str = Field(min_length=1, max_length=240)
+    organization_unit_id: str | None = Field(default=None, max_length=120)
     requires_forms: bool = False
     submission_place: str = ""
     legal_basis: List[str] = Field(default_factory=list)
     guidance_label: str = ""
     steps: List[str] = Field(default_factory=list)
+    documents_required: List[str] = Field(default_factory=list)
+    duration: str = Field(default="", max_length=1000)
+    fee: str = Field(default="", max_length=1000)
     ward_scope: Optional[str] = None
     evidence: dict[str, Any] = Field(default_factory=dict)
 
 
 class FaqReleasePreviewRequest(BaseModel):
-    revision_ids: List[str] = Field(min_length=1)
+    revision_ids: List[str] = Field(default_factory=list)
+    withdraw_revision_ids: List[str] = Field(default_factory=list)
+    withdrawal_reason: str = Field(default="", max_length=2000)
+    expected_active_release_id: str | None = None
 
 
 def _faq_governance_mode() -> str:
@@ -353,12 +399,15 @@ async def list_faqs(
         role = get_request_role(request) if request is not None else "citizen"
         if role == "admin" and review_status and review_status != "approved":
             actor = await _faq_actor(request)
-            items = governance.list_admin(actor)
+            items = await asyncio.to_thread(governance.list_admin, actor)
             if review_status:
                 state = {"draft": "pending", "approved": "released", "rejected": "dismissed"}.get(review_status, review_status)
                 items = [item for item in items if item.get("public_state") == state]
         else:
-            items = governance.list_public(audience="officer" if role == "officer" else "citizen")
+            items = await asyncio.to_thread(
+                governance.list_public,
+                audience="officer" if role == "officer" else "citizen",
+            )
         if domain:
             items = [item for item in items if item.get("domain") == domain]
         if ward_scope:
@@ -379,6 +428,9 @@ async def list_faqs(
 
     role = get_request_role(request) if request is not None else None
     is_admin = role == "admin"
+
+    if not is_admin:
+        faqs = [f for f in faqs if not is_qa_faq(f)]
 
     if review_status:
         if not is_admin and review_status != "approved":
@@ -479,7 +531,7 @@ async def match_faqs(
         return FaqListResponse(total=len(items), items=items)
     _ensure_seeded()
     data = _load_faq_data()
-    faqs = [f for f in (data.get("faqs") or []) if f.get("review_status") == "approved"]
+    faqs = [f for f in (data.get("faqs") or []) if f.get("review_status") == "approved" and not is_qa_faq(f)]
     if domain:
         faqs = [f for f in faqs if f.get("domain") == domain]
     if ward_scope:
@@ -541,11 +593,45 @@ async def missing_form_discovery_status(request: Request):
 @router.get("/governance/revisions")
 async def list_faq_revisions(
     request: Request,
+    domain: Optional[str] = None,
+    review_status: Optional[str] = None,
+    q: Optional[str] = None,
+    limit: int = Query(200, ge=1, le=200),
+    offset: int = Query(0, ge=0),
     governance: FaqGovernanceService = Depends(required_faq_governance_service),
 ):
     actor = await _faq_actor(request)
     items = governance.list_admin(actor)
-    return {"total": len(items), "items": items, "forms_from": "feature017_active_release"}
+    active_release = governance.repository.active_release()
+    active_revision_ids = set((active_release or {}).get("revision_ids") or [])
+    for item in items:
+        item["in_active_release"] = item.get("revision_id") in active_revision_ids
+    historical_released_count = sum(
+        1
+        for item in items
+        if item.get("public_state") == "released"
+        and item.get("revision_id") not in active_revision_ids
+    )
+    active_count = sum(1 for item in items if item.get("revision_id") in active_revision_ids)
+    state_counts = {state: sum(item.get("public_state") == state for item in items)
+                    for state in {item.get("public_state") for item in items}}
+    if domain:
+        items = [item for item in items if item.get("domain") == domain]
+    if review_status:
+        items = [item for item in items if item.get("public_state") == review_status]
+    if q and q.strip():
+        needle = q.strip().casefold()
+        items = [item for item in items if needle in f'{item["question"]} {item["answer"]}'.casefold()]
+    items.sort(key=lambda item: (item.get("updated_at") or "", item["revision_id"]), reverse=True)
+    return {
+        "total": len(items),
+        "items": items[offset:offset + limit],
+        "state_counts": state_counts,
+        "forms_from": "feature017_active_release",
+        "active_release_id": (active_release or {}).get("release_id"),
+        "active_release_count": active_count,
+        "historical_released_count": historical_released_count,
+    }
 
 
 @router.post("/governance/revisions", status_code=201)
@@ -555,12 +641,20 @@ async def create_faq_revision(
     governance: FaqGovernanceService = Depends(required_faq_governance_service),
 ):
     actor = await _faq_actor(request)
+    if payload.organization_unit_id:
+        from api.system_settings import active_organization_units, active_settings
+        units = await active_organization_units(await active_settings())
+        unit = next((u for u in units if u.id == payload.organization_unit_id and u.is_active), None)
+        if unit is None or payload.canonical_domain not in unit.domain_codes:
+            raise HTTPException(status_code=422, detail="Phòng ban không hoạt động hoặc không phụ trách lĩnh vực đã chọn.")
     result = _governance_call(governance.create_revision, actor, payload.model_dump(exclude_none=True))
-    await write_audit_log(
-        action="faq.revision.create", entity_type="faq_revision",
+    await _write_faq_audit(
+        request=request,
+        action="faq.revision.create",
+        entity_type="faq_revision",
         entity_id=str(result.get("revision_id") or result.get("id") or "draft") if isinstance(result, dict) else "draft",
-        actor_user_id=actor.user_id, actor_role="admin",
-        details={"result": "success"}, request=request,
+        actor=actor,
+        details={"result": "success"},
     )
     return result
 
@@ -573,12 +667,23 @@ async def confirm_faq_revision(
 ):
     actor = await _faq_actor(request)
     result = _governance_call(governance.confirm_revision, actor, revision_id)
-    await write_audit_log(
-        action="faq.revision.confirm", entity_type="faq_revision", entity_id=revision_id,
-        actor_user_id=actor.user_id, actor_role="admin",
-        details={"result": "success"}, request=request,
+    await _write_faq_audit(
+        request=request,
+        action="faq.revision.confirm",
+        entity_type="faq_revision",
+        entity_id=revision_id,
+        actor=actor,
+        details={"result": "success"},
     )
     return result
+
+
+@router.delete("/governance/revisions/{revision_id}", status_code=204)
+async def delete_faq_revision(revision_id: str, request: Request, governance: FaqGovernanceService = Depends(required_faq_governance_service)):
+    actor = await _faq_actor(request)
+    _governance_call(governance.delete_revision, actor, revision_id)
+    await _write_faq_audit(request=request, action='faq.delete', entity_type='faq_revision', entity_id=revision_id, actor=actor, details={'permanent': True})
+    return None
 
 
 @router.post("/governance/releases/preview")
@@ -588,7 +693,18 @@ async def preview_faq_release(
     governance: FaqGovernanceService = Depends(required_faq_governance_service),
 ):
     actor = await _faq_actor(request)
-    return _governance_call(governance.build_release, actor, payload.revision_ids)
+    result = _governance_call(
+        governance.build_release, actor, payload.revision_ids,
+        withdraw_revision_ids=payload.withdraw_revision_ids,
+        withdrawal_reason=payload.withdrawal_reason,
+        expected_active_release_id=payload.expected_active_release_id,
+    )
+    await _write_faq_audit(
+        request=request, action="faq.release.preview", entity_type="faq_release",
+        entity_id=result["id"], actor=actor,
+        details={"withdrawal": result["manifest"].get("withdrawal", {})},
+    )
+    return result
 
 
 @router.post("/governance/releases/{release_id}/validate")
@@ -609,10 +725,13 @@ async def activate_faq_release(
 ):
     actor = await _faq_actor(request)
     result = _governance_call(governance.activate_release, actor, release_id)
-    await write_audit_log(
-        action="faq.release.activate", entity_type="faq_release", entity_id=release_id,
-        actor_user_id=actor.user_id, actor_role="admin",
-        details={"result": "success"}, request=request,
+    await _write_faq_audit(
+        request=request,
+        action="faq.release.activate",
+        entity_type="faq_release",
+        entity_id=release_id,
+        actor=actor,
+        details={"result": "success", "withdrawal": result["manifest"].get("withdrawal", {})},
     )
     return result
 
@@ -638,7 +757,7 @@ async def get_faq(
     role = get_request_role(request)
     for faq in data.get("faqs") or []:
         if faq.get("id") == faq_id:
-            if faq.get("review_status") != "approved" and role != "admin":
+            if role != "admin" and (faq.get("review_status") != "approved" or is_qa_faq(faq)):
                 raise HTTPException(status_code=404, detail="FAQ không tồn tại hoặc chưa duyệt")
             return FaqResponse(**_enrich_faq_for_public(faq))
     raise HTTPException(status_code=404, detail="FAQ không tồn tại")
@@ -662,6 +781,9 @@ async def create_faq(faq_data: FaqCreate, request: Request):
         "guidance_label": faq_data.guidance_label,
         "requires_forms": faq_data.requires_forms,
         "steps": faq_data.steps,
+        "documents_required": faq_data.documents_required,
+        "duration": faq_data.duration,
+        "fee": faq_data.fee,
         "form_ids": faq_data.form_ids,
         "domain": faq_data.domain,
         "ward_scope": faq_data.ward_scope,

@@ -15,12 +15,16 @@ Usage:
     await cred.save()
 """
 
+import os
 from datetime import datetime
 from typing import Any, ClassVar, Dict, List, Optional
 
 from loguru import logger
 from pydantic import SecretStr
 
+from open_notebook.ai.openai_compatible_utils import (
+    normalize_openai_compatible_base_url,
+)
 from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.domain.base import ObjectModel
 from open_notebook.utils.encryption import decrypt_value, encrypt_value
@@ -80,7 +84,11 @@ class Credential(ObjectModel):
         if self.api_key:
             config["api_key"] = self.api_key.get_secret_value()
         if self.base_url:
-            config["base_url"] = self.base_url
+            config["base_url"] = (
+                normalize_openai_compatible_base_url(self.base_url)
+                if self.provider.lower() == "openai_compatible"
+                else self.base_url
+            )
             # For Azure, base_url from the UI form maps to endpoint
             if self.provider and self.provider.lower() == "azure" and not self.endpoint:
                 config["endpoint"] = self.base_url
@@ -96,14 +104,26 @@ class Credential(ObjectModel):
             config["endpoint_stt"] = self.endpoint_stt
         if self.endpoint_tts:
             config["endpoint_tts"] = self.endpoint_tts
+        # Esperanto's Vertex adapters use provider-specific constructor names.
+        # Passing the database field names (project/location/credentials_path)
+        # leaves those values inside the generic config dictionary, so the
+        # adapter silently falls back to environment variables instead.
+        is_vertex = self.provider.lower() == "vertex"
         if self.project:
-            config["project"] = self.project
+            config["vertex_project" if is_vertex else "project"] = self.project
         if self.location:
-            config["location"] = self.location
+            config["vertex_location" if is_vertex else "location"] = self.location
         if self.credentials_path:
-            config["credentials_path"] = self.credentials_path
+            config["credentials_file" if is_vertex else "credentials_path"] = (
+                self.credentials_path
+            )
         if self.num_ctx is not None:
             config["num_ctx"] = self.num_ctx
+        # A private portable bundle relocates only the local service endpoint.
+        # Leave the saved record/key untouched and preserve all normal installs.
+        portable_ollama = os.getenv("PORTABLE_OLLAMA_URL", "").strip()
+        if self.provider.lower() == "ollama" and portable_ollama:
+            config["base_url"] = portable_ollama
         return config
 
     @classmethod

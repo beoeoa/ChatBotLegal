@@ -70,6 +70,8 @@ class ActorContext(BaseModel):
     user_id: str = Field(min_length=1, max_length=200)
     role: Role
     domains: list[str] = Field(default_factory=list)
+    organization_routing_mode: str = "legacy"
+    managed_procedure_ids: list[str] = Field(default_factory=list)
 
 
 class LegalProcedureDraft(BaseModel):
@@ -79,6 +81,10 @@ class LegalProcedureDraft(BaseModel):
     procedure_code: str | None = Field(default=None, max_length=240)
     name: str = Field(min_length=3, max_length=1000)
     domain: str = Field(min_length=1, max_length=160)
+    # Organization ownership belongs to the procedure release. Forms and FAQ
+    # project these values and never accept an independent department write.
+    primary_organization_unit_id: str | None = Field(default=None, max_length=240)
+    supporting_organization_unit_ids: list[str] = Field(default_factory=list)
     authority: str = Field(min_length=2, max_length=500)
     jurisdiction: str = Field(default="Hai Phong", max_length=240)
     applicant_description: str | None = Field(default=None, max_length=2000)
@@ -100,6 +106,14 @@ class LegalProcedureDraft(BaseModel):
             raise ValueError("FORM_CHECKSUM_INVALID")
         return value
 
+    @field_validator("supporting_organization_unit_ids")
+    @classmethod
+    def _supporting_units(cls, value: list[str]) -> list[str]:
+        normalized = [str(item).strip() for item in value if str(item).strip()]
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("FORM_PROCEDURE_UNIT_DUPLICATE")
+        return normalized
+
 
 class LegalFormAssetDraft(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -116,6 +130,7 @@ class LegalFormAssetDraft(BaseModel):
     effective_to: date | None = None
     audiences: list[Audience] = Field(min_length=1)
     coverage_status: FormCoverageStatus = FormCoverageStatus.UNRESOLVED
+    page_number: int | None = Field(default=None, ge=1)
 
     @field_validator("source_checksum")
     @classmethod
@@ -165,6 +180,7 @@ class FormReviewSubmission(BaseModel):
     source_checksum: str | None = None
     asset_kind: AssetKind = AssetKind.FILE
     note: str = Field(default="", max_length=2000)
+    page_number: int | None = Field(default=None, ge=1)
 
     @field_validator("source_checksum")
     @classmethod
@@ -229,6 +245,7 @@ class FormReleaseManifest(BaseModel):
     bindings: list[dict[str, Any]]
     aliases: list[dict[str, Any]]
     gaps: list[dict[str, Any]] = Field(default_factory=list)
+    exclusions: list[dict[str, Any]] = Field(default_factory=list)
     coverage: dict[str, Any]
     build: dict[str, Any]
 
@@ -257,6 +274,9 @@ _TRANSITIONS: dict[tuple[FormWorkflowStatus, FormWorkflowStatus], frozenset[str]
     (FormWorkflowStatus.READY_FOR_ATTESTATION, FormWorkflowStatus.LEGAL_ENRICHMENT): _ADMIN,
     (FormWorkflowStatus.READY_FOR_ATTESTATION, FormWorkflowStatus.REJECTED): _ADMIN,
     (FormWorkflowStatus.ATTESTED, FormWorkflowStatus.RELEASE_CANDIDATE): _ADMIN,
+    # A blocked release candidate can be reopened for a checksum/source
+    # correction. The service clears the attestation before allowing edits.
+    (FormWorkflowStatus.RELEASE_CANDIDATE, FormWorkflowStatus.LEGAL_ENRICHMENT): _ADMIN,
     (FormWorkflowStatus.ATTESTED, FormWorkflowStatus.SUPERSEDED): _ADMIN,
     (FormWorkflowStatus.ATTESTED, FormWorkflowStatus.EXPIRED): _ADMIN,
     (FormWorkflowStatus.ATTESTED, FormWorkflowStatus.QUARANTINED): _ADMIN,

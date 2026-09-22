@@ -1,14 +1,14 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const api = vi.hoisted(() => ({ list: vi.fn(), sensitiveView: vi.fn(), exportCsv: vi.fn(), exportUrl: vi.fn() }))
+const api = vi.hoisted(() => ({ list: vi.fn(), sensitiveView: vi.fn(), exportXlsx: vi.fn(), exportCsv: vi.fn(), exportUrl: vi.fn() }))
 vi.mock('@/lib/api/admin-activity', () => ({ adminActivityApi: api }))
 vi.mock('@/components/layout/AppShell', () => ({ AppShell: ({ children }: { children: React.ReactNode }) => <>{children}</> }))
 
 import AdminActivityPage from './page'
 
 const item = {
-  id: 'audit:1', occurred_at: '2026-08-13T10:00:00Z', actor: 'user:admin',
+  id: 'audit:1', occurred_at: new Date().toISOString(), actor: 'user:admin',
   actor_label: 'Admin', actor_role: 'admin', activity_type: 'data_ingestion',
   module: 'legal_data', result: 'success', action: 'admin.legal.import',
   action_label: 'Đã nhập văn bản pháp luật', resource_type: 'legal_document',
@@ -19,6 +19,7 @@ describe('AdminActivityPage', () => {
   beforeEach(() => {
     api.list.mockReset()
     api.sensitiveView.mockReset()
+    api.exportXlsx.mockReset()
     api.exportCsv.mockReset()
     api.exportUrl.mockReset()
     api.list.mockResolvedValue({
@@ -27,10 +28,20 @@ describe('AdminActivityPage', () => {
     api.sensitiveView.mockResolvedValue({
       ...item,
       details: { result: 'success', reason: 'Bổ sung văn bản theo hồ sơ đã duyệt' },
+      explanation: 'Văn bản đã được đưa vào hàng chờ để kiểm tra metadata.',
+      impact: 'Chưa được dùng để trả lời cho đến khi hoàn tất kiểm tra.',
+      next_action: 'Mở hàng chờ nhập văn bản để tiếp tục kiểm tra.',
+      workflow_status: 'queued',
+        detail_rows: [
+          { label: 'Mã công việc', value: 'job-1' },
+          { label: 'Trạng thái xử lý', value: 'Đang chờ' },
+          { label: 'Lý do', value: 'Bổ sung văn bản theo hồ sơ đã duyệt' },
+          { label: 'Lý do truy cập', value: 'Rà soát sự cố nhập dữ liệu' },
+        ],
       ip_address: '[REDACTED]', user_agent: '[REDACTED]',
       access_reason: 'Rà soát sự cố nhập dữ liệu',
     })
-    api.exportCsv.mockResolvedValue({ blob: new Blob(['Thời điểm,Hoạt động']), filename: 'nhat-ky-quan-tri.csv' })
+    api.exportXlsx.mockResolvedValue({ blob: new Blob(['xlsx']), filename: 'nhat-ky-quan-tri.xlsx' })
     api.exportUrl.mockReturnValue('/api/admin/activity/export?format=csv')
   })
 
@@ -49,7 +60,7 @@ describe('AdminActivityPage', () => {
     expect(screen.getByLabelText('Loại hoạt động')).toBeInTheDocument()
     expect(screen.getByLabelText('Kết quả')).toBeInTheDocument()
     expect(screen.getByLabelText('Thời gian')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Xuất CSV' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Xuất Excel' })).toBeInTheDocument()
   })
 
   it('renders legacy API events instead of leaving actor and activity blank', async () => {
@@ -66,7 +77,9 @@ describe('AdminActivityPage', () => {
     render(<AdminActivityPage />)
 
     const table = await screen.findByRole('table', { name: 'Danh sách sự kiện quản trị' })
-    expect(within(table).getByText('Hệ thống')).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Thời gian'), { target: { value: '' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Lọc nhật ký' }))
+    expect(await within(table).findByText('Hệ thống')).toBeInTheDocument()
     expect(within(table).getByText('Đã hoàn tất xóa dữ liệu hết hạn')).toBeInTheDocument()
     expect(within(table).getByText('Tác vụ lưu trữ')).toBeInTheDocument()
   })
@@ -107,20 +120,20 @@ describe('AdminActivityPage', () => {
     expect(screen.getByText('1 sự kiện')).toBeInTheDocument()
   })
 
-  it('exports CSV through the authenticated API client', async () => {
-    const createObjectURL = vi.fn(() => 'blob:activity-csv')
+  it('exports Excel through the authenticated API client', async () => {
+    const createObjectURL = vi.fn(() => 'blob:activity-xlsx')
     const revokeObjectURL = vi.fn()
     const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined)
     Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createObjectURL })
     Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURL })
 
     render(<AdminActivityPage />)
-    fireEvent.click(await screen.findByRole('button', { name: 'Xuất CSV' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Xuất Excel' }))
 
-    await waitFor(() => expect(api.exportCsv).toHaveBeenCalledWith(expect.objectContaining({ limit: 50 })))
+    await waitFor(() => expect(api.exportXlsx).toHaveBeenCalledWith(expect.objectContaining({ limit: 50 })))
     expect(createObjectURL).toHaveBeenCalled()
     expect(click).toHaveBeenCalled()
-    expect(revokeObjectURL).toHaveBeenCalledWith('blob:activity-csv')
+    await waitFor(() => expect(revokeObjectURL).toHaveBeenCalledWith('blob:activity-xlsx'), { timeout: 1500 })
     click.mockRestore()
   })
 
@@ -141,7 +154,9 @@ describe('AdminActivityPage', () => {
 
     await waitFor(() => expect(api.sensitiveView).toHaveBeenCalledWith('audit:1', 'Rà soát sự cố nhập dữ liệu'))
     expect(await within(dialog).findByText('Bổ sung văn bản theo hồ sơ đã duyệt')).toBeInTheDocument()
-    const technical = within(dialog).getByText('Thông tin kỹ thuật').closest('details')
-    expect(technical).not.toHaveAttribute('open')
+    expect(within(dialog).getByText('Văn bản đã được đưa vào hàng chờ để kiểm tra thông tin mô tả.')).toBeInTheDocument()
+    expect(within(dialog).getByText('Mở hàng chờ nhập văn bản để tiếp tục kiểm tra.')).toBeInTheDocument()
+    expect(within(dialog).queryByText('Thông tin kỹ thuật')).not.toBeInTheDocument()
+    expect(within(dialog).queryByText(/metadata/i)).not.toBeInTheDocument()
   })
 })

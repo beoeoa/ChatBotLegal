@@ -103,7 +103,6 @@ export const zhTW = {
     searchTerms: "搜尋詞",
     strategy: "策略",
     individualAnswers: "獨立回答 ({count})",
-    finalAnswer: "最終回答",
     notebookLabel: "筆記本: {name}",
     itemNotFound: "未找到該 {type}",
     accessibility: {
@@ -818,7 +817,6 @@ export const zhTW = {
   },
   models: {
     embedding: "嵌入模型",
-    tts: "文字轉語音",
     stt: "語音轉文字",
     apiKey: "API 密鑰",
     deleteSuccess: "模型刪除成功",
@@ -844,8 +842,6 @@ export const zhTW = {
     largeContextModelDesc: "用於處理大文件 - 推薦 Gemini",
     embeddingModelLabel: "嵌入模型",
     embeddingModelDesc: "用於語義搜尋和向量嵌入",
-    ttsModelLabel: "文字轉語音模型",
-    ttsModelDesc: "用於生成播客",
     sttModelLabel: "語音轉文字模型",
     sttModelDesc: "用於音訊轉錄",
     embeddingChangeTitle: "嵌入模型變更",

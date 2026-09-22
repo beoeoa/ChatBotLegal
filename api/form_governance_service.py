@@ -71,6 +71,15 @@ class FormGovernanceService:
     def _canonical_domain(domain: str) -> str:
         return canonicalize_legal_domain(domain) or str(domain or "").casefold()
 
+    def _procedure_allowed(self, actor: ActorContext, procedure_id: str, domain: str) -> bool:
+        if actor.role == "admin":
+            return True
+        if actor.role != "officer":
+            return False
+        if actor.organization_routing_mode in {"hybrid", "unit_primary"}:
+            return procedure_id in actor.managed_procedure_ids
+        return self._domain_allowed(actor, domain)
+
     def _require_procedure_scope(self, procedure_id: str, submitted_domain: str) -> None:
         if self.procedure_scope_lookup is None:
             raise RuntimeError("FORM_PROCEDURE_SCOPE_UNAVAILABLE")
@@ -93,7 +102,7 @@ class FormGovernanceService:
     def submit(self, actor: ActorContext, submission: FormReviewSubmission) -> FormReviewCase:
         if actor.role not in {"officer", "admin"}:
             raise PermissionError("FORM_CASE_FORBIDDEN")
-        if not self._domain_allowed(actor, submission.domain): raise PermissionError("FORM_DOMAIN_FORBIDDEN")
+        if not self._procedure_allowed(actor, submission.procedure_id, submission.domain): raise PermissionError("FORM_DOMAIN_FORBIDDEN")
         self._require_procedure_scope(submission.procedure_id, submission.domain)
         now = utc_now()
         case = FormReviewCase(
@@ -175,14 +184,19 @@ class FormGovernanceService:
     def get_case(self, actor: ActorContext, case_id: str) -> FormReviewCase:
         case = self.repository.get_case(case_id)
         if not case: raise LookupError("FORM_CASE_NOT_FOUND")
-        if actor.role == "citizen" or (actor.role == "officer" and (case.officer_id != actor.user_id or not self._domain_allowed(actor, case.domain))):
+        if actor.role == "citizen" or (actor.role == "officer" and (
+            not self._procedure_allowed(actor, case.procedure_id, case.domain)
+            or (actor.organization_routing_mode in {"legacy", "shadow"} and case.officer_id != actor.user_id)
+        )):
             raise PermissionError("FORM_CASE_FORBIDDEN")
         return case
 
     def list_cases(self, actor: ActorContext, *, status: str | None = None, domain: str | None = None) -> list[FormReviewCase]:
         if actor.role == "citizen": raise PermissionError("FORM_CASE_FORBIDDEN")
         result = self.repository.list_cases()
-        if actor.role == "officer": result = [x for x in result if x.officer_id == actor.user_id and self._domain_allowed(actor, x.domain)]
+        if actor.role == "officer":
+            result = [x for x in result if self._procedure_allowed(actor, x.procedure_id, x.domain)
+                      and (actor.organization_routing_mode in {"hybrid", "unit_primary"} or x.officer_id == actor.user_id)]
         if status: result = [x for x in result if x.status.value == status]
         if domain: result = [x for x in result if x.domain == domain]
         return result
@@ -233,6 +247,105 @@ class FormGovernanceService:
         self._event(saved, actor, "supplement", case.status)
         return saved
 
+    def edit_draft(self, actor: ActorContext, case_id: str, submission: FormReviewSubmission, *, version: int) -> FormReviewCase:
+        self._require(actor, "admin")
+        case = self.get_case(actor, case_id)
+        if case.version != version:
+            raise ValueError("FORM_CASE_VERSION_CONFLICT")
+        if case.status in {FormWorkflowStatus.RELEASED, FormWorkflowStatus.SUPERSEDED, FormWorkflowStatus.EXPIRED, FormWorkflowStatus.QUARANTINED, FormWorkflowStatus.WITHDRAWN}:
+            raise ValueError("FORM_PUBLISHED_REPLACEMENT_REQUIRED")
+        self._require_procedure_scope(submission.procedure_id, submission.domain)
+        if case.legal_metadata.get("_replaces") and submission.procedure_id != case.procedure_id:
+            raise ValueError("FORM_BINDING_PROCEDURE_MISMATCH")
+        metadata = dict(case.legal_metadata) if submission.procedure_id == case.procedure_id else {}
+        saved = self.repository.save_case(case.model_copy(update={
+            "title": submission.title, "procedure_id": submission.procedure_id,
+            "domain": submission.domain, "current_submission": submission,
+            "legal_metadata": metadata, "status": FormWorkflowStatus.SUBMITTED,
+            "revision": case.revision + 1, "updated_at": utc_now(),
+            "source_reviewed_by": None, "source_reviewed_at": None,
+            "attestation_fingerprint": None, "attested_by": None, "attested_at": None,
+        }), expected_version=version)
+        self._event(saved, actor, "edit_draft", case.status)
+        return saved
+
+    def delete_draft(self, actor: ActorContext, case_id: str, *, version: int, reason: str) -> FormReviewCase:
+        self._require(actor, "admin")
+        case = self.get_case(actor, case_id)
+        if case.version != version:
+            raise ValueError("FORM_CASE_VERSION_CONFLICT")
+        if case.status in {FormWorkflowStatus.RELEASED, FormWorkflowStatus.SUPERSEDED, FormWorkflowStatus.EXPIRED, FormWorkflowStatus.QUARANTINED}:
+            raise ValueError("FORM_PUBLISHED_REPLACEMENT_REQUIRED")
+        saved = self.repository.save_case(case.model_copy(update={
+            "status": FormWorkflowStatus.WITHDRAWN, "updated_at": utc_now(),
+            "attestation_fingerprint": None, "attested_by": None, "attested_at": None,
+        }), expected_version=version)
+        self._event(saved, actor, "delete_draft", case.status, reason)
+        return saved
+
+    def management_catalog(self, actor: ActorContext) -> dict[str, Any]:
+        self._require(actor, "admin")
+        release = self.repository.active_release() or {}
+        manifest = release.get("manifest") or {}
+        return {"release_id": release.get("release_id"),
+                **{key: manifest.get(key) or [] for key in ("procedures", "assets", "bindings", "aliases")}}
+
+    def prepare_form_removal(self, actor: ActorContext, form_id: str, reason: str) -> dict[str, Any]:
+        """Prepare an immutable withdrawal, never erase source/history records."""
+        self._require(actor, "admin")
+        previous = self.repository.active_release()
+        if not previous:
+            raise LookupError("FORM_RELEASE_NOT_FOUND")
+        manifest = _json_safe(previous["manifest"])
+        removed_assets = [x for x in manifest["assets"] if x["form_id"] == form_id]
+        removed_bindings = [x for x in manifest["bindings"] if x.get("form_id") == form_id]
+        if not removed_assets:
+            raise LookupError("FORM_ASSET_NOT_FOUND")
+        manifest["assets"] = [x for x in manifest["assets"] if x["form_id"] != form_id]
+        manifest["bindings"] = [x for x in manifest["bindings"] if x.get("form_id") != form_id]
+        for prefix, removed in (("identity", len(removed_assets)), ("binding", len(removed_bindings))):
+            for suffix in ("total", "decided"):
+                key = f"{prefix}_{suffix}"
+                manifest["coverage"][key] = max(0, int(manifest["coverage"].get(key) or 0) - removed)
+        manifest["previous_release_id"] = previous["release_id"]
+        manifest["release_id"] = f"forms-withdraw-{uuid.uuid4().hex[:12]}"
+        manifest["version"] = self.repository.latest_release_version() + 1
+        manifest["legal_as_of"] = date.today().isoformat()
+        manifest["build"] = {"case_ids": [], "removed_form_id": form_id, "reason": reason,
+                             "previous_manifest_sha256": previous.get("manifest_sha256")}
+        return self.repository.save_release({**manifest, "manifest": manifest,
+            "manifest_sha256": canonical_sha256(manifest), "status": "candidate", "created_by": actor.user_id})
+
+    def replace_form(self, actor: ActorContext, form_id: str, procedure_id: str) -> FormReviewCase:
+        self._require(actor, "admin")
+        catalog = self.management_catalog(actor)
+        asset = next((x for x in catalog["assets"] if x["form_id"] == form_id), None)
+        procedure = next((x for x in catalog["procedures"] if x["procedure_id"] == procedure_id), None)
+        bindings = [x for x in catalog["bindings"] if x.get("form_id") == form_id and x["procedure_id"] == procedure_id]
+        if not asset or not procedure or not bindings:
+            raise LookupError("FORM_BINDING_NOT_FOUND")
+        for existing in self.repository.list_cases():
+            if existing.legal_metadata.get("_replaces", {}).get("form_id") == form_id and existing.status not in {
+                FormWorkflowStatus.RELEASED, FormWorkflowStatus.REJECTED, FormWorkflowStatus.WITHDRAWN, FormWorkflowStatus.SUPERSEDED,
+            }:
+                raise ValueError("FORM_REPLACEMENT_ALREADY_PENDING")
+        submission = FormReviewSubmission(procedure_id=procedure_id, domain=procedure["domain"],
+            title=asset["canonical_name"], source_url=asset["source_url"],
+            source_checksum=asset.get("source_checksum"), asset_kind=asset["asset_kind"],
+            page_number=asset.get("page_number"))
+        case = self.submit(actor, submission)
+        # Only known draft fields are copied; release delivery paths are never accepted from the client.
+        metadata = {
+            "procedure": {k: v for k, v in procedure.items() if k in LegalProcedureDraft.model_fields},
+            "asset": {k: v for k, v in asset.items() if k in LegalFormAssetDraft.model_fields},
+            "bindings": [{k: v for k, v in x.items() if k in ProcedureFormBindingDraft.model_fields} for x in bindings],
+            "aliases": list(dict.fromkeys(x["alias"] for x in catalog["aliases"] if x["procedure_id"] == procedure_id and x.get("alias_kind") not in {"exclude", "hard_negative"})),
+            "_replaces": {"form_id": form_id, "source_checksum": asset.get("source_checksum")},
+        }
+        saved = self.repository.save_case(case.model_copy(update={"legal_metadata": metadata}), expected_version=case.version)
+        self._event(saved, actor, "replacement_draft", case.status, form_id)
+        return saved
+
     def enrich(self, actor: ActorContext, case_id: str, metadata: dict[str, Any]) -> FormReviewCase:
         self._require(actor, "admin"); case = self.get_case(actor, case_id)
         if case.status == FormWorkflowStatus.SOURCE_APPROVED:
@@ -242,9 +355,18 @@ class FormGovernanceService:
         # Validation happens now, not during attestation.
         procedure = LegalProcedureDraft.model_validate(metadata["procedure"])
         asset = LegalFormAssetDraft.model_validate(metadata["asset"])
+        replacement = case.legal_metadata.get("_replaces")
+        if replacement and asset.form_id != replacement["form_id"]:
+            raise ValueError("FORM_BINDING_ASSET_MISMATCH")
         bindings = [ProcedureFormBindingDraft.model_validate(x) for x in metadata["bindings"]]
         if procedure.procedure_id != case.procedure_id or procedure.domain != case.domain:
             raise ValueError("FORM_LEGAL_IDENTITY_MISMATCH")
+        if (
+            procedure.primary_organization_unit_id
+            and procedure.primary_organization_unit_id
+            in procedure.supporting_organization_unit_ids
+        ):
+            raise ValueError("FORM_PROCEDURE_PRIMARY_UNIT_DUPLICATE")
         if any(item.procedure_id != case.procedure_id for item in bindings):
             raise ValueError("FORM_BINDING_PROCEDURE_MISMATCH")
         if any(item.form_id != asset.form_id for item in bindings if item.form_id):
@@ -261,6 +383,7 @@ class FormGovernanceService:
             "asset": asset.model_dump(mode="json"),
             "bindings": [item.model_dump(mode="json") for item in bindings],
             "aliases": aliases,
+            **({"_replaces": replacement} if replacement else {}),
         }
         updated = case.model_copy(update={"status": FormWorkflowStatus.LEGAL_ENRICHMENT, "legal_metadata": metadata, "updated_at": utc_now()})
         saved = self.repository.save_case(updated, expected_version=case.version); self._event(saved, actor, "legal_enrichment", case.status)
@@ -334,18 +457,54 @@ class FormGovernanceService:
             for item in previous_manifest.get("assets") or []
         }
         selected_procedures = {item.procedure_id for item in cases}
+        selected_pairs = {(item.procedure_id, str(item.legal_metadata["asset"]["form_id"])) for item in cases}
+        if len(selected_pairs) != len(cases):
+            raise ValueError("FORM_DUPLICATE_RELEASE_TARGET")
+        for case in cases:
+            replacement = case.legal_metadata.get("_replaces")
+            if replacement and asset_map.get(replacement["form_id"], {}).get("source_checksum") != replacement.get("source_checksum"):
+                raise ValueError("FORM_REPLACEMENT_STALE")
         bindings = [
             dict(item) for item in previous_manifest.get("bindings") or []
-            if str(item.get("procedure_id") or "") not in selected_procedures
+            if (str(item.get("procedure_id") or ""), str(item.get("form_id") or "")) not in selected_pairs
         ]
         aliases = [
             dict(item) for item in previous_manifest.get("aliases") or []
-            if str(item.get("procedure_id") or "") not in selected_procedures
         ]
         gap_map = {
             (str(item.get("target_type") or ""), str(item.get("target_id") or "")): _json_safe(item)
             for item in previous_manifest.get("gaps") or []
         }
+        # Exclusions are part of the release contract. Carry the previous
+        # owner decisions forward, then remove only decisions superseded by a
+        # newly attested procedure/asset/binding in this candidate.
+        exclusions = [
+            _json_safe(item) for item in previous_manifest.get("exclusions") or []
+        ]
+        selected_form_ids = {
+            str(binding_item.get("form_id") or "")
+            for case_item in cases
+            for binding_item in (case_item.legal_metadata.get("bindings") or [])
+            if str(binding_item.get("form_id") or "")
+        }
+        selected_form_ids.update(
+            str(case_item.legal_metadata.get("asset", {}).get("form_id") or "")
+            for case_item in cases
+            if str(case_item.legal_metadata.get("asset", {}).get("form_id") or "")
+        )
+        selected_previous_binding_ids = {
+            str(item.get("binding_id") or "")
+            for item in previous_manifest.get("bindings") or []
+            if str(item.get("procedure_id") or "") in selected_procedures
+        }
+        exclusions = [
+            item for item in exclusions
+            if not (
+                (item.get("target_type") == "procedure" and str(item.get("target_id") or "") in selected_procedures)
+                or (item.get("target_type") == "identity" and str(item.get("target_id") or "") in selected_form_ids)
+                or (item.get("target_type") == "binding" and str(item.get("target_id") or "") in selected_previous_binding_ids)
+            )
+        ]
         for gap in self.repository.list_verified_gaps():
             normalized_gap = _json_safe(gap)
             gap_map[(str(gap.get("target_type") or ""), str(gap.get("target_id") or ""))] = normalized_gap
@@ -365,8 +524,20 @@ class FormGovernanceService:
                 **meta["procedure"],
                 "coverage_status": "released",
             }
-            asset_map[str(meta["asset"]["form_id"])] = {
-                **meta["asset"],
+            release_asset = dict(meta["asset"])
+            source_url = str(release_asset.get("source_url") or "").split("?", 1)[0].casefold()
+            # VBPL/e-form pages are HTML sources, not downloadable file bytes.
+            # Older submissions stored those pages as ``file``; normalize the
+            # release copy to ``eform`` so Release Gate checks reachability
+            # without comparing an HTML page to a PDF checksum.
+            if (
+                release_asset.get("asset_kind") == "file"
+                and not source_url.endswith((".pdf", ".docx"))
+                and not (release_asset.get("provenance") or {}).get("canonical_artifact")
+            ):
+                release_asset["asset_kind"] = "eform"
+            asset_map[str(release_asset["form_id"])] = {
+                **release_asset,
                 "coverage_status": "released",
             }
             for item in meta["bindings"]:
@@ -422,12 +593,31 @@ class FormGovernanceService:
             target: sum(item.get("target_type") == target for item in gaps)
             for target in ("procedure", "identity", "binding")
         }
+        exclusion_counts = {
+            target: sum(item.get("target_type") == target for item in exclusions)
+            for target in ("procedure", "identity", "binding")
+        }
         release_coverage = {
             **campaign_coverage,
             "procedure_decided": len(procedures),
-            "identity_decided": len(assets) + gap_counts["identity"],
-            "binding_decided": len(bindings) + gap_counts["binding"],
+            # Owner-deferred exclusions are decisions too. Include them in
+            # both decided counts and totals so carried-forward manifests
+            # remain internally consistent on every retry.
+            "identity_decided": (
+                len(assets) + gap_counts["identity"] + exclusion_counts["identity"]
+            ),
+            "binding_decided": (
+                len(bindings) + gap_counts["binding"] + exclusion_counts["binding"]
+            ),
         }
+        release_coverage["identity_total"] = max(
+            int(release_coverage.get("identity_total") or 0),
+            int(release_coverage["identity_decided"]),
+        )
+        release_coverage["binding_total"] = max(
+            int(release_coverage.get("binding_total") or 0),
+            int(release_coverage["binding_decided"]),
+        )
         release_coverage["complete"] = (
             release_coverage["procedure_total"] == release_coverage["procedure_decided"]
             and release_coverage["identity_total"] == release_coverage["identity_decided"]
@@ -437,7 +627,11 @@ class FormGovernanceService:
         manifest = {
             "schema_version": "form-release-v1",
             "release_id": release_id,
-            "version": int((previous or {}).get("version", 0)) + 1,
+            # Release versions are globally unique, including blocked and
+            # retired candidates.  Retrying an admin action must therefore
+            # advance past an earlier blocked candidate instead of failing on
+            # the database's unique(version) constraint.
+            "version": self.repository.latest_release_version() + 1,
             "legal_as_of": legal_as_of.isoformat(),
             "source_snapshot_sha256": source_snapshot_sha256.casefold(),
             "previous_release_id": (previous or {}).get("release_id"),
@@ -446,10 +640,18 @@ class FormGovernanceService:
             "bindings": bindings,
             "aliases": aliases,
             "gaps": gaps,
+            "exclusions": sorted(
+                exclusions,
+                key=lambda item: (
+                    str(item.get("target_type") or ""),
+                    str(item.get("target_id") or ""),
+                ),
+            ),
             "coverage": release_coverage,
             "build": {
                 "pipeline_version": "feature017-v1",
                 "case_ids": unique_case_ids,
+                "case_versions": {item.case_id: item.version + 1 for item in cases},
                 "previous_manifest_sha256": (previous or {}).get("manifest_sha256"),
             },
         }
@@ -458,6 +660,24 @@ class FormGovernanceService:
         for case in cases:
             self.transition(actor, case.case_id, FormWorkflowStatus.RELEASE_CANDIDATE)
         return saved_release
+
+    def reopen_for_correction(self, actor: ActorContext, case_id: str) -> FormReviewCase:
+        """Reopen a blocked release candidate without retaining stale attestation."""
+        self._require(actor, "admin")
+        case = self.get_case(actor, case_id)
+        if case.status != FormWorkflowStatus.RELEASE_CANDIDATE:
+            raise ValueError("FORM_CORRECTION_REOPEN_INVALID")
+        assert_transition(case.status, FormWorkflowStatus.LEGAL_ENRICHMENT, actor.role)
+        updated = case.model_copy(update={
+            "status": FormWorkflowStatus.LEGAL_ENRICHMENT,
+            "attestation_fingerprint": None,
+            "attested_by": None,
+            "attested_at": None,
+            "updated_at": utc_now(),
+        })
+        saved = self.repository.save_case(updated, expected_version=case.version)
+        self._event(saved, actor, "reopen_for_legal_correction", case.status)
+        return saved
 
     def validate_release(self, actor: ActorContext, release_id: str) -> dict[str, Any]:
         self._require(actor, "admin"); release = self.repository.get_release(release_id)
@@ -475,11 +695,29 @@ class FormGovernanceService:
         release = self.repository.get_release(release_id)
         if not release:
             raise LookupError("FORM_RELEASE_NOT_FOUND")
+        if release.get("status") != "validated":
+            raise ValueError("FORM_RELEASE_GATE_FAILED")
         case_ids = list((release.get("manifest") or {}).get("build", {}).get("case_ids") or [])
         before_cases = {
             case_id: self.get_case(actor, case_id) for case_id in case_ids
         }
+        manifest = release.get("manifest") or {}
+        active = self.repository.active_release() or {}
+        if manifest.get("previous_release_id") != active.get("release_id"):
+            raise ValueError("FORM_RELEASE_BASE_STALE")
+        versions = manifest.get("build", {}).get("case_versions", {})
+        if any(item.status != FormWorkflowStatus.RELEASE_CANDIDATE or not item.attestation_fingerprint
+               or (case_id in versions and item.version != versions[case_id])
+               for case_id, item in before_cases.items()):
+            raise ValueError("FORM_ATTESTATION_STALE")
         pointer = self.repository.set_active_release(release_id, actor_id=actor.user_id)
+        removed_form_id = manifest.get("build", {}).get("removed_form_id")
+        if removed_form_id:
+            self.repository.append_event(WorkflowEvent(event_id=str(uuid.uuid4()), object_type="form_asset",
+                object_id=removed_form_id, actor_id=actor.user_id, actor_role=actor.role,
+                action="withdraw_published", from_status=FormWorkflowStatus.RELEASED,
+                to_status=FormWorkflowStatus.WITHDRAWN, reason_code=manifest["build"].get("reason"),
+                detail_hash=canonical_sha256(manifest), occurred_at=utc_now()))
         for case_id, before_case in before_cases.items():
             released = self.get_case(actor, case_id)
             event = self._event(

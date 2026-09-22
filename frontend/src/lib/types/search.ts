@@ -10,6 +10,8 @@ export interface PublicValiditySync {
 }
 
 export interface LegalCitation {
+  /** Request-local answer markers resolved to this verified source. */
+  evidence_ids?: string[]
   chunk_id?: string
   law_number?: string
   document_title?: string
@@ -20,6 +22,7 @@ export interface LegalCitation {
   effective_status?: string
   source_url?: string
   internal_url?: string
+  viewer_url?: string
   pdf_url?: string
   fallback_search_url?: string
   doc_id?: string | number
@@ -40,10 +43,21 @@ export interface AnswerCompleteness {
   reason_codes: string[]
 }
 
-export type AnswerMode = 'normal' | 'verified_source_condensed' | 'source_view_only'
-export type AnswerStatus = 'grounded' | 'partial_grounded' | 'broad_grounded' | 'clarifying' | 'source_gap' | 'provider_error'
+export type AnswerMode = 'normal' | 'verified_source_condensed' | 'source_view_only' | 'procedure_fast_path'
+export type AnswerStatus = 'verified' | 'unverified' | 'partial' | 'cannot_verify'
 export type FallbackTier = 'exact' | 'domain' | 'expanded' | 'full_corpus' | 'catalog' | 'clarification' | 'support'
 export type AnswerRoute = 'exact_article' | 'procedure_form' | 'general_legal' | 'historical'
+export type ConversationRoute = 'chat_meta' | 'document_followup' | 'legal_query' | 'out_of_scope'
+
+export interface ConversationDocumentRefV1 {
+  document_id: string
+  title: string
+  law_number?: string | null
+  source_url?: string | null
+  article_refs?: string[]
+  pinned?: boolean
+  active?: boolean
+}
 
 export interface LegalAnswerPresentationSections {
   short_answer?: string | null
@@ -54,12 +68,28 @@ export interface LegalAnswerPresentationSections {
   legal_bases: LegalCitation[]
   caveats: string[]
   clarifying_questions: string[]
+  unverified_explanations?: Array<Record<string, unknown>>
+}
+
+export interface UploadedDocumentContext {
+  name: string
+  size: number
+  type: string
+  file_id?: string
+  sha256?: string
+  status?: 'processing' | 'complete' | 'partial' | 'error'
+}
+
+export interface AskMessageAttachment {
+  kind: string
+  value?: UploadedDocumentContext | Record<string, unknown> | null
 }
 
 export interface AskMessage {
   id: string
   role: 'user' | 'assistant' | 'system'
   content: string
+  attachments?: AskMessageAttachment[] | null
   status?: 'pending' | 'complete' | 'error' | 'cancelled'
   /** True after the Ask response snapshot has been persisted to the session. */
   persisted?: boolean
@@ -125,6 +155,18 @@ export interface AskMessage {
       effective_to?: string | null
     }>
   } | null
+  suggested_questions?: SuggestedQuestionV1[]
+  conversation_route?: ConversationRoute | null
+  active_document?: ConversationDocumentRefV1 | null
+  related_documents?: ConversationDocumentRefV1[]
+  memory_usage?: MemoryUsageV1 | null
+  model_option_id?: string | null
+  model_display_name?: string | null
+  model_locked?: boolean
+  generation_provenance?: Record<string, unknown> | null
+  timing_summary?: AskTimingSummary | null
+  /** Canonical Direct RAG timing contract; timing_summary is legacy-compatible. */
+  timing?: AskTimingSummary | null
   rag_trace?: RagTrace | null
   grounding_status?: string
   answer_completeness?: AnswerCompleteness
@@ -134,12 +176,21 @@ export interface AskMessage {
   canonical_domain?: string | null
   evidence_count?: number
   coverage_warning?: string | null
+  unverified_explanations?: Array<Record<string, unknown>>
   blocked_reason?: string | null
-  presentation_version?: 'legal-answer-v1'
+  outcome?: AnswerOutcome
+  reason_code?: string | null
+  retryable?: boolean
+  scope?: AnswerScope | null
+  persistence_degraded?: boolean
+  quality?: DirectAnswerQuality | null
+  presentation_version?: 'legal-answer-v1' | 'direct-rag-v1'
   answer_route?: AnswerRoute | null
   pipeline_version?: string | null
   data_release_id?: string | null
+  release_id?: string | null
   index_fingerprint?: string | null
+  manifest_hash?: string | null
   validity_snapshot?: string | null
   verification_label?: string | null
   historical_label?: string | null
@@ -194,11 +245,18 @@ export interface SearchResponse {
 
 // Ask types
 export interface AskRequest {
+  answer_depth?: 'quick' | 'balanced' | 'deep'
+  attachment_id?: string
+  attachment_text?: string
+  attachment_name?: string
+  attachment_sha256?: string
+  attachment_status?: 'processing' | 'complete' | 'partial' | 'error'
   question: string
   role: 'officer' | 'citizen' | 'admin'
   strategy_model: string
   answer_model: string
   final_answer_model: string
+  model_option_id?: string
   offline_mode?: boolean
   offline_model?: string
   domain?: string | null
@@ -210,11 +268,26 @@ export interface AskRequest {
   event_date?: string
   legal_as_of?: string
   idempotency_key?: string
+  pre_persisted_user_message?: boolean
+  memory_item_ids?: string[]
+  active_document_id?: string
   /** Transport-only; never serialized into the Ask request body. */
   signal?: AbortSignal
 }
 
 export interface AskResponse {
+  request_items?: Array<{ item_id: string; question: string; action: string; facets?: string[] }>
+  item_results?: Array<{
+    item_id: string
+    question: string
+    status: string
+    facets: Record<string, string>
+    facet_sources?: Record<string, string[]>
+    missing_reasons?: Record<string, string>
+    assessment_kind?: 'model_reported'
+    support_status?: 'not_assessed'
+    retrieval_observation?: Record<string, unknown>
+  }>
   answer: string
   question: string
   rag_trace?: RagTrace | null
@@ -225,6 +298,12 @@ export interface AskResponse {
   evidence_count?: number
   coverage_warning?: string | null
   blocked_reason?: string | null
+  outcome?: AnswerOutcome
+  reason_code?: string | null
+  retryable?: boolean
+  scope?: AnswerScope | null
+  persistence_degraded?: boolean
+  quality?: DirectAnswerQuality | null
   answer_completeness?: AnswerCompleteness
   answer_mode?: AnswerMode
   procedure_detail?: {
@@ -273,13 +352,8 @@ export interface AskResponse {
   suggested_agency?: string | null
   conversation_id?: string | null
   latency_ms?: number | null
-  timing_summary?: {
-    retrieval_ms?: number | null
-    provisioning_ms?: number | null
-    generation_ms?: number | null
-    validation_ms?: number | null
-    end_to_end_ms?: number | null
-  } | null
+  timing_summary?: AskTimingSummary | null
+  timing?: AskTimingSummary | null
   trace_id?: string | null
   error?: { code?: string; message?: string; suggestion?: string; reason?: string; retryable?: boolean } | null
   question_type?: string | null
@@ -295,15 +369,121 @@ export interface AskResponse {
   quality_flags?: string[]
   answer_score_preview?: number | null
   answer_sections?: AnswerSection[]
-  presentation_version?: 'legal-answer-v1' | null
+  presentation_version?: 'legal-answer-v1' | 'direct-rag-v1' | null
   answer_route?: AnswerRoute | null
   pipeline_version?: string | null
   data_release_id?: string | null
+  release_id?: string | null
   index_fingerprint?: string | null
+  manifest_hash?: string | null
   validity_snapshot?: string | null
   verification_label?: string | null
   historical_label?: string | null
   sections?: LegalAnswerPresentationSections | null
+  suggested_questions?: SuggestedQuestionV1[]
+  memory_usage?: MemoryUsageV1 | null
+  conversation_route?: ConversationRoute | null
+  active_document?: ConversationDocumentRefV1 | null
+  related_documents?: ConversationDocumentRefV1[]
+  model_option_id?: string | null
+  model_display_name?: string | null
+  model_locked?: boolean
+  generation_provenance?: Record<string, unknown> | null
+}
+
+export interface AskTimingSummary {
+  retrieval_ms?: number | null
+  routing_ms?: number | null
+  exact_retrieval_ms?: number | null
+  vector_retrieval_ms?: number | null
+  overlay_retrieval_ms?: number | null
+  hydrate_ms?: number | null
+  context_build_ms?: number | null
+  prompt_build_ms?: number | null
+  model_provision_ms?: number | null
+  provisioning_ms?: number | null
+  generation_ms?: number | null
+  verification_ms?: number | null
+  validation_ms?: number | null
+  persistence_ms?: number | null
+  end_to_end_ms?: number | null
+  timeout_stage?: string | null
+  fallback_used?: boolean
+  persistence_degraded?: boolean
+  evidence_candidates?: number
+  evidence_units?: number
+  evidence_sent?: number
+  router_latency_ms?: number | null
+  router_fallback?: boolean
+  ollama_metrics?: Record<string, unknown> | null
+}
+
+export interface DirectAnswerQuality {
+  contract_version?: string
+  accepted_claim_count?: number
+  rejected_claim_count?: number
+  citation_count?: number
+  citation_assessment?: 'packet_membership_only' | string
+  support_status?: 'not_assessed' | string
+  support_reference_count?: number
+  excluded_reference_count?: number
+  support_reference_kind?: 'candidate_mentions_only' | string
+  coverage?: number | null
+  coverage_status?: 'not_assessed' | 'partial' | 'insufficient_evidence' | string
+  validity_status?: string | null
+  validity_assessment?: 'registry_observations_only' | string
+  validity_unknown_source_count?: number
+  validity_observed_source_count?: number
+  validity_scope?: 'displayed_sources' | string
+  citation_status?: 'valid' | 'invalid' | 'missing' | 'present' | string | null
+  packet_coverage?: {
+    requested_issue_ids?: string[]
+    represented_issue_ids?: string[]
+    missing_issue_ids?: string[]
+    partial_issue_ids?: string[]
+    dropped_evidence_count?: number
+    truncated_evidence_count?: number
+    coverage_kind?: 'retrieval_presence_only' | string
+  }
+}
+
+export type AnswerOutcome =
+  | 'answered'
+  | 'partial'
+  | 'source_only'
+  | 'clarification_required'
+  | 'failed'
+
+export type AnswerScope =
+  | 'full_article'
+  | 'article_outline'
+  | 'bounded_window'
+  | 'multi_source'
+
+export interface SuggestedQuestionV1 {
+  id?: string
+  text: string
+  issue_id: string
+  facet: string
+}
+
+export interface MemoryUsageV1 {
+  used: boolean
+  inherited_fields: string[]
+  source?: 'conversation' | 'conversation+long_term' | null
+  state_revision: number
+  history_mode?: 'empty' | 'full' | 'compacted'
+  messages_considered?: number
+  messages_included?: number
+  history_tokens?: number
+  input_token_budget?: number
+  history_token_budget?: number
+  older_messages_compacted?: number
+  digest_revision?: number
+  digest_through_message_id?: string | null
+  router_latency_ms?: number
+  router_fallback?: boolean
+  context_checksum?: string
 }
 
 export interface CitationDisplayItem {

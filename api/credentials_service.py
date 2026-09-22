@@ -18,6 +18,7 @@ from loguru import logger
 from pydantic import SecretStr
 
 from api.models import CredentialResponse
+from open_notebook.ai.openai_compatible_utils import openai_compatible_models_url
 from open_notebook.domain.credential import Credential
 from open_notebook.utils.encryption import get_secret_from_env
 
@@ -65,7 +66,10 @@ PROVIDER_ENV_CONFIG: Dict[str, dict] = {
 PROVIDER_MODALITIES: Dict[str, List[str]] = {
     "openai": ["language", "embedding", "speech_to_text", "text_to_speech"],
     "anthropic": ["language"],
-    "google": ["language", "embedding", "speech_to_text", "text_to_speech"],
+    # The Google Generative Language adapter used by this application exposes
+    # generateContent and embedContent. Do not advertise speech modalities
+    # that cannot be provisioned by the runtime.
+    "google": ["language", "embedding"],
     "groq": ["language", "speech_to_text"],
     "mistral": ["language", "embedding", "speech_to_text", "text_to_speech"],
     "deepseek": ["language"],
@@ -337,13 +341,22 @@ async def get_provider_status() -> dict:
     configured: Dict[str, bool] = {}
     source: Dict[str, str] = {}
 
+    # Status needs only provider presence. The old implementation issued one
+    # database query for every provider (currently 17), which made the admin
+    # page wait several seconds. Read once and group in memory.
+    try:
+        credentials = await Credential.get_all()
+        database_providers = {
+            str(item.provider or "").strip().casefold()
+            for item in credentials
+            if str(item.provider or "").strip()
+        }
+    except Exception:
+        database_providers = set()
+
     for provider in PROVIDER_ENV_CONFIG:
         env_configured = check_env_configured(provider)
-        try:
-            db_credentials = await Credential.get_by_provider(provider)
-            db_configured = len(db_credentials) > 0
-        except Exception:
-            db_configured = False
+        db_configured = provider.casefold() in database_providers
 
         configured[provider] = db_configured or env_configured
 
@@ -415,6 +428,24 @@ async def test_credential(credential_id: str) -> dict:
                 api_version=config.get("api_version"),
             )
             return {"provider": provider, "success": success, "message": message}
+
+        if provider == "google":
+            # Validate the credential against Google's model catalogue instead
+            # of invoking one hard-coded model. Model names are retired more
+            # frequently than API keys, which previously displayed a red
+            # failure even when discovery and the configured models worked.
+            discovered = await discover_with_config(provider, config)
+            if not discovered:
+                return {
+                    "provider": provider,
+                    "success": False,
+                    "message": "Đã kết nối nhưng tài khoản không trả về model khả dụng.",
+                }
+            return {
+                "provider": provider,
+                "success": True,
+                "message": f"Kết nối thành công. Tìm thấy {len(discovered)} model.",
+            }
 
         # Standard provider: use Esperanto to create and test
         from esperanto.factory import AIFactory
@@ -492,12 +523,6 @@ async def discover_with_config(provider: str, config: dict) -> List[dict]:
 
     api_key = config.get("api_key")
     base_url = config.get("base_url")
-
-    def models_endpoint(url: str) -> str:
-        trimmed = url.rstrip("/")
-        if trimmed.endswith("/models"):
-            return trimmed
-        return f"{trimmed}/models"
 
     # Static model lists for providers without a listing API
     STATIC_MODELS: Dict[str, List[str]] = {
@@ -582,7 +607,7 @@ async def discover_with_config(provider: str, config: dict) -> List[dict]:
                 headers["Authorization"] = f"Bearer {api_key}"
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    models_endpoint(base_url),
+                    openai_compatible_models_url(base_url),
                     headers=headers,
                     timeout=30.0,
                 )
@@ -678,7 +703,7 @@ async def discover_with_config(provider: str, config: dict) -> List[dict]:
     # Standard OpenAI-style API discovery
     discovery_url = url_map.get(provider)
     if provider == "openai" and base_url:
-        discovery_url = models_endpoint(base_url)
+        discovery_url = openai_compatible_models_url(base_url)
     if not discovery_url or not api_key:
         return []
 

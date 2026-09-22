@@ -1,0 +1,5 @@
+-- Firebase Authentication bridge. Additive fields only.
+DEFINE FIELD IF NOT EXISTS auth_provider ON TABLE user_account TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS firebase_uid ON TABLE user_account TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS email_verified ON TABLE user_account TYPE option<bool>;
+DEFINE INDEX IF NOT EXISTS idx_user_account_firebase_uid ON TABLE user_account COLUMNS firebase_uid UNIQUE;

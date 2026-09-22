@@ -103,7 +103,6 @@ export const ptBR = {
     searchTerms: "Termos de Busca",
     strategy: "Estratégia",
     individualAnswers: "Respostas Individuais ({count})",
-    finalAnswer: "Resposta Final",
     notebookLabel: "Caderno: {name}",
     itemNotFound: "Este {type} não foi encontrado",
     accessibility: {
@@ -818,7 +817,6 @@ export const ptBR = {
   },
   models: {
     embedding: "Modelos de Embedding",
-    tts: "Text to Speech (TTS)",
     stt: "Speech to Text (STT)",
     apiKey: "Chave da API",
     deleteSuccess: "Modelo excluído com sucesso",
@@ -844,8 +842,6 @@ export const ptBR = {
     largeContextModelDesc: "Usado para processar documentos grandes - Gemini recomendado",
     embeddingModelLabel: "Modelo de Embedding",
     embeddingModelDesc: "Usado para busca semântica e embeddings vetoriais",
-    ttsModelLabel: "Modelo Text-to-Speech",
-    ttsModelDesc: "Usado para geração de podcast",
     sttModelLabel: "Modelo Speech-to-Text",
     sttModelDesc: "Usado para transcrição de áudio",
     embeddingChangeTitle: "Alteração de Modelo de Embedding",

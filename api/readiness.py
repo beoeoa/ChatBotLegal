@@ -36,6 +36,10 @@ _SAFE_LABEL = re.compile(r"^[A-Za-z0-9._:/-]{1,160}$")
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 
 
+def _truthy(value: Any) -> bool:
+    return str(value or "").strip().casefold() in _TRUE_VALUES
+
+
 def _timeout_seconds(name: str, default: float) -> float:
     try:
         value = float(os.getenv(name, str(default)))
@@ -117,7 +121,12 @@ async def check_legal_retrieval(
     candidates = (
         replica_setting.split(",")
         if replica_setting
-        else [os.getenv("LEGAL_SEARCH_URL", "http://127.0.0.1:8765")]
+        else [
+            os.getenv(
+                "LEGAL_SEARCH_URL",
+                os.getenv("LEGAL_RETRIEVAL_V2_URL", "http://127.0.0.1:8766"),
+            )
+        ]
     )
     base_urls = tuple(
         dict.fromkeys(
@@ -308,9 +317,65 @@ async def check_model_provider() -> dict[str, Any]:
                 model=public_model,
             )
         if provider in LOCAL_MODEL_PROVIDERS:
+            # A configured local model is a valid answer plane in both the
+            # portable bundle and a normal local installation. Readiness must
+            # reflect the model selected by the administrator instead of
+            # requiring an unrelated cloud provider or one special packaging
+            # flag.
+            if provider == "ollama":
+                local = await check_ollama(selected_model=public_model)
+                if not local.get("healthy"):
+                    return _component(
+                        healthy=False,
+                        code="local_provider_unavailable",
+                        started=started,
+                        provider=public_provider,
+                        model=public_model,
+                    )
+                if not local.get("selected_installed"):
+                    return _component(
+                        healthy=False,
+                        code="local_model_not_installed",
+                        started=started,
+                        provider=public_provider,
+                        model=public_model,
+                    )
+                return _component(
+                    healthy=True,
+                    code="local_ready",
+                    started=started,
+                    provider=public_provider,
+                    model=public_model,
+                )
+            # Hugging Face/local adapters do not expose a common bounded health
+            # endpoint. They are accepted only when the configured model can be
+            # provisioned within the normal readiness budget.
+            try:
+                provisioned = await asyncio.wait_for(
+                    model_manager.get_model(model_id, max_tokens=1, temperature=0),
+                    timeout=_timeout_seconds("READINESS_MODEL_TIMEOUT_SECONDS", 3.0),
+                )
+            except TimeoutError:
+                return _component(
+                    healthy=False,
+                    code="local_provider_timeout",
+                    started=started,
+                    provider=public_provider,
+                    model=public_model,
+                )
+            except Exception:
+                provisioned = None
+            if provisioned is not None:
+                return _component(
+                    healthy=True,
+                    code="local_ready",
+                    started=started,
+                    provider=public_provider,
+                    model=public_model,
+                )
             return _component(
                 healthy=False,
-                code="cloud_model_required",
+                code="local_model_unavailable",
                 started=started,
                 provider=public_provider,
                 model=public_model,
@@ -406,9 +471,11 @@ async def check_model_provider() -> dict[str, Any]:
 
 
 async def check_ollama(
-    *, client: httpx.AsyncClient | None = None
+    *,
+    client: httpx.AsyncClient | None = None,
+    selected_model: str | None = None,
 ) -> dict[str, Any]:
-    """Report optional local fallback status without affecting readiness."""
+    """Report Ollama health and whether the selected local model is installed."""
     started = perf_counter()
     owns_client = client is None
     if client is None:
@@ -429,12 +496,15 @@ async def check_ollama(
             for item in data.get("models", [])
             if isinstance(item, dict)
         }
+        selected = _safe_label(selected_model)
         return _component(
             healthy=True,
             code="ready",
             started=started,
             recommended_model=RECOMMENDED_LOCAL_MODEL,
             recommended_installed=RECOMMENDED_LOCAL_MODEL in installed,
+            selected_model=selected,
+            selected_installed=(selected in installed if selected else None),
         )
     except httpx.TimeoutException:
         return _component(healthy=False, code="timeout", started=started)
@@ -497,12 +567,31 @@ def check_legal_validity_sync(
 
 
 async def collect_readiness() -> dict[str, Any]:
-    database, legal_retrieval, model_provider, ollama = await asyncio.gather(
-        check_database(),
-        check_legal_retrieval(),
-        check_model_provider(),
-        check_ollama(),
+    public_quick_chat_only = _truthy(
+        os.getenv("PUBLIC_QUICK_CHAT_ONLY_MODE")
     )
+    if public_quick_chat_only:
+        database, legal_retrieval, ollama = await asyncio.gather(
+            check_database(),
+            check_legal_retrieval(),
+            check_ollama(),
+        )
+        model_provider = _component(
+            healthy=False,
+            code="not_required_for_public_quick_chat",
+            started=perf_counter(),
+            required=False,
+        )
+        required_components = ("database", "legal_retrieval")
+    else:
+        database, legal_retrieval, model_provider, ollama = await asyncio.gather(
+            check_database(),
+            check_legal_retrieval(),
+            check_model_provider(),
+            check_ollama(),
+        )
+        model_provider = {**model_provider, "required": True}
+        required_components = REQUIRED_COMPONENTS
     components = {
         "database": database,
         "legal_retrieval": legal_retrieval,
@@ -510,13 +599,16 @@ async def collect_readiness() -> dict[str, Any]:
         "ollama": {**ollama, "required": False},
         "legal_validity_sync": check_legal_validity_sync(),
     }
-    ready = all(components[name].get("healthy") for name in REQUIRED_COMPONENTS)
+    ready = all(components[name].get("healthy") for name in required_components)
     if components["legal_validity_sync"].get("required"):
         ready = ready and bool(components["legal_validity_sync"].get("healthy"))
     requested_device = _safe_device(os.getenv("LEGAL_EMBED_DEVICE", "auto"))
     active_device = _safe_device(legal_retrieval.get("embedding_device"))
     return {
         "status": "ready" if ready else "not_ready",
+        "deployment_scope": (
+            "public_quick_chat_only" if public_quick_chat_only else "full_answer_plane"
+        ),
         "components": components,
         "embedding_device": {
             "requested": requested_device,

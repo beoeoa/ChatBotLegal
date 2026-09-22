@@ -1,4 +1,6 @@
 .env
+.env.test.local
+.test-data/
 .env.release
 prompts/patterns/user/
 /notebooks/
@@ -17,6 +19,8 @@ __pycache__/
 todo.md
 temp/
 google-credentials.json
+firebase-service-account.json
+secrets/
 # Distribution / packaging
 .Python
 build/

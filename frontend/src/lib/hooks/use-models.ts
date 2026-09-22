@@ -13,10 +13,13 @@ export const MODEL_QUERY_KEYS = {
   providers: ['models', 'providers'] as const,
 }
 
-export function useModels() {
+export function useModels(enabled = true) {
   return useQuery({
     queryKey: MODEL_QUERY_KEYS.models,
     queryFn: () => modelsApi.list(),
+    enabled,
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
   })
 }
 
@@ -78,10 +81,13 @@ export function useDeleteModel() {
   })
 }
 
-export function useModelDefaults() {
+export function useModelDefaults(enabled = true) {
   return useQuery({
     queryKey: MODEL_QUERY_KEYS.defaults,
     queryFn: () => modelsApi.getDefaults(),
+    enabled,
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
   })
 }
 

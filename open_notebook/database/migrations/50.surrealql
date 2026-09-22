@@ -1,0 +1,6 @@
+-- Legal import receipt reconciliation. Additive only; preserves previous
+-- failure details while allowing a later live serving verification receipt.
+DEFINE FIELD IF NOT EXISTS failed_document_id ON TABLE legal_crawl_candidate TYPE option<number>;
+DEFINE FIELD IF NOT EXISTS failed_import_result ON TABLE legal_crawl_candidate TYPE option<object> FLEXIBLE;
+DEFINE FIELD IF NOT EXISTS reconciliation ON TABLE legal_crawl_candidate TYPE option<object> FLEXIBLE;
+DEFINE FIELD IF NOT EXISTS reconciliation ON TABLE legal_import_job TYPE option<object> FLEXIBLE;

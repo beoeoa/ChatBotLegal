@@ -20,23 +20,19 @@ class SourceState(TypedDict):
 
 
 async def content_process(state: SourceState) -> dict:
-    content_settings = ContentSettings(
-        default_content_processing_engine_doc="auto",
-        default_content_processing_engine_url="auto",
-        default_embedding_option="ask",
-        auto_delete_files="yes",
-        youtube_preferred_languages=[
-            "en",
-            "pt",
-            "es",
-            "de",
-            "nl",
-            "en-GB",
-            "fr",
-            "hi",
-            "ja",
-        ],
-    )
+    try:
+        content_settings = await ContentSettings.get_instance()  # type: ignore[assignment]
+    except Exception as exc:
+        logger.warning(
+            "Content settings unavailable; using safe processing defaults: {}",
+            type(exc).__name__,
+        )
+        content_settings = ContentSettings(
+            default_content_processing_engine_doc="auto",
+            default_content_processing_engine_url="auto",
+            default_embedding_option="ask",
+            auto_delete_files="yes",
+        )
     content_state: Dict[str, Any] = state["content_state"]  # type: ignore[assignment]
 
     content_state["url_engine"] = (
@@ -67,12 +63,28 @@ async def content_process(state: SourceState) -> dict:
     url = content_state.get("url") or ""
     processed_state = None
 
+    # Uploaded document images use the same local Vietnamese OCR as chat/import.
+    from pathlib import Path
+    import asyncio
+    from api.local_image_ocr import IMAGE_EXTENSIONS, extract_image
+    image_path = content_state.get('file_path')
+    if image_path and Path(image_path).suffix.lower() in IMAGE_EXTENSIONS:
+        image_bytes = await asyncio.to_thread(Path(image_path).read_bytes)
+        result = await asyncio.to_thread(extract_image, image_bytes)
+        processed_state = ProcessSourceState(
+            file_path=str(image_path), title=Path(image_path).name,
+            content=result['text'], source_type='file', identified_type='image',
+            delete_source=bool(content_state.get('delete_source', False)),
+            metadata={key: value for key, value in result.items() if key != 'text'},
+        )
+
     if url and "vbpl.vn" in url.lower():
         # 1. First attempt: Instant PostgreSQL local legal repository lookup
         try:
             import os
+
             import psycopg2
-            db_url = os.getenv("LEGAL_DATABASE_URL", "postgresql+psycopg2://postgres:123456@127.0.0.1:5432/legal_chatbot").replace("postgresql+psycopg2://", "postgresql://")
+            db_url = os.getenv("LEGAL_DATABASE_URL", "postgresql+psycopg2://postgres:postgres@127.0.0.1:5432/legal_chatbot").replace("postgresql+psycopg2://", "postgresql://")
             conn = psycopg2.connect(db_url)
             cur = conn.cursor()
             cur.execute(
@@ -115,27 +127,14 @@ async def content_process(state: SourceState) -> dict:
         except Exception as e:
             logger.warning(f"PostgreSQL local legal lookup failed: {e}")
 
-        # 2. Second attempt: Playwright crawler
+        # 2. All official legal pages use the shared Crawl4AI adapter.  Keep
+        # the database lookup above as a fast path, but do not route misses to
+        # the legacy VBPL-specific Playwright crawler.
         if not processed_state:
             try:
-                logger.info(f"Custom routing VBPL URL through Playwright crawler: {url}")
-                from open_notebook.utils.vbpl_crawler import crawl_vbpl_url
-                crawl_res = await crawl_vbpl_url(url)
-                processed_state = ProcessSourceState(
-                    url=url,
-                    title=crawl_res["title"],
-                    content=crawl_res["content"],
-                    file_path="",
-                    source_type="url",
-                    identified_type="webpage"
+                from api.crawlers.legal_document_pipeline import (
+                    fetch_normalized_legal_document,
                 )
-            except Exception as e:
-                logger.error(f"Custom VBPL Playwright crawl failed: {e}")
-
-        # 3. Third attempt: Official HTTP pipeline
-        if not processed_state:
-            try:
-                from api.crawlers.legal_document_pipeline import fetch_normalized_legal_document
                 norm_doc = await fetch_normalized_legal_document(url, scope="Trung ương - toàn quốc")
                 if norm_doc and norm_doc.get("clean_markdown") and len(norm_doc.get("clean_markdown", "")) > 100:
                     processed_state = ProcessSourceState(
@@ -147,7 +146,7 @@ async def content_process(state: SourceState) -> dict:
                         identified_type="webpage"
                     )
             except Exception as e:
-                logger.warning(f"Normalized legal document pipeline fallback failed: {e}")
+                logger.warning(f"Crawl4AI legal document fetch failed: {e}")
 
     if not processed_state:
         processed_state = await extract_content(content_state)

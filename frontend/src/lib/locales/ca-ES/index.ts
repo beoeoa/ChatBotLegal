@@ -103,7 +103,6 @@ export const caES = {
     searchTerms: "Termes de cerca",
     strategy: "Estratègia",
     individualAnswers: "Respostes individuals ({count})",
-    finalAnswer: "Resposta final",
     notebookLabel: "Quadern: {name}",
     itemNotFound: "No s'ha pogut trobar aquest {type}",
     accessibility: {
@@ -818,7 +817,6 @@ export const caES = {
   },
   models: {
     embedding: "Models d'incrustació",
-    tts: "Text a veu (TTS)",
     stt: "Veu a text (STT)",
     apiKey: "Clau de l'API",
     deleteSuccess: "S'ha suprimit el model correctament",
@@ -844,8 +842,6 @@ export const caES = {
     largeContextModelDesc: "S'usa per al processament de documents grans; es recomana Gemini",
     embeddingModelLabel: "Model d'incrustació",
     embeddingModelDesc: "S'usa per a la cerca semàntica i les incrustacions vectorials",
-    ttsModelLabel: "Model de text a veu",
-    ttsModelDesc: "S'usa per a la generació de podcasts",
     sttModelLabel: "Model de veu a text",
     sttModelDesc: "S'usa per a la transcripció d'àudio",
     embeddingChangeTitle: "Canvi de model d'incrustació",

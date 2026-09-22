@@ -52,6 +52,24 @@ export interface LegalManagementSummary {
     collections?: Record<string, number | null>
   }
   faq_impacts: AvailabilitySection
+  serving_release?: {
+    release_id?: string
+    legal_as_of?: string
+    manifest_sha256?: string
+    current_collection?: string
+    temporal_collection?: string
+    exact_lexical_index?: string
+    state_counts?: Record<string, number>
+    cards?: {
+      total_retrievable?: number | null
+      current_effective?: number | null
+      expired_total?: number | null
+      unknown_total?: number | null
+      not_yet_effective_total?: number | null
+      expiring_30?: number | null
+      effective_30?: number | null
+    }
+  }
 }
 
 export interface ManagedLegalDocument {
@@ -69,6 +87,12 @@ export interface ManagedLegalDocument {
   serving_status?: string | null
   current_answer_eligible?: boolean
   historical_lookup_allowed?: boolean
+  search_included?: boolean
+  search_reason?: string | null
+  state_revision?: string | null
+  metadata_revision?: string | null
+  metadata_editable?: boolean
+  serving_state?: 'current_retrievable' | 'historical_only' | 'quarantined' | 'future_effective' | string
   issued_date?: string | null
   effective_date?: string | null
   expired_date?: string | null
@@ -82,6 +106,11 @@ export interface ManagedLegalDocument {
   article_count: number
   chunk_count: number
   quality_flags: string[]
+  primary_organization_unit_id?: string | null
+  organization_unit_ids?: string[]
+  organization_assignment_state?: 'assigned' | 'shared' | 'unassigned' | string
+  organization_assignment_status?: 'confirmed' | 'needs_confirmation' | string
+  organization_assignment_fingerprint?: string | null
   created_at?: string | null
   source_id?: string | null
   collection_source?: string | null
@@ -91,6 +120,21 @@ export interface ManagedLegalDocument {
   applicability_info?: string | null
 }
 
+export interface LegalManagementMetadataPayload {
+  issued_date?: string | null
+  effective_date?: string | null
+  expired_date?: string | null
+  source_url?: string | null
+  gazette_date?: string | null
+  signer_title?: string | null
+  signer_name?: string | null
+  applicability_info?: string | null
+  version?: string | null
+  reason: string
+  expected_revision: string
+  confirm_validity: boolean
+}
+
 export interface LegalManagementListResponse {
   items: ManagedLegalDocument[]
   total: number
@@ -98,6 +142,8 @@ export interface LegalManagementListResponse {
   offset: number
   as_of: string
   observed_at: string
+  serving_release?: LegalManagementSummary['serving_release']
+  organization_units_available?: boolean
 }
 
 export interface LegalManagementListParams {
@@ -106,10 +152,14 @@ export interface LegalManagementListParams {
   issuing_agency?: string
   scope?: string
   domain?: string
+  organization_unit_id?: string
+  organization_responsibility?: 'all' | 'primary' | 'support'
+  include_organization_units?: boolean
   stored_status?: string
   validity_status?: 'active' | 'not_yet_effective' | 'expired' | 'unknown'
+  include_expired_history?: boolean
   tier?: 'all' | 'core' | 'expanded'
-  data_quality?: 'missing_source' | 'missing_metadata' | 'zero_chunks' | 'unknown_status'
+  data_quality?: 'missing_source' | 'missing_metadata' | 'zero_chunks' | 'unknown_status' | 'unclassified'
   source_presence?: 'all' | 'present' | 'missing'
   issued_from?: string
   issued_to?: string
@@ -124,9 +174,14 @@ export interface LegalManagementListParams {
   sort_order?: 'asc' | 'desc'
 }
 
+export interface MetadataRequestOptions {
+  timeout?: number
+}
+
 export interface LegalManagementDetail {
   observed_at: string
   document: ManagedLegalDocument
+  organization_units_available?: boolean
   structure: {
     article_count: number
     chunk_count: number
@@ -142,6 +197,12 @@ export interface LegalManagementDetail {
   vectors: AvailabilitySection & {
     expected?: number
     collections?: Record<string, { present?: number; missing?: number; reason_code?: string }>
+    complete_collections?: string[]
+    retrieval_ready?: boolean
+    current_retrieval_ready?: boolean
+    historical_retrieval_ready?: boolean
+    verification_source?: string
+    checked_at?: string
   }
   faq_impacts: AvailabilitySection & { items?: Array<Record<string, unknown>> }
   versions: AvailabilitySection & { legacy_version?: string | null; items?: Array<Record<string, unknown>> }
@@ -157,6 +218,68 @@ export interface LegalManagementDetail {
       created?: string
     }>
   }
+}
+
+export interface LegalManagementReplacementPayload {
+  source_url?: string
+  reason: string
+  uploaded_content?: string
+  uploaded_filename?: string
+  title?: string
+  law_number?: string
+  document_type?: string
+  issuing_agency?: string
+  issued_date?: string
+  effective_date?: string
+  expired_date?: string
+  scope?: string
+  sector?: string
+  applicability_info?: string
+}
+
+export interface LegalManagementReplacementWorkflow {
+  workflow_id?: string
+  status?: 'prepared' | 'processing' | 'activated' | 'failed' | 'pending_retry' | string
+  steps?: Record<string, string>
+  hard_gates?: Record<string, boolean>
+  error?: string | null
+  updated_at?: string
+}
+
+export interface LegalManagementReplacementResult {
+  status: string
+  workflow_id?: string
+  document_id?: string | number
+  chunk_count?: number
+  vector_collection?: string
+  new_document?: Record<string, unknown>
+  old_document?: Record<string, unknown>
+  chatbot_ready?: boolean
+  audit_sync?: { status?: 'recorded' | 'pending'; error_class?: string }
+  workflow_sync?: { status?: 'recorded' | 'pending'; error_class?: string }
+  message?: string
+}
+
+export interface LegalManagementHardDeletePreview {
+  status: 'eligible' | 'blocked'
+  eligible: boolean
+  reason_code?: string | null
+  document_id: string
+  law_number: string
+  document_title: string
+  state_revision: string
+  release_member: boolean
+  confirmation_text: string
+  database: {
+    articles: number
+    chunks: number
+    scope_rows: number
+    relationships: number
+    workspace_links: number
+    quality_rows: number
+  }
+  vectors: LegalManagementDetail['vectors']
+  audit_preserved: true
 }
 
 export type LifecycleBucket =
@@ -269,19 +392,155 @@ export interface LegalImpactCaseProjection {
 }
 
 export const legalManagementApi = {
-  async summary(): Promise<LegalManagementSummary> {
-    const response = await apiClient.get<LegalManagementSummary>('/legal/management/summary')
+  async summary(options?: MetadataRequestOptions): Promise<LegalManagementSummary> {
+    const response = await apiClient.get<LegalManagementSummary>('/legal/management/summary', options)
     return response.data
   },
 
-  async list(params: LegalManagementListParams): Promise<LegalManagementListResponse> {
-    const response = await apiClient.get<LegalManagementListResponse>('/legal/management/documents', { params })
+  async list(params: LegalManagementListParams, options?: MetadataRequestOptions): Promise<LegalManagementListResponse> {
+    const response = await apiClient.get<LegalManagementListResponse>('/legal/management/documents', { params, ...options })
     return response.data
   },
 
   async detail(documentId: string | number): Promise<LegalManagementDetail> {
     const response = await apiClient.get<LegalManagementDetail>(
       `/legal/management/documents/${encodeURIComponent(String(documentId))}`,
+    )
+    return response.data
+  },
+
+  async setOrganizationAssignment(
+    documentId: string | number,
+    payload: {
+      assignment_state: 'assigned' | 'shared' | 'unassigned'
+      primary_organization_unit_id?: string | null
+      organization_unit_ids: string[]
+      reason: string
+      expected_fingerprint?: string | null
+    },
+  ): Promise<{
+    document_id: string
+    assignment: Pick<ManagedLegalDocument,
+      'organization_assignment_state' | 'primary_organization_unit_id' | 'organization_unit_ids' | 'organization_assignment_status'>
+    fingerprint: string
+    projection_updated: boolean
+  }> {
+    const response = await apiClient.post(
+      `/legal/management/documents/${encodeURIComponent(String(documentId))}/organization-assignment`,
+      payload,
+      { timeout: 15_000 },
+    )
+    return response.data
+  },
+
+  async updateMetadata(
+    documentId: string | number,
+    payload: LegalManagementMetadataPayload,
+  ): Promise<{
+    document_id: string
+    metadata_revision?: string
+    projection_updated: boolean
+    validity?: { status?: string; verified_at?: string } | null
+    message?: string
+  }> {
+    const response = await apiClient.post(
+      `/legal/management/documents/${encodeURIComponent(String(documentId))}/metadata`,
+      payload,
+      { timeout: 45_000 },
+    )
+    return response.data
+  },
+
+  async replaceDocument(
+    documentId: string | number,
+    payload: LegalManagementReplacementPayload,
+    options: { idempotencyKey?: string } = {},
+  ): Promise<LegalManagementReplacementResult> {
+    const response = await apiClient.post<LegalManagementReplacementResult>(
+      `/legal/management/documents/${encodeURIComponent(String(documentId))}/replacement`,
+      payload,
+      {
+        timeout: 900_000,
+        headers: options.idempotencyKey
+          ? { 'Idempotency-Key': options.idempotencyKey }
+          : undefined,
+      },
+    )
+    return response.data
+  },
+
+  async replacementWorkflowByKey(
+    idempotencyKey: string,
+  ): Promise<LegalManagementReplacementWorkflow> {
+    const response = await apiClient.get<{
+      status: string
+      workflow: LegalManagementReplacementWorkflow
+    }>('/legal/validity/replacement-workflows/by-idempotency-key', {
+      params: { key: idempotencyKey },
+      timeout: 5_000,
+    })
+    return response.data.workflow
+  },
+
+  async setSearchState(
+    documentId: string | number,
+    payload: {
+      action: 'exclude' | 'restore' | 'historical' | 'quarantine'
+      reason: string
+      expected_revision: string
+    },
+  ): Promise<{
+    status: string
+    action: string
+    document_id: string
+    search_included: boolean
+    state_revision?: string
+    chatbot_ready?: boolean
+    operation_verification?: {
+      status?: 'passed' | 'degraded'
+      passed?: boolean
+      state_authority_verified?: boolean
+      vector_ready?: boolean | null
+    }
+    message?: string
+  }> {
+    const response = await apiClient.post(
+      `/legal/management/documents/${encodeURIComponent(String(documentId))}/search-state`,
+      payload,
+      { timeout: 30_000 },
+    )
+    return response.data
+  },
+
+  async previewHardDelete(
+    documentId: string | number,
+  ): Promise<LegalManagementHardDeletePreview> {
+    const response = await apiClient.get<LegalManagementHardDeletePreview>(
+      `/legal/management/documents/${encodeURIComponent(String(documentId))}/hard-delete/preview`,
+      { timeout: 30_000 },
+    )
+    return response.data
+  },
+
+  async hardDelete(
+    documentId: string | number,
+    payload: {
+      reason: string
+      expected_revision: string
+      confirmation_text: string
+    },
+  ): Promise<{
+    status: 'deleted'
+    document_id: string
+    law_number: string
+    database_deleted: boolean
+    vectors_deleted: boolean
+    message?: string
+  }> {
+    const response = await apiClient.post(
+      `/legal/management/documents/${encodeURIComponent(String(documentId))}/hard-delete`,
+      payload,
+      { timeout: 120_000 },
     )
     return response.data
   },

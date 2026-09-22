@@ -1,6 +1,6 @@
 import os
 import traceback
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from loguru import logger
@@ -15,8 +15,12 @@ from api.models import (
 from api.admin_config_history import record_config_revision
 from api.auth import get_request_role, get_request_user_id
 from api.model_modality import validate_provider_model_modality
+from api.model_runtime_contract import capabilities_for_model
 from api.user_service import write_audit_log
-from open_notebook.ai.connection_tester import test_individual_model
+from open_notebook.ai.connection_tester import (
+    test_individual_model,
+    test_language_model_rag_compatibility,
+)
 from open_notebook.ai.key_provider import provision_provider_keys
 from open_notebook.ai.model_discovery import (
     discover_provider_models,
@@ -111,6 +115,8 @@ class ModelTestResponse(BaseModel):
     success: bool
     message: str
     details: Optional[str] = None
+    checks: Optional[Dict[str, Any]] = None
+    latency_ms: Optional[float] = None
 
 
 async def validate_default_model_modalities(defaults_data) -> None:
@@ -118,6 +124,7 @@ async def validate_default_model_modalities(defaults_data) -> None:
 
     expected = {
         "default_chat_model": "language",
+        "default_transformation_model": "language",
         "large_context_model": "language",
         "default_tools_model": "language",
         "default_embedding_model": "embedding",
@@ -135,6 +142,34 @@ async def validate_default_model_modalities(defaults_data) -> None:
             raise ValueError(
                 f"default_model_modality_mismatch:{field}:{required_type}"
             )
+
+
+async def model_configuration_references(model_id: str) -> list[str]:
+    """List active configuration slots that still depend on a model."""
+
+    references: list[str] = []
+    defaults = await DefaultModels.get_instance()
+    for field in (
+        "default_chat_model",
+        "default_transformation_model",
+        "large_context_model",
+        "default_text_to_speech_model",
+        "default_speech_to_text_model",
+        "default_embedding_model",
+        "default_tools_model",
+    ):
+        if str(getattr(defaults, field, None) or "") == model_id:
+            references.append(field)
+
+    from open_notebook.domain.content_settings import ContentSettings
+
+    settings = await ContentSettings.get_instance()
+    for raw in getattr(settings, "chat_model_policy", None) or []:
+        raw_model_id = raw.get("model_id") if isinstance(raw, dict) else getattr(raw, "model_id", None)
+        if str(raw_model_id or "") == model_id:
+            references.append("chat_model_policy")
+            break
+    return references
 
 
 # Provider priority for auto-assignment (higher priority first)
@@ -220,7 +255,7 @@ def _check_openai_compatible_support(mode: str) -> bool:
     return generic or specific or generic_key or specific_key
 
 
-@router.get("/models", response_model=List[ModelResponse])
+@router.get("/models", response_model=List[ModelResponse], dependencies=MODEL_ADMIN_ONLY)
 async def get_models(
     type: Optional[str] = Query(None, description="Filter by model type"),
 ):
@@ -301,6 +336,11 @@ async def create_model(model_data: ModelCreate, request: Request):
             details={"result": "success", "provider": model_data.provider, "model_type": model_data.type},
             request=request,
         )
+        try:
+            from api.routers.admin_control import invalidate_dashboard_cache
+            invalidate_dashboard_cache()
+        except Exception:
+            logger.debug("dashboard_cache_invalidation_skipped", exc_info=True)
 
         return ModelResponse(
             id=new_model.id or "",
@@ -328,6 +368,17 @@ async def delete_model(model_id: str, request: Request):
         if not model:
             raise HTTPException(status_code=404, detail="Model not found")
 
+        references = await model_configuration_references(model_id)
+        if references:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "model_in_use",
+                    "message": "Model đang được gán cho cấu hình hệ thống. Hãy chọn model thay thế trước khi xóa.",
+                    "references": references,
+                },
+            )
+
         await model.delete()
 
         await write_audit_log(
@@ -335,6 +386,11 @@ async def delete_model(model_id: str, request: Request):
             actor_user_id=get_request_user_id(request), actor_role="admin",
             details={"result": "success"}, request=request,
         )
+        try:
+            from api.routers.admin_control import invalidate_dashboard_cache
+            invalidate_dashboard_cache()
+        except Exception:
+            logger.debug("dashboard_cache_invalidation_skipped", exc_info=True)
 
         return {"message": "Model deleted successfully"}
     except HTTPException:
@@ -361,6 +417,16 @@ async def test_model(model_id: str):
         raise HTTPException(status_code=404, detail="Model not found")
 
     try:
+        if model.type == "language":
+            success, message, checks = await test_language_model_rag_compatibility(model)
+            checks = dict(checks or {})
+            checks["capabilities"] = capabilities_for_model(model).public_dict()
+            return ModelTestResponse(
+                success=success,
+                message=message,
+                checks=checks,
+                latency_ms=float(checks.get("latency_ms") or 0.0),
+            )
         success, message = await test_individual_model(model)
         return ModelTestResponse(success=success, message=message)
     except Exception as e:
@@ -381,6 +447,7 @@ async def get_default_models(request: Request):
 
         return DefaultModelsResponse(
             default_chat_model=defaults.default_chat_model,  # type: ignore[attr-defined]
+            default_transformation_model=getattr(defaults, "default_transformation_model", None),
             large_context_model=defaults.large_context_model,  # type: ignore[attr-defined]
             default_text_to_speech_model=defaults.default_text_to_speech_model,  # type: ignore[attr-defined]
             default_speech_to_text_model=defaults.default_speech_to_text_model,  # type: ignore[attr-defined]
@@ -409,6 +476,7 @@ async def update_default_models(defaults_data: DefaultModelsResponse, request: R
         defaults = await DefaultModels.get_instance()
         before = DefaultModelsResponse(
             default_chat_model=defaults.default_chat_model,  # type: ignore[attr-defined]
+            default_transformation_model=getattr(defaults, "default_transformation_model", None),
             large_context_model=defaults.large_context_model,  # type: ignore[attr-defined]
             default_text_to_speech_model=defaults.default_text_to_speech_model,  # type: ignore[attr-defined]
             default_speech_to_text_model=defaults.default_speech_to_text_model,  # type: ignore[attr-defined]
@@ -419,6 +487,8 @@ async def update_default_models(defaults_data: DefaultModelsResponse, request: R
         # Update only provided fields
         if defaults_data.default_chat_model is not None:
             defaults.default_chat_model = defaults_data.default_chat_model  # type: ignore[attr-defined]
+        if defaults_data.default_transformation_model is not None:
+            defaults.default_transformation_model = defaults_data.default_transformation_model  # type: ignore[attr-defined]
         if defaults_data.large_context_model is not None:
             defaults.large_context_model = defaults_data.large_context_model  # type: ignore[attr-defined]
         if defaults_data.default_text_to_speech_model is not None:
@@ -440,6 +510,7 @@ async def update_default_models(defaults_data: DefaultModelsResponse, request: R
 
         response = DefaultModelsResponse(
             default_chat_model=defaults.default_chat_model,  # type: ignore[attr-defined]
+            default_transformation_model=getattr(defaults, "default_transformation_model", None),
             large_context_model=defaults.large_context_model,  # type: ignore[attr-defined]
             default_text_to_speech_model=defaults.default_text_to_speech_model,  # type: ignore[attr-defined]
             default_speech_to_text_model=defaults.default_speech_to_text_model,  # type: ignore[attr-defined]
@@ -453,6 +524,11 @@ async def update_default_models(defaults_data: DefaultModelsResponse, request: R
             actor_user_id=get_request_user_id(request),
             reason=(request.headers.get("X-Business-Reason") or "Cập nhật model mặc định").strip(),
         )
+        try:
+            from api.routers.admin_control import invalidate_dashboard_cache
+            invalidate_dashboard_cache()
+        except Exception:
+            logger.debug("dashboard_cache_invalidation_skipped", exc_info=True)
         return response
     except HTTPException:
         raise
@@ -858,7 +934,6 @@ async def auto_assign_defaults():
             ("default_tools_model", "language", defaults.default_tools_model),  # type: ignore[attr-defined]
             ("large_context_model", "language", defaults.large_context_model),  # type: ignore[attr-defined]
             ("default_embedding_model", "embedding", defaults.default_embedding_model),  # type: ignore[attr-defined]
-            ("default_text_to_speech_model", "text_to_speech", defaults.default_text_to_speech_model),  # type: ignore[attr-defined]
             ("default_speech_to_text_model", "speech_to_text", defaults.default_speech_to_text_model),  # type: ignore[attr-defined]
         ]
 

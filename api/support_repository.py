@@ -14,13 +14,14 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Iterable, Protocol
+from typing import Any, Iterable, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
 
 MAX_OFFICER_CAPACITY = 3
 SUPPORT_CONTENT_RETENTION_DAYS = 180
+_PRIORITY_ORDER = {"urgent": 4, "high": 3, "normal": 2, "low": 1}
 
 
 def utcnow() -> datetime:
@@ -40,6 +41,34 @@ def _as_datetime(value: Any, default: datetime | None = None) -> datetime:
     else:
         result = default or utcnow()
     return result if result.tzinfo else result.replace(tzinfo=timezone.utc)
+
+
+def support_sla_projection(ticket: "SupportTicketRecord", *, now: datetime | None = None) -> dict[str, Any]:
+    """Compute the read-time SLA projection from authoritative timestamps.
+
+    Missing due dates are deliberately marked ``unknown``; the service never
+    turns an old JSON record into an overdue ticket by guessing a deadline.
+    """
+    checked_at = now or utcnow()
+    terminal = ticket.status in {TicketStatus.RESOLVED, TicketStatus.CLOSED, TicketStatus.CANCELLED, TicketStatus.EXPIRED}
+    first_overdue = bool(ticket.first_response_due_at and not ticket.first_response_at and checked_at > ticket.first_response_due_at and not terminal)
+    resolution_overdue = bool(ticket.resolution_due_at and checked_at > ticket.resolution_due_at and not terminal)
+    candidates = [
+        int((checked_at - due).total_seconds() // 60)
+        for due, active in (
+            (ticket.first_response_due_at, first_overdue),
+            (ticket.resolution_due_at, resolution_overdue),
+        )
+        if active and due is not None
+    ]
+    basis = "scheduled" if ticket.first_response_due_at or ticket.resolution_due_at else "unknown"
+    return {
+        "first_response_overdue": first_overdue,
+        "resolution_overdue": resolution_overdue,
+        "sla_overdue": bool(first_overdue or resolution_overdue),
+        "overdue_minutes": max(candidates, default=0),
+        "sla_basis": basis,
+    }
 
 
 class SupportRepositoryError(RuntimeError):
@@ -78,6 +107,11 @@ class TicketStatus(StrEnum):
     EXPIRED = "expired"
 
 
+_TERMINAL_TICKET_STATUSES = frozenset(
+    {TicketStatus.RESOLVED, TicketStatus.CLOSED, TicketStatus.CANCELLED, TicketStatus.EXPIRED}
+)
+
+
 class AssignmentStatus(StrEnum):
     LEASED = "leased"
     ACTIVE = "active"
@@ -105,6 +139,12 @@ class SupportActor(BaseModel):
     user_id: str
     role: str
     domains: tuple[str, ...] = ()
+    primary_organization_unit_id: str | None = None
+    organization_unit_ids: tuple[str, ...] = ()
+    # Request-time authority, never inferred from a stored ticket/presence hint.
+    organization_routing_mode: Literal["legacy", "shadow", "hybrid", "unit_primary"] = "legacy"
+    # Whole-unit memberships stay above; limited grants retain both coordinates.
+    organization_unit_domain_grants: tuple[tuple[str, str], ...] = ()
     access_reason: str | None = None
 
 
@@ -112,6 +152,7 @@ class SupportTicketRecord(BaseModel):
     id: str
     owner_user_id: str
     canonical_domain: str
+    primary_organization_unit_id: str | None = None
     question_summary: str
     status: TicketStatus = TicketStatus.QUEUED
     priority: str = "normal"
@@ -121,7 +162,17 @@ class SupportTicketRecord(BaseModel):
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
     first_response_due_at: datetime | None = None
+    first_response_at: datetime | None = None
     resolution_due_at: datetime | None = None
+    resolved_at: datetime | None = None
+    closed_at: datetime | None = None
+    cancelled_at: datetime | None = None
+    escalated_at: datetime | None = None
+    last_reminded_at: datetime | None = None
+    resolution_note: str = ""
+    rating: int | None = None
+    feedback: str = ""
+    rated_at: datetime | None = None
     retention_expires_at: datetime = Field(
         default_factory=lambda: utcnow() + timedelta(days=SUPPORT_CONTENT_RETENTION_DAYS)
     )
@@ -132,6 +183,7 @@ class SupportQueueItem(BaseModel):
 
     id: str
     canonical_domain: str
+    primary_organization_unit_id: str | None = None
     status: TicketStatus
     priority: str
     created_at: datetime
@@ -157,6 +209,7 @@ class SupportStateEvent(BaseModel):
 class OfficerPresenceRecord(BaseModel):
     officer_user_id: str
     canonical_domains: tuple[str, ...]
+    organization_unit_ids: tuple[str, ...] = ()
     presence_status: str = "available"
     max_capacity: int = 3
     active_count: int = 0
@@ -195,15 +248,20 @@ class SupportMessageRecord(BaseModel):
 
 
 class SupportRepository(Protocol):
-    def create_ticket(self, actor: SupportActor, *, domain: str, question_summary: str, question_content: str | None = None, priority: str = "normal") -> SupportTicketRecord: ...
+    def create_ticket(self, actor: SupportActor, *, domain: str, question_summary: str, question_content: str | None = None, priority: str = "normal", primary_organization_unit_id: str | None = None) -> SupportTicketRecord: ...
     def get_ticket(self, ticket_id: str, actor: SupportActor, *, include_content: bool = True) -> SupportTicketRecord: ...
     def list_mine(self, actor: SupportActor) -> list[SupportTicketRecord]: ...
     def queue_for_officer(self, actor: SupportActor) -> list[SupportQueueItem]: ...
+    def assigned_to_officer(self, actor: SupportActor, *, statuses: Iterable[TicketStatus] | None = None) -> list[SupportTicketRecord]: ...
     def queue_position(self, ticket_id: str, actor: SupportActor) -> dict[str, Any]: ...
     def list_messages(self, ticket_id: str, actor: SupportActor) -> list[SupportMessageRecord]: ...
-    def admin_ticket_metadata(self, actor: SupportActor, *, status: str | None = None, domain: str | None = None) -> list[dict[str, Any]]: ...
-    def transition_ticket(self, ticket_id: str, to_status: TicketStatus, actor: SupportActor, *, expected_version: int, reason_code: str | None = None) -> SupportTicketRecord: ...
+    def admin_ticket_metadata(self, actor: SupportActor, *, status: str | None = None, domain: str | None = None, sla: str | None = None) -> list[dict[str, Any]]: ...
+    def transition_ticket(self, ticket_id: str, to_status: TicketStatus, actor: SupportActor, *, expected_version: int, reason_code: str | None = None, resolution_note: str | None = None) -> SupportTicketRecord: ...
+    def rate_ticket(self, ticket_id: str, actor: SupportActor, *, rating: int, feedback: str, expected_version: int) -> SupportTicketRecord: ...
     def set_presence(self, actor: SupportActor, *, domains: Iterable[str], max_capacity: int, now: datetime, lease_seconds: int) -> OfficerPresenceRecord: ...
+    def dispatch_ticket(self, ticket_id: str, actor: SupportActor, *, officer_user_id: str | None, expected_version: int, reason: str, officer_actor: SupportActor | None = None, target_unit_id: str | None = None, target_domain: str | None = None) -> SupportTicketRecord: ...
+    def update_priority(self, ticket_id: str, actor: SupportActor, *, priority: str, expected_version: int, reason: str) -> SupportTicketRecord: ...
+    def mark_admin_action(self, ticket_id: str, actor: SupportActor, *, action: str, expected_version: int, reason: str) -> SupportTicketRecord: ...
 
 
 def _validate_capacity(max_capacity: int, active_count: int = 0) -> None:
@@ -218,6 +276,64 @@ def _validate_transition(current: TicketStatus, target: TicketStatus) -> None:
         raise SupportStateError(f"invalid_support_transition:{current.value}->{target.value}")
 
 
+def officer_can_handle_scope(actor: SupportActor, *, domain: str, unit_id: str | None) -> bool:
+    """Legacy/shadow ignore unit hints, including tickets retained on rollback."""
+    if actor.organization_routing_mode in {"hybrid", "unit_primary"} and unit_id:
+        return (
+            unit_id in actor.organization_unit_ids
+            or (unit_id, domain) in actor.organization_unit_domain_grants
+        )
+    return domain in actor.domains
+
+
+def _actor_can_handle_ticket(ticket: SupportTicketRecord, actor: SupportActor) -> bool:
+    return officer_can_handle_scope(
+        actor, domain=ticket.canonical_domain, unit_id=ticket.primary_organization_unit_id,
+    )
+
+
+def _assignment_actor(
+    officer_user_id: str, domains: Iterable[str], unit_ids: Iterable[str],
+    actor: SupportActor | None,
+) -> SupportActor:
+    """Presence is availability, not a durable cross-unit authorization grant.
+
+    Domain-only allocator callers remain compatible. Unit-aware callers must
+    supply fresh authority so a heartbeat cannot outlive rollback/revocation.
+    """
+    if actor is None:
+        if tuple(unit_ids):
+            raise SupportAccessError("officer_current_scope_required")
+        return SupportActor(user_id=officer_user_id, role="officer", domains=tuple(domains))
+    if actor.role != "officer" or actor.user_id != officer_user_id:
+        raise SupportAccessError("officer_scope_identity_mismatch")
+    return actor
+
+
+# Keep SQL queue, worklist and allocation checks identical to the Python gate.
+_OFFICER_SCOPE_SQL = """
+    ((NOT :unit_routing AND canonical_domain = ANY(:domains))
+     OR (:unit_routing AND (
+         (primary_organization_unit_id IS NULL AND canonical_domain = ANY(:domains))
+         OR primary_organization_unit_id = ANY(:units)
+         OR EXISTS (
+             SELECT 1 FROM jsonb_array_elements(CAST(:unit_domain_grants AS JSONB)) AS scoped(value)
+             WHERE scoped.value->>0 = primary_organization_unit_id
+               AND scoped.value->>1 = canonical_domain
+         )
+     )))
+"""
+
+
+def _officer_scope_params(actor: SupportActor) -> dict[str, Any]:
+    return {
+        "unit_routing": actor.organization_routing_mode in {"hybrid", "unit_primary"},
+        "domains": list(actor.domains),
+        "units": list(actor.organization_unit_ids),
+        "unit_domain_grants": json.dumps(actor.organization_unit_domain_grants),
+    }
+
+
 def _assert_ticket_access(ticket: SupportTicketRecord, actor: SupportActor, *, include_content: bool) -> None:
     if actor.role == "citizen":
         if ticket.owner_user_id != actor.user_id:
@@ -226,7 +342,7 @@ def _assert_ticket_access(ticket: SupportTicketRecord, actor: SupportActor, *, i
     if actor.role == "officer":
         if ticket.assigned_officer_id != actor.user_id:
             raise SupportAccessError("support_ticket_assignment_required")
-        if ticket.canonical_domain not in actor.domains:
+        if not _actor_can_handle_ticket(ticket, actor):
             raise SupportAccessError("support_ticket_domain_required")
         return
     if actor.role == "admin":
@@ -241,13 +357,15 @@ def _assert_transition_actor(ticket: SupportTicketRecord, target: TicketStatus, 
     if actor.role == "system":
         return
     if actor.role == "citizen":
-        if ticket.owner_user_id != actor.user_id or target != TicketStatus.CANCELLED:
+        can_close = target == TicketStatus.CLOSED and ticket.status == TicketStatus.RESOLVED
+        if ticket.owner_user_id != actor.user_id or (target != TicketStatus.CANCELLED and not can_close):
             raise SupportAccessError("citizen_support_transition_not_allowed")
         return
     if actor.role == "officer":
-        if ticket.assigned_officer_id != actor.user_id or ticket.canonical_domain not in actor.domains:
+        if ticket.assigned_officer_id != actor.user_id or not _actor_can_handle_ticket(ticket, actor):
             raise SupportAccessError("officer_support_assignment_required")
-        if target not in {TicketStatus.ACTIVE, TicketStatus.WAITING_CITIZEN, TicketStatus.WAITING_OFFICER, TicketStatus.RESOLVED}:
+        can_close = target == TicketStatus.CLOSED and ticket.status == TicketStatus.RESOLVED
+        if target not in {TicketStatus.ACTIVE, TicketStatus.WAITING_CITIZEN, TicketStatus.WAITING_OFFICER, TicketStatus.RESOLVED} and not can_close:
             raise SupportAccessError("officer_support_transition_not_allowed")
         return
     if actor.role == "admin":
@@ -279,6 +397,7 @@ class InMemorySupportRepository:
         question_summary: str,
         question_content: str | None = None,
         priority: str = "normal",
+        primary_organization_unit_id: str | None = None,
     ) -> SupportTicketRecord:
         if actor.role != "citizen" or not actor.user_id:
             raise SupportAccessError("citizen_account_required")
@@ -290,6 +409,7 @@ class InMemorySupportRepository:
             id=uuid.uuid4().hex,
             owner_user_id=actor.user_id,
             canonical_domain=domain,
+            primary_organization_unit_id=primary_organization_unit_id,
             question_summary=question_summary.strip(),
             priority=priority,
             created_at=now,
@@ -343,19 +463,20 @@ class InMemorySupportRepository:
             ]
 
     def queue_for_officer(self, actor: SupportActor) -> list[SupportQueueItem]:
-        if actor.role != "officer" or not actor.domains:
+        if actor.role != "officer" or not (actor.domains or actor.organization_unit_ids or actor.organization_unit_domain_grants):
             raise SupportAccessError("officer_domain_required")
         priority_order = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
         with self._lock:
             tickets = [
                 ticket for ticket in self._tickets.values()
-                if ticket.status == TicketStatus.QUEUED and ticket.canonical_domain in actor.domains
+                if ticket.status == TicketStatus.QUEUED and _actor_can_handle_ticket(ticket, actor)
             ]
             tickets.sort(key=lambda value: (priority_order.get(value.priority, 2), self._queue_sequences[value.id]))
             return [
                 SupportQueueItem(
                     id=ticket.id,
                     canonical_domain=ticket.canonical_domain,
+                    primary_organization_unit_id=ticket.primary_organization_unit_id,
                     status=ticket.status,
                     priority=ticket.priority,
                     created_at=ticket.created_at,
@@ -363,6 +484,33 @@ class InMemorySupportRepository:
                 )
                 for ticket in tickets
             ]
+
+    def assigned_to_officer(
+        self,
+        actor: SupportActor,
+        *,
+        statuses: Iterable[TicketStatus] | None = None,
+    ) -> list[SupportTicketRecord]:
+        if actor.role != "officer" or not (actor.domains or actor.organization_unit_ids or actor.organization_unit_domain_grants):
+            raise SupportAccessError("officer_domain_required")
+        allowed = set(statuses or ())
+        attention_order = {
+            TicketStatus.WAITING_OFFICER: 0,
+            TicketStatus.ASSIGNED: 1,
+            TicketStatus.ACTIVE: 2,
+            TicketStatus.WAITING_CITIZEN: 3,
+            TicketStatus.RESOLVED: 4,
+            TicketStatus.CLOSED: 5,
+        }
+        with self._lock:
+            tickets = [
+                ticket for ticket in self._tickets.values()
+                if ticket.assigned_officer_id == actor.user_id
+                and _actor_can_handle_ticket(ticket, actor)
+                and (not allowed or ticket.status in allowed)
+            ]
+            tickets.sort(key=lambda value: (attention_order.get(value.status, 9), -value.updated_at.timestamp()))
+            return [ticket.model_copy(deep=True) for ticket in tickets]
 
     def queue_position(self, ticket_id: str, actor: SupportActor) -> dict[str, Any]:
         with self._lock:
@@ -398,6 +546,7 @@ class InMemorySupportRepository:
         *,
         status: str | None = None,
         domain: str | None = None,
+        sla: str | None = None,
     ) -> list[dict[str, Any]]:
         if actor.role != "admin":
             raise SupportAccessError("admin_role_required")
@@ -408,6 +557,9 @@ class InMemorySupportRepository:
                 if status and ticket.status.value != status:
                     continue
                 if domain and ticket.canonical_domain != domain:
+                    continue
+                projection = support_sla_projection(ticket, now=now)
+                if sla == "overdue" and not projection["sla_overdue"]:
                     continue
                 rows.append({
                     "id": ticket.id,
@@ -420,9 +572,18 @@ class InMemorySupportRepository:
                     "updated_at": ticket.updated_at.isoformat(),
                     "first_response_due_at": ticket.first_response_due_at.isoformat() if ticket.first_response_due_at else None,
                     "resolution_due_at": ticket.resolution_due_at.isoformat() if ticket.resolution_due_at else None,
-                    "overdue": bool(ticket.first_response_due_at and ticket.status == TicketStatus.QUEUED and ticket.first_response_due_at < now),
+                    "first_response_at": ticket.first_response_at.isoformat() if ticket.first_response_at else None,
+                    **projection,
+                    "overdue": projection["sla_overdue"],
                 })
-            return sorted(rows, key=lambda item: (not item["overdue"], item["created_at"]))
+            return sorted(
+                rows,
+                key=lambda item: (
+                    -int(item["overdue_minutes"]),
+                    -_PRIORITY_ORDER.get(str(item.get("priority") or "normal"), 0),
+                    item["created_at"],
+                ),
+            )
 
     def transition_ticket(
         self,
@@ -432,6 +593,7 @@ class InMemorySupportRepository:
         *,
         expected_version: int,
         reason_code: str | None = None,
+        resolution_note: str | None = None,
     ) -> SupportTicketRecord:
         with self._lock:
             ticket = self._tickets.get(ticket_id)
@@ -443,9 +605,170 @@ class InMemorySupportRepository:
             _assert_transition_actor(ticket, to_status, actor)
             previous = ticket.status
             now = utcnow()
-            updated = ticket.model_copy(update={"status": to_status, "version": ticket.version + 1, "updated_at": now})
+            releasing_assignment = (
+                to_status in _TERMINAL_TICKET_STATUSES
+                and ticket.status not in _TERMINAL_TICKET_STATUSES
+                and bool(ticket.assigned_officer_id)
+            )
+            update: dict[str, Any] = {
+                "status": to_status,
+                "version": ticket.version + 1,
+                "updated_at": now,
+            }
+            if to_status == TicketStatus.RESOLVED and ticket.resolved_at is None:
+                update["resolved_at"] = now
+            if to_status == TicketStatus.CLOSED and ticket.closed_at is None:
+                update["closed_at"] = now
+            if to_status == TicketStatus.CANCELLED and ticket.cancelled_at is None:
+                update["cancelled_at"] = now
+            if resolution_note is not None:
+                update["resolution_note"] = resolution_note.strip()
+            updated = ticket.model_copy(update=update)
             self._tickets[ticket_id] = updated
+            if releasing_assignment:
+                officer_id = str(ticket.assigned_officer_id)
+                presence = self._presence.get(officer_id)
+                if presence:
+                    next_count = max(0, presence.active_count - 1)
+                    self._presence[officer_id] = presence.model_copy(
+                        update={
+                            "active_count": next_count,
+                            "presence_status": "busy" if next_count >= presence.max_capacity else "available",
+                            "version": presence.version + 1,
+                        }
+                    )
+                for assignment_id, assignment in list(self._assignments.items()):
+                    if assignment.ticket_id == ticket_id and assignment.status in {AssignmentStatus.LEASED, AssignmentStatus.ACTIVE}:
+                        self._assignments[assignment_id] = assignment.model_copy(
+                            update={
+                                "status": AssignmentStatus.RELEASED,
+                                "released_at": now,
+                                "release_reason": "ticket_terminal",
+                            }
+                        )
             self._append_state_event(updated, previous, actor, reason_code, now)
+            return updated.model_copy(deep=True)
+
+    def rate_ticket(
+        self,
+        ticket_id: str,
+        actor: SupportActor,
+        *,
+        rating: int,
+        feedback: str,
+        expected_version: int,
+    ) -> SupportTicketRecord:
+        if actor.role != "citizen" or not 1 <= int(rating) <= 5:
+            raise SupportAccessError("citizen_rating_required")
+        with self._lock:
+            ticket = self._tickets.get(ticket_id)
+            if not ticket:
+                raise SupportNotFoundError("support_ticket_not_found")
+            if ticket.version != expected_version:
+                raise SupportConflictError("support_ticket_version_conflict")
+            if ticket.owner_user_id != actor.user_id:
+                raise SupportAccessError("support_ticket_owner_required")
+            if ticket.status != TicketStatus.CLOSED:
+                raise SupportStateError("support_ticket_rating_requires_closed")
+            now = utcnow()
+            updated = ticket.model_copy(
+                update={
+                    "rating": int(rating),
+                    "feedback": feedback.strip(),
+                    "rated_at": now,
+                    "version": ticket.version + 1,
+                    "updated_at": now,
+                }
+            )
+            self._tickets[ticket_id] = updated
+            return updated.model_copy(deep=True)
+
+    def dispatch_ticket(self, ticket_id: str, actor: SupportActor, *, officer_user_id: str | None, expected_version: int, reason: str, officer_actor: SupportActor | None = None, target_unit_id: str | None = None, target_domain: str | None = None) -> SupportTicketRecord:
+        if actor.role not in {"admin", "officer"} or len(reason.strip()) < 3:
+            raise SupportAccessError("admin_support_reason_required")
+        with self._lock:
+            ticket = self._tickets.get(ticket_id)
+            if not ticket:
+                raise SupportNotFoundError("support_ticket_not_found")
+            if ticket.version != expected_version:
+                raise SupportConflictError("support_ticket_version_conflict")
+            if ticket.status in {TicketStatus.RESOLVED, TicketStatus.CLOSED, TicketStatus.CANCELLED, TicketStatus.EXPIRED}:
+                raise SupportStateError("support_ticket_terminal")
+            if actor.role == "officer" and (officer_user_id or ticket.assigned_officer_id != actor.user_id or not _actor_can_handle_ticket(ticket, actor)):
+                raise SupportAccessError("support_transfer_forbidden")
+            before_unit, before_domain = ticket.primary_organization_unit_id, ticket.canonical_domain
+            ticket = ticket.model_copy(update={"primary_organization_unit_id": target_unit_id or before_unit, "canonical_domain": target_domain or before_domain})
+            now = utcnow()
+            previous_officer_id = ticket.assigned_officer_id
+            if officer_user_id:
+                presence = self._presence.get(officer_user_id)
+                presence_allowed = bool(presence and ticket.canonical_domain in presence.canonical_domains)
+                if presence_allowed:
+                    target_actor = _assignment_actor(
+                        officer_user_id, presence.canonical_domains, presence.organization_unit_ids, officer_actor,
+                    )
+                    presence_allowed = _actor_can_handle_ticket(ticket, target_actor)
+                if not presence_allowed:
+                    raise SupportAccessError("officer_domain_scope_violation")
+                same_assignment = previous_officer_id == officer_user_id and ticket.status in {TicketStatus.ASSIGNED, TicketStatus.ACTIVE}
+                if not same_assignment and (presence.lease_expires_at <= now or presence.active_count >= presence.max_capacity):
+                    raise SupportStateError("officer_capacity_or_presence_unavailable")
+                if not same_assignment:
+                    if previous_officer_id and previous_officer_id != officer_user_id and previous_officer_id in self._presence:
+                        old = self._presence[previous_officer_id]
+                        self._presence[previous_officer_id] = old.model_copy(update={"active_count": max(0, old.active_count - 1), "presence_status": "available", "version": old.version + 1})
+                    self._presence[officer_user_id] = presence.model_copy(update={"active_count": presence.active_count + 1, "presence_status": "busy" if presence.active_count + 1 >= presence.max_capacity else "available", "version": presence.version + 1})
+                # Direct dispatch already validates presence, capacity and
+                # current scope. Unlike claim-next it creates no lease for
+                # the officer to activate, so the chat must be usable now.
+                updated = ticket.model_copy(update={"assigned_officer_id": officer_user_id, "status": TicketStatus.ACTIVE, "assignment_generation": ticket.assignment_generation + 1, "version": ticket.version + 1, "updated_at": now})
+            else:
+                if previous_officer_id and previous_officer_id in self._presence:
+                    old = self._presence[previous_officer_id]
+                    self._presence[previous_officer_id] = old.model_copy(update={"active_count": max(0, old.active_count - 1), "presence_status": "available", "version": old.version + 1})
+                updated = ticket.model_copy(update={"assigned_officer_id": None, "status": TicketStatus.QUEUED, "assignment_generation": ticket.assignment_generation + 1, "version": ticket.version + 1, "updated_at": now})
+            self._tickets[ticket_id] = updated
+            for assignment_id, assignment in list(self._assignments.items()):
+                if assignment.ticket_id == ticket_id and assignment.status in {AssignmentStatus.LEASED, AssignmentStatus.ACTIVE}:
+                    self._assignments[assignment_id] = assignment.model_copy(update={"status": AssignmentStatus.RELEASED, "released_at": now, "release_reason": "dispatch_or_transfer"})
+            event_reason = json.dumps({"action": "dispatch_or_transfer", "reason": reason,
+                "organization_unit_before": before_unit, "organization_unit_after": updated.primary_organization_unit_id,
+                "domain_before": before_domain, "domain_after": updated.canonical_domain,
+                "officer_before": previous_officer_id, "officer_after": officer_user_id}, ensure_ascii=False)
+            self._append_state_event(updated, ticket.status, actor, event_reason, now)
+            return updated.model_copy(deep=True)
+
+    def update_priority(self, ticket_id: str, actor: SupportActor, *, priority: str, expected_version: int, reason: str) -> SupportTicketRecord:
+        if actor.role != "admin" or len(reason.strip()) < 3:
+            raise SupportAccessError("admin_support_reason_required")
+        if priority not in {"low", "normal", "high", "urgent"}:
+            raise SupportStateError("invalid_support_priority")
+        with self._lock:
+            ticket = self._tickets.get(ticket_id)
+            if not ticket:
+                raise SupportNotFoundError("support_ticket_not_found")
+            if ticket.version != expected_version:
+                raise SupportConflictError("support_ticket_version_conflict")
+            updated = ticket.model_copy(update={"priority": priority, "version": ticket.version + 1, "updated_at": utcnow()})
+            self._tickets[ticket_id] = updated
+            return updated.model_copy(deep=True)
+
+    def mark_admin_action(self, ticket_id: str, actor: SupportActor, *, action: str, expected_version: int, reason: str) -> SupportTicketRecord:
+        if actor.role != "admin" or len(reason.strip()) < 3:
+            raise SupportAccessError("admin_support_reason_required")
+        with self._lock:
+            ticket = self._tickets.get(ticket_id)
+            if not ticket:
+                raise SupportNotFoundError("support_ticket_not_found")
+            if ticket.version != expected_version:
+                raise SupportConflictError("support_ticket_version_conflict")
+            now = utcnow()
+            update: dict[str, Any] = {"version": ticket.version + 1, "updated_at": now}
+            if action == "remind": update["last_reminded_at"] = now
+            elif action == "escalate": update["escalated_at"] = now
+            else: raise SupportStateError("unknown_admin_support_action")
+            updated = ticket.model_copy(update=update)
+            self._tickets[ticket_id] = updated
             return updated.model_copy(deep=True)
 
     def _append_state_event(
@@ -514,6 +837,7 @@ class InMemorySupportRepository:
         record = OfficerPresenceRecord(
             officer_user_id=actor.user_id,
             canonical_domains=normalized_domains,
+            organization_unit_ids=actor.organization_unit_ids,
             presence_status="busy" if active_count >= max_capacity else "available",
             max_capacity=max_capacity,
             active_count=active_count,
@@ -552,6 +876,8 @@ class InMemorySupportRepository:
                 retention_expires_at=ticket.retention_expires_at,
             )
             messages.append(record)
+            if actor.role == "officer" and ticket.first_response_at is None:
+                self._tickets[ticket_id] = ticket.model_copy(update={"first_response_at": now, "updated_at": now, "version": ticket.version + 1})
             return record
 
     def list_messages(self, ticket_id: str, actor: SupportActor) -> list[SupportMessageRecord]:
@@ -568,6 +894,7 @@ class InMemorySupportRepository:
         *,
         now: datetime,
         lease_seconds: int,
+        officer_actor: SupportActor | None = None,
     ) -> tuple[SupportAssignmentRecord, str] | None:
         with self._lock:
             presence = self._presence.get(officer_user_id)
@@ -575,9 +902,13 @@ class InMemorySupportRepository:
                 return None
             if presence.active_count >= presence.max_capacity:
                 return None
-            queue = self.queue_for_officer(
-                SupportActor(user_id=officer_user_id, role="officer", domains=presence.canonical_domains)
+            actor = _assignment_actor(
+                officer_user_id, presence.canonical_domains, presence.organization_unit_ids, officer_actor,
             )
+            queue = [
+                item for item in self.queue_for_officer(actor)
+                if item.canonical_domain in presence.canonical_domains
+            ]
             if not queue:
                 return None
             ticket = self._tickets[queue[0].id]
@@ -623,6 +954,7 @@ class InMemorySupportRepository:
         *,
         now: datetime,
         expected_officer_user_id: str | None = None,
+        officer_actor: SupportActor | None = None,
     ) -> SupportAssignmentRecord:
         with self._lock:
             assignment = self._assignments.get(assignment_id)
@@ -638,6 +970,11 @@ class InMemorySupportRepository:
             ):
                 raise SupportAccessError("support_assignment_token_invalid")
             ticket = self._tickets[assignment.ticket_id]
+            if officer_actor is not None:
+                _assignment_actor(assignment.officer_user_id, (), (), officer_actor)
+                _assert_ticket_access(ticket, officer_actor, include_content=False)
+            elif ticket.primary_organization_unit_id:
+                raise SupportAccessError("officer_current_scope_required")
             updated_ticket = ticket.model_copy(update={
                 "status": TicketStatus.ACTIVE,
                 "version": ticket.version + 1,
@@ -751,6 +1088,7 @@ class JsonReadOnlySupportAdapter(InMemorySupportRepository):
                     id=str(raw.get("id") or path.stem),
                     owner_user_id=owner,
                     canonical_domain=domain,
+                    primary_organization_unit_id=raw.get("primary_organization_unit_id"),
                     question_summary=str(raw.get("ai_summary") or raw.get("question") or "Yêu cầu hỗ trợ"),
                     status=status,
                     priority=str(raw.get("priority") or "normal"),
@@ -779,9 +1117,10 @@ class JsonReadOnlySupportAdapter(InMemorySupportRepository):
 class PostgresSupportRepository:
     """PostgreSQL implementation for canonical support state."""
 
-    CLAIM_NEXT_SQL = """
+    CLAIM_NEXT_SQL = f"""
         SELECT id FROM support_ticket
-        WHERE status = 'queued' AND canonical_domain = ANY(:domains)
+        WHERE status = 'queued' AND {_OFFICER_SCOPE_SQL}
+          AND canonical_domain = ANY(:presence_domains)
         ORDER BY CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,
                  queue_sequence
         FOR UPDATE SKIP LOCKED
@@ -845,6 +1184,7 @@ class PostgresSupportRepository:
             id=str(data["id"]),
             owner_user_id=str(data["owner_user_id"]),
             canonical_domain=str(data["canonical_domain"]),
+            primary_organization_unit_id=data.get("primary_organization_unit_id"),
             question_summary=str(data["question_summary"]),
             status=TicketStatus(data["status"]),
             priority=str(data["priority"]),
@@ -855,10 +1195,20 @@ class PostgresSupportRepository:
             updated_at=_as_datetime(data.get("updated_at")),
             retention_expires_at=_as_datetime(data.get("retention_expires_at")),
             first_response_due_at=_as_datetime(data["first_response_due_at"]) if data.get("first_response_due_at") else None,
+            first_response_at=_as_datetime(data["first_response_at"]) if data.get("first_response_at") else None,
             resolution_due_at=_as_datetime(data["resolution_due_at"]) if data.get("resolution_due_at") else None,
+            resolved_at=_as_datetime(data["resolved_at"]) if data.get("resolved_at") else None,
+            closed_at=_as_datetime(data["closed_at"]) if data.get("closed_at") else None,
+            cancelled_at=_as_datetime(data["cancelled_at"]) if data.get("cancelled_at") else None,
+            escalated_at=_as_datetime(data["escalated_at"]) if data.get("escalated_at") else None,
+            last_reminded_at=_as_datetime(data["last_reminded_at"]) if data.get("last_reminded_at") else None,
+            resolution_note=str(data.get("resolution_note") or ""),
+            rating=int(data["rating"]) if data.get("rating") is not None else None,
+            feedback=str(data.get("feedback") or ""),
+            rated_at=_as_datetime(data["rated_at"]) if data.get("rated_at") else None,
         )
 
-    def create_ticket(self, actor: SupportActor, *, domain: str, question_summary: str, question_content: str | None = None, priority: str = "normal") -> SupportTicketRecord:
+    def create_ticket(self, actor: SupportActor, *, domain: str, question_summary: str, question_content: str | None = None, priority: str = "normal", primary_organization_unit_id: str | None = None) -> SupportTicketRecord:
         from sqlalchemy import text
 
         if actor.role != "citizen" or not actor.user_id:
@@ -869,6 +1219,7 @@ class PostgresSupportRepository:
             "id": uuid.uuid4().hex,
             "owner": actor.user_id,
             "domain": domain,
+            "unit": primary_organization_unit_id,
             "summary": question_summary.strip(),
             "priority": priority,
             "now": now,
@@ -879,10 +1230,11 @@ class PostgresSupportRepository:
         with self.engine.begin() as connection:
             row = connection.execute(text("""
                 INSERT INTO support_ticket
-                    (id, owner_user_id, canonical_domain, question_summary, status,
+                    (id, owner_user_id, canonical_domain, primary_organization_unit_id,
+                     question_summary, status,
                      priority, retention_expires_at, first_response_due_at,
                      resolution_due_at, created_at, updated_at)
-                VALUES (:id, :owner, :domain, :summary, 'queued', :priority, :retention,
+                VALUES (:id, :owner, :domain, :unit, :summary, 'queued', :priority, :retention,
                         :first_response_due, :resolution_due, :now, :now)
                 RETURNING *
             """), values).mappings().one()
@@ -935,17 +1287,55 @@ class PostgresSupportRepository:
     def queue_for_officer(self, actor: SupportActor) -> list[SupportQueueItem]:
         from sqlalchemy import text
 
-        if actor.role != "officer" or not actor.domains:
+        if actor.role != "officer" or not (actor.domains or actor.organization_unit_ids or actor.organization_unit_domain_grants):
             raise SupportAccessError("officer_domain_required")
         with self.engine.connect() as connection:
-            rows = connection.execute(text("""
-                SELECT id, canonical_domain, status, priority, created_at, queue_sequence
+            rows = connection.execute(text(f"""
+                SELECT id, canonical_domain, primary_organization_unit_id, status, priority, created_at, queue_sequence
                 FROM support_ticket
-                WHERE status = 'queued' AND canonical_domain = ANY(:domains)
+                WHERE status = 'queued' AND {_OFFICER_SCOPE_SQL}
                 ORDER BY CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,
                          queue_sequence
-            """), {"domains": list(actor.domains)}).mappings().all()
+            """), _officer_scope_params(actor)).mappings().all()
         return [SupportQueueItem(**dict(row)) for row in rows]
+
+    def assigned_to_officer(
+        self,
+        actor: SupportActor,
+        *,
+        statuses: Iterable[TicketStatus] | None = None,
+    ) -> list[SupportTicketRecord]:
+        from sqlalchemy import text
+
+        if actor.role != "officer" or not (actor.domains or actor.organization_unit_ids or actor.organization_unit_domain_grants):
+            raise SupportAccessError("officer_domain_required")
+        allowed = [item.value for item in (statuses or ())]
+        clauses = [
+            "assigned_officer_id = :officer",
+            _OFFICER_SCOPE_SQL,
+        ]
+        params: dict[str, Any] = {
+            "officer": actor.user_id,
+            **_officer_scope_params(actor),
+        }
+        if allowed:
+            clauses.append("status = ANY(:statuses)")
+            params["statuses"] = allowed
+        with self.engine.connect() as connection:
+            rows = connection.execute(text(f"""
+                SELECT * FROM support_ticket
+                WHERE {' AND '.join(clauses)}
+                ORDER BY CASE status
+                    WHEN 'waiting_officer' THEN 0
+                    WHEN 'assigned' THEN 1
+                    WHEN 'active' THEN 2
+                    WHEN 'waiting_citizen' THEN 3
+                    WHEN 'resolved' THEN 4
+                    WHEN 'closed' THEN 5
+                    ELSE 9 END,
+                    updated_at DESC
+            """), params).mappings().all()
+        return [self._ticket(row) for row in rows]
 
     def queue_position(self, ticket_id: str, actor: SupportActor) -> dict[str, Any]:
         from sqlalchemy import text
@@ -980,6 +1370,7 @@ class PostgresSupportRepository:
         *,
         status: str | None = None,
         domain: str | None = None,
+        sla: str | None = None,
     ) -> list[dict[str, Any]]:
         from sqlalchemy import text
 
@@ -994,29 +1385,61 @@ class PostgresSupportRepository:
             clauses.append("canonical_domain = :domain")
             params["domain"] = domain
         with self.engine.connect() as connection:
-            rows = connection.execute(text(f"""
-                SELECT id, canonical_domain, status, priority, assigned_officer_id,
-                       assignment_generation, created_at, updated_at,
-                       first_response_due_at, resolution_due_at,
-                       (status = 'queued' AND first_response_due_at < CURRENT_TIMESTAMP) AS overdue
-                FROM support_ticket WHERE {' AND '.join(clauses)}
-                ORDER BY overdue DESC, created_at
-                LIMIT 500
-            """), params).mappings().all()
-        return [
-            {
+            try:
+                rows = connection.execute(text(f"""
+                    SELECT id, owner_user_id, canonical_domain, primary_organization_unit_id,
+                           question_summary, status, priority, assigned_officer_id,
+                           assignment_generation, created_at, updated_at,
+                           first_response_due_at, first_response_at, resolution_due_at,
+                           escalated_at, last_reminded_at, version
+                    FROM support_ticket WHERE {' AND '.join(clauses)}
+                    ORDER BY created_at
+                    LIMIT 500
+                """), params).mappings().all()
+            except Exception:
+                # Migration 004 is additive and may not be present during
+                # rehearsal. Serve the old metadata projection with unknown
+                # SLA timestamps rather than fabricating an overdue state.
+                # PostgreSQL marks the transaction as failed after the first
+                # projection raises UndefinedColumn. Roll back the statement
+                # before issuing the compatible projection on the same
+                # connection.
+                connection.rollback()
+                rows = connection.execute(text(f"""
+                    SELECT id, owner_user_id, canonical_domain, primary_organization_unit_id,
+                           question_summary, status, priority, assigned_officer_id,
+                           assignment_generation, created_at, updated_at,
+                           first_response_due_at, resolution_due_at, version
+                    FROM support_ticket WHERE {' AND '.join(clauses)}
+                    ORDER BY created_at
+                    LIMIT 500
+                """), params).mappings().all()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            ticket = self._ticket(row)
+            projection = support_sla_projection(ticket)
+            if sla == "overdue" and not projection["sla_overdue"]:
+                continue
+            result.append({
                 **dict(row),
                 "id": str(row["id"]),
                 "created_at": _as_datetime(row["created_at"]).isoformat(),
                 "updated_at": _as_datetime(row["updated_at"]).isoformat(),
-                "first_response_due_at": _as_datetime(row["first_response_due_at"]).isoformat() if row["first_response_due_at"] else None,
-                "resolution_due_at": _as_datetime(row["resolution_due_at"]).isoformat() if row["resolution_due_at"] else None,
-                "overdue": bool(row["overdue"]),
-            }
-            for row in rows
-        ]
+                "first_response_due_at": _as_datetime(row.get("first_response_due_at")).isoformat() if row.get("first_response_due_at") else None,
+                "resolution_due_at": _as_datetime(row.get("resolution_due_at")).isoformat() if row.get("resolution_due_at") else None,
+                **projection,
+                "overdue": projection["sla_overdue"],
+            })
+        return sorted(
+            result,
+            key=lambda item: (
+                -int(item["overdue_minutes"]),
+                -_PRIORITY_ORDER.get(str(item.get("priority") or "normal"), 0),
+                item["created_at"],
+            ),
+        )
 
-    def transition_ticket(self, ticket_id: str, to_status: TicketStatus, actor: SupportActor, *, expected_version: int, reason_code: str | None = None) -> SupportTicketRecord:
+    def transition_ticket(self, ticket_id: str, to_status: TicketStatus, actor: SupportActor, *, expected_version: int, reason_code: str | None = None, resolution_note: str | None = None) -> SupportTicketRecord:
         from sqlalchemy import text
 
         with self.engine.begin() as connection:
@@ -1030,14 +1453,51 @@ class PostgresSupportRepository:
                 raise SupportConflictError("support_ticket_version_conflict")
             _validate_transition(ticket.status, to_status)
             _assert_transition_actor(ticket, to_status, actor)
+            releasing_assignment = (
+                to_status in _TERMINAL_TICKET_STATUSES
+                and ticket.status not in _TERMINAL_TICKET_STATUSES
+                and bool(ticket.assigned_officer_id)
+            )
             updated = connection.execute(text("""
                 UPDATE support_ticket SET status = :status, version = version + 1,
-                    updated_at = CURRENT_TIMESTAMP
+                    updated_at = CURRENT_TIMESTAMP,
+                    resolved_at = CASE WHEN :status = 'resolved' THEN COALESCE(resolved_at, CURRENT_TIMESTAMP) ELSE resolved_at END,
+                    closed_at = CASE WHEN :status = 'closed' THEN COALESCE(closed_at, CURRENT_TIMESTAMP) ELSE closed_at END,
+                    cancelled_at = CASE WHEN :status = 'cancelled' THEN COALESCE(cancelled_at, CURRENT_TIMESTAMP) ELSE cancelled_at END,
+                    resolution_note = COALESCE(CAST(:resolution_note AS TEXT), resolution_note)
                 WHERE id = :id AND version = :version
                 RETURNING *
-            """), {"status": to_status.value, "id": ticket_id, "version": expected_version}).mappings().first()
+            """), {
+                "status": to_status.value,
+                "resolution_note": resolution_note.strip() if resolution_note is not None else None,
+                "id": ticket_id,
+                "version": expected_version,
+            }).mappings().first()
             if not updated:
                 raise SupportConflictError("support_ticket_version_conflict")
+            if releasing_assignment:
+                # A presence slot represents an assigned live session. Terminal
+                # transitions must release that slot for the next ticket; the
+                # previous implementation only released on transfer/requeue,
+                # so repeated resolved tickets eventually exhausted capacity.
+                connection.execute(text("""
+                    UPDATE officer_presence
+                    SET active_count = GREATEST(active_count - 1, 0),
+                        presence_status = CASE
+                            WHEN lease_expires_at <= CURRENT_TIMESTAMP THEN 'offline'
+                            WHEN GREATEST(active_count - 1, 0) >= max_capacity THEN 'busy'
+                            ELSE 'available'
+                        END,
+                        version = version + 1,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE officer_user_id = :officer
+                """), {"officer": str(ticket.assigned_officer_id)})
+                connection.execute(text("""
+                    UPDATE support_assignment
+                    SET status = 'released', released_at = CURRENT_TIMESTAMP,
+                        release_reason = 'ticket_terminal'
+                    WHERE ticket_ref = :ticket AND status IN ('leased', 'active')
+                """), {"ticket": ticket_id})
             self._insert_state_event(
                 connection,
                 ticket_id=ticket_id,
@@ -1047,6 +1507,129 @@ class PostgresSupportRepository:
                 reason_code=reason_code or "manual_transition",
                 version=int(updated["version"]),
             )
+        return self._ticket(updated)
+
+    def rate_ticket(
+        self,
+        ticket_id: str,
+        actor: SupportActor,
+        *,
+        rating: int,
+        feedback: str,
+        expected_version: int,
+    ) -> SupportTicketRecord:
+        from sqlalchemy import text
+
+        if actor.role != "citizen" or not 1 <= int(rating) <= 5:
+            raise SupportAccessError("citizen_rating_required")
+        with self.engine.begin() as connection:
+            row = connection.execute(
+                text("SELECT * FROM support_ticket WHERE id = :id FOR UPDATE"),
+                {"id": ticket_id},
+            ).mappings().first()
+            if not row:
+                raise SupportNotFoundError("support_ticket_not_found")
+            ticket = self._ticket(row)
+            if ticket.version != expected_version:
+                raise SupportConflictError("support_ticket_version_conflict")
+            _assert_ticket_access(ticket, actor, include_content=False)
+            if ticket.status != TicketStatus.CLOSED:
+                raise SupportStateError("support_ticket_rating_requires_closed")
+            updated = connection.execute(text("""
+                UPDATE support_ticket
+                SET rating = :rating,
+                    feedback = :feedback,
+                    rated_at = CURRENT_TIMESTAMP,
+                    version = version + 1,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = :id AND version = :version
+                RETURNING *
+            """), {
+                "rating": int(rating),
+                "feedback": feedback.strip(),
+                "id": ticket_id,
+                "version": expected_version,
+            }).mappings().first()
+            if not updated:
+                raise SupportConflictError("support_ticket_version_conflict")
+        return self._ticket(updated)
+
+    def dispatch_ticket(self, ticket_id: str, actor: SupportActor, *, officer_user_id: str | None, expected_version: int, reason: str, officer_actor: SupportActor | None = None, target_unit_id: str | None = None, target_domain: str | None = None) -> SupportTicketRecord:
+        from sqlalchemy import text
+        if actor.role not in {"admin", "officer"} or len(reason.strip()) < 3:
+            raise SupportAccessError("admin_support_reason_required")
+        now = utcnow()
+        with self.engine.begin() as connection:
+            row = connection.execute(text("SELECT * FROM support_ticket WHERE id = :id FOR UPDATE"), {"id": ticket_id}).mappings().first()
+            if not row: raise SupportNotFoundError("support_ticket_not_found")
+            ticket = self._ticket(row)
+            if ticket.version != expected_version: raise SupportConflictError("support_ticket_version_conflict")
+            if ticket.status in {TicketStatus.RESOLVED, TicketStatus.CLOSED, TicketStatus.CANCELLED, TicketStatus.EXPIRED}: raise SupportStateError("support_ticket_terminal")
+            if actor.role == "officer" and (officer_user_id or ticket.assigned_officer_id != actor.user_id or not _actor_can_handle_ticket(ticket, actor)):
+                raise SupportAccessError("support_transfer_forbidden")
+            before_unit, before_domain = ticket.primary_organization_unit_id, ticket.canonical_domain
+            ticket = ticket.model_copy(update={"primary_organization_unit_id": target_unit_id or before_unit, "canonical_domain": target_domain or before_domain})
+            previous_officer_id = ticket.assigned_officer_id
+            if officer_user_id:
+                presence = connection.execute(text("SELECT * FROM officer_presence WHERE officer_user_id = :officer FOR UPDATE"), {"officer": officer_user_id}).mappings().first()
+                presence_allowed = bool(presence and ticket.canonical_domain in presence["canonical_domains"])
+                if presence_allowed:
+                    target_actor = _assignment_actor(
+                        officer_user_id, presence["canonical_domains"],
+                        presence.get("organization_unit_ids") or (), officer_actor,
+                    )
+                    presence_allowed = _actor_can_handle_ticket(ticket, target_actor)
+                if not presence_allowed: raise SupportAccessError("officer_domain_scope_violation")
+                same_assignment = previous_officer_id == officer_user_id and ticket.status in {TicketStatus.ASSIGNED, TicketStatus.ACTIVE}
+                if not same_assignment and (_as_datetime(presence["lease_expires_at"]) <= now or int(presence["active_count"]) >= int(presence["max_capacity"])): raise SupportStateError("officer_capacity_or_presence_unavailable")
+                updated = connection.execute(text("""
+                    UPDATE support_ticket SET status='active', assigned_officer_id=:officer,
+                      primary_organization_unit_id=:unit, canonical_domain=:domain,
+                      assignment_generation=assignment_generation+1, version=version+1, updated_at=:now
+                    WHERE id=:id AND version=:version RETURNING *
+                """), {"id": ticket_id, "version": expected_version, "officer": officer_user_id, "now": now, "unit": ticket.primary_organization_unit_id, "domain": ticket.canonical_domain}).mappings().first()
+                if not same_assignment:
+                    if previous_officer_id and previous_officer_id != officer_user_id:
+                        connection.execute(text("UPDATE officer_presence SET active_count=GREATEST(active_count-1, 0), version=version+1 WHERE officer_user_id=:officer"), {"officer": previous_officer_id})
+                    connection.execute(text("UPDATE officer_presence SET active_count=active_count+1, version=version+1 WHERE officer_user_id=:officer"), {"officer": officer_user_id})
+            else:
+                updated = connection.execute(text("""
+                    UPDATE support_ticket SET status='queued', assigned_officer_id=NULL,
+                      primary_organization_unit_id=:unit, canonical_domain=:domain, assignment_generation=assignment_generation+1,
+                      version=version+1, updated_at=:now
+                    WHERE id=:id AND version=:version RETURNING *
+                """), {"id": ticket_id, "version": expected_version, "now": now, "unit": ticket.primary_organization_unit_id, "domain": ticket.canonical_domain}).mappings().first()
+                if previous_officer_id:
+                    connection.execute(text("UPDATE officer_presence SET active_count=GREATEST(active_count-1, 0), version=version+1 WHERE officer_user_id=:officer"), {"officer": previous_officer_id})
+            if not updated: raise SupportConflictError("support_ticket_version_conflict")
+            connection.execute(text("UPDATE support_assignment SET status='released', released_at=:now, release_reason='dispatch_or_transfer' WHERE ticket_ref=:ticket AND status IN ('leased','active')"), {"ticket": ticket_id, "now": now})
+            event_reason = json.dumps({"action": "dispatch_or_transfer", "reason": reason,
+                "organization_unit_before": before_unit, "organization_unit_after": ticket.primary_organization_unit_id,
+                "domain_before": before_domain, "domain_after": ticket.canonical_domain,
+                "officer_before": previous_officer_id, "officer_after": officer_user_id}, ensure_ascii=False)
+            self._insert_state_event(connection, ticket_id=ticket_id, actor=actor, from_status=ticket.status, to_status=TicketStatus(str(updated["status"])), reason_code=event_reason, version=int(updated["version"]))
+        return self._ticket(updated)
+
+    def update_priority(self, ticket_id: str, actor: SupportActor, *, priority: str, expected_version: int, reason: str) -> SupportTicketRecord:
+        from sqlalchemy import text
+        if actor.role != "admin" or len(reason.strip()) < 3: raise SupportAccessError("admin_support_reason_required")
+        if priority not in {"low", "normal", "high", "urgent"}: raise SupportStateError("invalid_support_priority")
+        with self.engine.begin() as connection:
+            updated = connection.execute(text("UPDATE support_ticket SET priority=:priority, version=version+1, updated_at=CURRENT_TIMESTAMP WHERE id=:id AND version=:version RETURNING *"), {"priority": priority, "id": ticket_id, "version": expected_version}).mappings().first()
+            if not updated:
+                exists = connection.execute(text("SELECT id FROM support_ticket WHERE id=:id"), {"id": ticket_id}).first()
+                raise SupportNotFoundError("support_ticket_not_found") if not exists else SupportConflictError("support_ticket_version_conflict")
+        return self._ticket(updated)
+
+    def mark_admin_action(self, ticket_id: str, actor: SupportActor, *, action: str, expected_version: int, reason: str) -> SupportTicketRecord:
+        from sqlalchemy import text
+        if actor.role != "admin" or len(reason.strip()) < 3: raise SupportAccessError("admin_support_reason_required")
+        column = {"remind": "last_reminded_at", "escalate": "escalated_at"}.get(action)
+        if not column: raise SupportStateError("unknown_admin_support_action")
+        with self.engine.begin() as connection:
+            updated = connection.execute(text(f"UPDATE support_ticket SET {column}=CURRENT_TIMESTAMP, version=version+1, updated_at=CURRENT_TIMESTAMP WHERE id=:id AND version=:version RETURNING *"), {"id": ticket_id, "version": expected_version}).mappings().first()
+            if not updated:
+                raise SupportConflictError("support_ticket_version_conflict")
         return self._ticket(updated)
 
     def set_presence(self, actor: SupportActor, *, domains: Iterable[str], max_capacity: int, now: datetime, lease_seconds: int) -> OfficerPresenceRecord:
@@ -1061,11 +1644,14 @@ class PostgresSupportRepository:
         with self.engine.begin() as connection:
             row = connection.execute(text("""
                 INSERT INTO officer_presence
-                    (officer_user_id, canonical_domains, presence_status, max_capacity,
+                    (officer_user_id, canonical_domains, organization_unit_ids,
+                     presence_status, max_capacity,
                      active_count, heartbeat_at, lease_expires_at, version)
-                VALUES (:officer, CAST(:domains AS JSONB), 'available', :capacity, 0, :now, :expires, 1)
+                VALUES (:officer, CAST(:domains AS JSONB), CAST(:units AS JSONB),
+                        'available', :capacity, 0, :now, :expires, 1)
                 ON CONFLICT (officer_user_id) DO UPDATE SET
                     canonical_domains = EXCLUDED.canonical_domains,
+                    organization_unit_ids = EXCLUDED.organization_unit_ids,
                     max_capacity = EXCLUDED.max_capacity,
                     heartbeat_at = EXCLUDED.heartbeat_at,
                     lease_expires_at = EXCLUDED.lease_expires_at,
@@ -1074,7 +1660,10 @@ class PostgresSupportRepository:
                 WHERE officer_presence.active_count <= EXCLUDED.max_capacity
                 RETURNING *
             """), {
-                "officer": actor.user_id, "domains": json.dumps(normalized), "capacity": max_capacity,
+                "officer": actor.user_id,
+                "domains": json.dumps(normalized),
+                "units": json.dumps(actor.organization_unit_ids),
+                "capacity": max_capacity,
                 "now": now, "expires": now + timedelta(seconds=lease_seconds),
             }).mappings().first()
         if not row:
@@ -1082,6 +1671,7 @@ class PostgresSupportRepository:
         return OfficerPresenceRecord(
             officer_user_id=str(row["officer_user_id"]),
             canonical_domains=tuple(row["canonical_domains"]),
+            organization_unit_ids=tuple(row.get("organization_unit_ids") or ()),
             presence_status=str(row["presence_status"]),
             max_capacity=int(row["max_capacity"]),
             active_count=int(row["active_count"]),
@@ -1102,6 +1692,7 @@ class PostgresSupportRepository:
         return OfficerPresenceRecord(
             officer_user_id=str(row["officer_user_id"]),
             canonical_domains=tuple(row["canonical_domains"]),
+            organization_unit_ids=tuple(row.get("organization_unit_ids") or ()),
             presence_status=str(row["presence_status"]),
             max_capacity=int(row["max_capacity"]),
             active_count=int(row["active_count"]),
@@ -1147,6 +1738,12 @@ class PostgresSupportRepository:
                 "now": now,
                 "retention": ticket.retention_expires_at,
             })
+            if actor.role == "officer" and ticket.first_response_at is None:
+                connection.execute(text("""
+                    UPDATE support_ticket
+                    SET first_response_at = :now, updated_at = :now, version = version + 1
+                    WHERE id = :ticket AND first_response_at IS NULL
+                """), {"ticket": ticket_id, "now": now})
         return SupportMessageRecord(
             id=message_id,
             ticket_id=ticket_id,
@@ -1183,7 +1780,7 @@ class PostgresSupportRepository:
             for row in rows
         ]
 
-    def claim_next_atomic(self, officer_user_id: str, *, now: datetime, lease_seconds: int) -> tuple[SupportAssignmentRecord, str] | None:
+    def claim_next_atomic(self, officer_user_id: str, *, now: datetime, lease_seconds: int, officer_actor: SupportActor | None = None) -> tuple[SupportAssignmentRecord, str] | None:
         from sqlalchemy import text
 
         with self.engine.begin() as connection:
@@ -1195,7 +1792,12 @@ class PostgresSupportRepository:
             if int(presence_row["active_count"]) >= int(presence_row["max_capacity"]):
                 return None
             domains = list(presence_row["canonical_domains"])
-            ticket_row = connection.execute(text(self.CLAIM_NEXT_SQL), {"domains": domains}).mappings().first()
+            units = list(presence_row.get("organization_unit_ids") or ())
+            actor = _assignment_actor(officer_user_id, domains, units, officer_actor)
+            ticket_row = connection.execute(
+                text(self.CLAIM_NEXT_SQL),
+                {**_officer_scope_params(actor), "presence_domains": domains},
+            ).mappings().first()
             if not ticket_row:
                 return None
             ticket_id = str(ticket_row["id"])
@@ -1253,6 +1855,7 @@ class PostgresSupportRepository:
         *,
         now: datetime,
         expected_officer_user_id: str | None = None,
+        officer_actor: SupportActor | None = None,
     ) -> SupportAssignmentRecord:
         from sqlalchemy import text
 
@@ -1274,6 +1877,11 @@ class PostgresSupportRepository:
             """), {"id": assignment["ticket_ref"]}).mappings().one()
             if int(ticket["assignment_generation"]) != int(assignment["generation"]):
                 raise SupportConflictError("support_assignment_generation_conflict")
+            if officer_actor is not None:
+                _assignment_actor(str(assignment["officer_user_id"]), (), (), officer_actor)
+                _assert_ticket_access(self._ticket(ticket), officer_actor, include_content=False)
+            elif ticket.get("primary_organization_unit_id"):
+                raise SupportAccessError("officer_current_scope_required")
             updated_assignment = connection.execute(text("""
                 UPDATE support_assignment SET status = 'active', activated_at = :now
                 WHERE id = :id AND status = 'leased' RETURNING *

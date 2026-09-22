@@ -103,7 +103,6 @@ export const itIT = {
     searchTerms: "Termini di ricerca",
     strategy: "Strategia",
     individualAnswers: "Risposte individuali ({count})",
-    finalAnswer: "Risposta finale",
     notebookLabel: "Quaderno: {name}",
     itemNotFound: "Questo {type} non è stato trovato",
     accessibility: {
@@ -818,7 +817,6 @@ export const itIT = {
   },
   models: {
     embedding: "Modelli di embedding",
-    tts: "Text to Speech (TTS)",
     stt: "Speech to Text (STT)",
     apiKey: "Chiave API",
     deleteSuccess: "Modello eliminato con successo",
@@ -844,8 +842,6 @@ export const itIT = {
     largeContextModelDesc: "Usato per elaborare documenti grandi - Gemini consigliato",
     embeddingModelLabel: "Modello di embedding",
     embeddingModelDesc: "Usato per ricerca semantica e embedding vettoriali",
-    ttsModelLabel: "Modello Text-to-Speech",
-    ttsModelDesc: "Usato per la generazione podcast",
     sttModelLabel: "Modello Speech-to-Text",
     sttModelDesc: "Usato per la trascrizione audio",
     embeddingChangeTitle: "Cambio modello di embedding",

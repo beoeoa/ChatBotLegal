@@ -1,0 +1,5 @@
+REMOVE FIELD guidance ON TABLE ward_procedure;
+REMOVE FIELD submission_place ON TABLE ward_procedure;
+REMOVE FIELD legal_basis ON TABLE ward_procedure;
+REMOVE FIELD catalog_status ON TABLE ward_procedure;
+REMOVE FIELD archived ON TABLE ward_procedure;

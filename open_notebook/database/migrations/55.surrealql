@@ -1,0 +1,4 @@
+-- Document-batch lookup needs its own index. Some deployed SurrealDB versions
+-- incorrectly answer IN on only the first column of a compound UNIQUE index.
+-- Retain the composite uniqueness constraint; this index is additive only.
+DEFINE INDEX IF NOT EXISTS idx_document_organization_unit_document ON TABLE document_organization_unit COLUMNS document_id;

@@ -6,24 +6,19 @@ import {
   type AskSseHandlers,
 } from './ask-sse'
 import { sessionSecurityHeaders } from './session-security'
+import { useAuthStore } from '@/lib/stores/auth-store'
 
-const ASK_TIMEOUT_MS = 600_000
+// The browser deadline must be longer than the server's complete Direct RAG
+// budget. Otherwise the UI can abort a valid SSE response while retrieval or
+// generation is still inside its server-side deadline.
+const configuredAskTimeout = Number(process.env.NEXT_PUBLIC_ASK_TIMEOUT_MS)
+const ASK_TIMEOUT_MS = Number.isFinite(configuredAskTimeout)
+  ? Math.min(120_000, Math.max(60_000, configuredAskTimeout))
+  : 120_000
 
 function askAuthHeaders(): Record<string, string> {
-  let token: string | null = null
-  let currentRole = 'citizen'
-  if (typeof window !== 'undefined') {
-    const authStorage = localStorage.getItem('auth-storage')
-    if (authStorage) {
-      try {
-        const { state } = JSON.parse(authStorage)
-        token = typeof state?.token === 'string' ? state.token : null
-        currentRole = typeof state?.role === 'string' ? state.role : 'citizen'
-      } catch {
-        // Invalid local storage must not expose its content or block the request.
-      }
-    }
-  }
+  const { token, role } = useAuthStore.getState()
+  const currentRole = role || 'citizen'
   return {
     'Content-Type': 'application/json',
     Accept: 'text/event-stream',
@@ -54,22 +49,8 @@ export const searchApi = {
     const timeout = window.setTimeout(() => controller.abort(), ASK_TIMEOUT_MS)
 
     // Get auth token using the same logic as apiClient interceptor
-    let token = null
-    let currentRole = 'citizen'
-    if (typeof window !== 'undefined') {
-      const authStorage = localStorage.getItem('auth-storage')
-      if (authStorage) {
-        try {
-          const { state } = JSON.parse(authStorage)
-          if (state?.token) {
-            token = state.token
-          }
-          currentRole = state?.role || 'citizen'
-        } catch (error) {
-          console.error('Error parsing auth storage:', error)
-        }
-      }
-    }
+    const { token, role } = useAuthStore.getState()
+    const currentRole = role || 'citizen'
 
     // Use relative URL to leverage Next.js rewrites
     // This works both in dev (Next.js proxy) and production (Docker network)
@@ -235,12 +216,20 @@ export const searchApi = {
    * Audio/video are intentionally not supported here.
    */
   extractTextFromFile: async (file: File): Promise<{
+    file_id?: string | null
+    job_id?: string | null
     extracted_text: string
-    source_type: 'text' | 'docx' | 'pdf' | 'image' | 'unknown'
+    source_type: 'text' | 'doc' | 'docx' | 'pdf' | 'xls' | 'xlsx' | 'image' | 'unknown'
     filename: string
     char_count: number
     mime_type: string
     max_file_mb: number
+    sha256?: string
+    extraction_status?: 'processing' | 'complete' | 'partial' | 'error'
+    extraction_cached?: boolean
+    extractor?: string | null
+    extractor_version?: string | null
+    warnings?: string[]
   }> => {
     const formData = new FormData()
     formData.append('file', file)
@@ -248,6 +237,20 @@ export const searchApi = {
       headers: { 'Content-Type': 'multipart/form-data' },
       timeout: 60_000,
     })
+    return response.data
+  },
+
+  getExtractionJob: async (jobId: string): Promise<{
+    job_id: string
+    file_id: string
+    sha256: string
+    extraction_status: 'processing' | 'complete' | 'partial' | 'error'
+    extracted_text?: string
+    char_count?: number
+    error?: string | null
+    warnings?: string[]
+  }> => {
+    const response = await apiClient.get(`/media/extraction-jobs/${jobId}`)
     return response.data
   },
 }

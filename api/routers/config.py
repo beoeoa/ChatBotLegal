@@ -1,5 +1,4 @@
 import asyncio
-import os
 import time
 import tomllib
 from pathlib import Path
@@ -7,6 +6,8 @@ from typing import Optional
 
 from fastapi import APIRouter, Request
 from loguru import logger
+
+from open_notebook.domain.content_settings import ContentSettings
 
 from open_notebook.database.repository import repo_query
 from open_notebook.utils.version_utils import (
@@ -26,6 +27,7 @@ _version_cache: dict = {
 
 # Cache TTL in seconds (24 hours)
 VERSION_CACHE_TTL = 24 * 60 * 60
+_version_refresh_task: asyncio.Task | None = None
 
 
 def get_version() -> str:
@@ -66,8 +68,9 @@ async def get_latest_version_cached(current_version: str) -> tuple[Optional[str]
         logger.info("Checking for latest version from GitHub...")
 
         # Fetch latest version from GitHub with 10-second timeout
-        latest_version = await get_version_from_github_async(
-            "https://github.com/lfnovo/open-notebook", "main"
+        latest_version = await asyncio.wait_for(
+            get_version_from_github_async("https://github.com/lfnovo/open-notebook", "main"),
+            timeout=10.0,
         )
 
         logger.info(
@@ -99,6 +102,27 @@ async def get_latest_version_cached(current_version: str) -> tuple[Optional[str]
         return None, False
 
 
+def schedule_version_refresh(current_version: str) -> None:
+    """Single-flight refresh; optional update checks never gate app startup."""
+    global _version_refresh_task
+    if _version_cache["timestamp"] > 0 and time.time() - _version_cache["timestamp"] < VERSION_CACHE_TTL:
+        return
+    if _version_refresh_task is None or _version_refresh_task.done():
+        _version_refresh_task = asyncio.create_task(get_latest_version_cached(current_version))
+
+
+async def get_public_branding() -> tuple[str, str]:
+    system_name = "Pháp luật Hải Phòng"
+    organization_name = ""
+    try:
+        settings = await asyncio.wait_for(ContentSettings.get_instance(), timeout=2.0)
+        system_name = str(getattr(settings, "system_name", "") or system_name).strip() or system_name
+        organization_name = str(getattr(settings, "organization_name", "") or "").strip()
+    except Exception as exc:
+        logger.warning("Could not load public system branding: {}", exc)
+    return system_name, organization_name
+
+
 async def check_database_health() -> dict:
     """
     Check if database is reachable using a lightweight query.
@@ -121,6 +145,7 @@ async def check_database_health() -> dict:
 
 
 @router.get("/config")
+@router.get("/config/public")
 async def get_config(request: Request):
     """
     Get frontend configuration.
@@ -129,24 +154,19 @@ async def get_config(request: Request):
     Note: The frontend determines the API URL via its own runtime-config endpoint,
     so this endpoint no longer returns apiUrl.
 
-    Also checks for version updates from GitHub (with caching and error handling).
+    Version updates refresh in the background; only local data gates this response.
     """
     # Get current version
     current_version = get_version()
 
-    # Check for updates (with caching and error handling)
-    # This MUST NOT break the endpoint - wrapped in try-except as extra safety
-    latest_version = None
-    has_update = False
+    schedule_version_refresh(current_version)
+    latest_version = _version_cache["latest_version"]
+    has_update = _version_cache["has_update"]
 
-    try:
-        latest_version, has_update = await get_latest_version_cached(current_version)
-    except Exception as e:
-        # Extra safety: ensure version check never breaks the config endpoint
-        logger.error(f"Unexpected error during version check: {e}")
-
-    # Check database health
-    db_health = await check_database_health()
+    # Independent local reads should not form a serial startup waterfall.
+    db_health, (system_name, organization_name) = await asyncio.gather(
+        check_database_health(), get_public_branding()
+    )
     db_status = db_health["status"]
 
     if db_status == "offline":
@@ -157,4 +177,6 @@ async def get_config(request: Request):
         "latestVersion": latest_version,
         "hasUpdate": has_update,
         "dbStatus": db_status,
+        "systemName": system_name,
+        "organizationName": organization_name,
     }

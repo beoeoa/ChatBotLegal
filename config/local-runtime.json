@@ -1,0 +1,14 @@
+{
+    "schema_version":  1,
+    "surreal_container":  "chatbotlegal-surreal-test",
+    "surreal_volume":  "chatbotlegal-portable-check_surreal_data",
+    "surreal_mount":  "/mydata",
+    "surreal_storage":  "rocksdb:/mydata/database.db",
+    "surreal_namespace":  "open_notebook",
+    "surreal_database":  "open_notebook",
+    "postgres_service":  "postgresql-x64-18",
+    "frontend_dist":  ".next-local-live-20260922",
+    "backend_port":  5055,
+    "retrieval_port":  8766,
+    "management_port":  8765
+}

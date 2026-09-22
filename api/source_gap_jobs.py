@@ -7,20 +7,22 @@ indexes, embeds, or changes the active retrieval collection.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+import asyncio
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import shutil
+import zipfile
+from datetime import date, datetime, timezone
+from io import BytesIO
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlparse
-import zipfile
-from io import BytesIO
 
 import httpx
 
+from api.crawlers.crawl4ai_fetcher import fetch_rendered
 from api.official_http import build_verified_ssl_context
 from scripts.crawl_canonical_forms import (
     _extract_links,
@@ -29,7 +31,6 @@ from scripts.crawl_canonical_forms import (
     is_allowed_official_url,
     validate_download,
 )
-
 
 GAP_TYPES = {"MISSING_FORM_SOURCE", "MISSING_LEGAL_SOURCE"}
 TERMINAL_STATUSES = {
@@ -721,6 +722,28 @@ def _blocked_response(response: httpx.Response) -> bool:
     )
 
 
+def _crawl4ai_source_page(url: str) -> dict[str, Any]:
+    """Render an HTML source page through Crawl4AI for the sync gap worker."""
+
+    rendered = asyncio.run(
+        fetch_rendered(
+            url,
+            timeout_ms=20000,
+            wait_until="networkidle",
+            check_robots_txt=True,
+        )
+    )
+    html = str(rendered.get("html") or "")
+    return {
+        "status": rendered.get("status"),
+        "status_code": int(rendered.get("status_code") or 0),
+        "url": str(rendered.get("final_url") or url),
+        "html": html,
+        "text": str(rendered.get("rendered_text") or html),
+        "reason": str(rendered.get("reason") or ""),
+    }
+
+
 def _candidate_with_provenance(
     *,
     job: Mapping[str, Any],
@@ -856,51 +879,85 @@ def process_source_gap_job(
                     "status": "blocked_external",
                     "reason_code": "SOURCE_HOST_NOT_ALLOWED",
                 }
-            try:
-                page = active_client.get(source_page)
-            except httpx.HTTPError:
-                last_reason = "NETWORK_ERROR_RETRYABLE"
-                continue
-            if _blocked_response(page):
-                return {
-                    **current,
-                    "status": "blocked_external",
-                    "reason_code": "CAPTCHA_OR_AUTH_REQUIRED",
-                }
-            if page.status_code == 429 or page.status_code >= 500:
-                last_reason = f"HTTP_{page.status_code}_RETRYABLE"
-                continue
-            if page.status_code >= 400:
-                last_reason = f"HTTP_{page.status_code}"
-                continue
-            direct_suffix = Path(urlparse(str(page.url)).path).suffix.casefold()
-            direct_mime = str(page.headers.get("content-type") or "").casefold()
-            direct_file_mime = any(
-                marker in direct_mime
-                for marker in (
-                    "application/pdf",
-                    "application/msword",
-                    "application/vnd.ms-",
-                    "application/vnd.openxmlformats-officedocument",
-                )
-            )
-            if direct_suffix in {".pdf", ".doc", ".docx", ".xls", ".xlsx"} or direct_file_mime:
-                candidate, reason = _candidate_with_provenance(
-                    job=current,
-                    source_page=source_page,
-                    response=page,
-                    candidate_dir=candidate_dir,
-                )
-                if candidate is not None:
+            direct_seed = Path(urlparse(source_page).path).suffix.casefold() in {
+                ".pdf", ".doc", ".docx", ".xls", ".xlsx"
+            }
+            if client is None and not direct_seed:
+                try:
+                    rendered_page = _crawl4ai_source_page(source_page)
+                except Exception:
+                    last_reason = "NETWORK_ERROR_RETRYABLE"
+                    continue
+                page_status = int(rendered_page.get("status_code") or 0)
+                page_url = str(rendered_page.get("url") or source_page)
+                page_html = str(rendered_page.get("html") or "")
+                page_text = str(rendered_page.get("text") or page_html)
+                folded = page_text[:20000].casefold()
+                if page_status in {401, 403} or any(
+                    marker in folded
+                    for marker in ("captcha", "access denied", "dang nhap", "đăng nhập")
+                ):
                     return {
                         **current,
-                        "status": "downloaded_candidate",
-                        "reason_code": reason,
-                        "candidate": candidate,
+                        "status": "blocked_external",
+                        "reason_code": "CAPTCHA_OR_AUTH_REQUIRED",
                     }
-                last_reason = reason
-                continue
-            links = _extract_links(page.text, str(page.url))
+                if page_status == 429 or page_status >= 500:
+                    last_reason = f"HTTP_{page_status}_RETRYABLE"
+                    continue
+                if page_status >= 400 or rendered_page.get("status") != "ok":
+                    last_reason = f"HTTP_{page_status}" if page_status else "NETWORK_ERROR_RETRYABLE"
+                    continue
+                if not page_html:
+                    last_reason = "OFFICIAL_PAGE_HAS_NO_FILE_LINK"
+                    continue
+                links = _extract_links(page_html, page_url)
+            else:
+                try:
+                    page = active_client.get(source_page)
+                except httpx.HTTPError:
+                    last_reason = "NETWORK_ERROR_RETRYABLE"
+                    continue
+                if _blocked_response(page):
+                    return {
+                        **current,
+                        "status": "blocked_external",
+                        "reason_code": "CAPTCHA_OR_AUTH_REQUIRED",
+                    }
+                if page.status_code == 429 or page.status_code >= 500:
+                    last_reason = f"HTTP_{page.status_code}_RETRYABLE"
+                    continue
+                if page.status_code >= 400:
+                    last_reason = f"HTTP_{page.status_code}"
+                    continue
+                direct_suffix = Path(urlparse(str(page.url)).path).suffix.casefold()
+                direct_mime = str(page.headers.get("content-type") or "").casefold()
+                direct_file_mime = any(
+                    marker in direct_mime
+                    for marker in (
+                        "application/pdf",
+                        "application/msword",
+                        "application/vnd.ms-",
+                        "application/vnd.openxmlformats-officedocument",
+                    )
+                )
+                if direct_suffix in {".pdf", ".doc", ".docx", ".xls", ".xlsx"} or direct_file_mime:
+                    candidate, reason = _candidate_with_provenance(
+                        job=current,
+                        source_page=source_page,
+                        response=page,
+                        candidate_dir=candidate_dir,
+                    )
+                    if candidate is not None:
+                        return {
+                            **current,
+                            "status": "downloaded_candidate",
+                            "reason_code": reason,
+                            "candidate": candidate,
+                        }
+                    last_reason = reason
+                    continue
+                links = _extract_links(page.text, str(page.url))
             if not links:
                 last_reason = "OFFICIAL_PAGE_HAS_NO_FILE_LINK"
                 continue

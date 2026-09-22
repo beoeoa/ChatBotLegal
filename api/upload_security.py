@@ -48,7 +48,7 @@ class ValidatedUpload:
 
 
 DOCUMENT_UPLOAD_POLICY = UploadPolicy(
-    frozenset({".pdf", ".doc", ".docx", ".xls", ".xlsx", ".rtf", ".txt", ".md", ".zip"}),
+    frozenset({".pdf", ".doc", ".docx", ".xls", ".xlsx", ".rtf", ".txt", ".md", ".json", ".zip", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}),
     max_bytes=25 * 1024 * 1024,
 )
 SUPPORT_ATTACHMENT_POLICY = UploadPolicy(
@@ -61,7 +61,7 @@ SOURCE_ASSET_POLICY = UploadPolicy(
             ".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx",
             ".txt", ".md", ".epub", ".mp4", ".avi", ".mov", ".wmv",
             ".mp3", ".wav", ".m4a", ".aac", ".jpg", ".jpeg", ".png",
-            ".tiff", ".zip", ".tar", ".gz", ".html", ".csv",
+            ".tiff", ".tif", ".webp", ".bmp", ".zip", ".tar", ".gz", ".html", ".csv",
         }
     ),
     max_bytes=250 * 1024 * 1024,
@@ -139,7 +139,18 @@ def _detect_type(extension: str, content: bytes, policy: UploadPolicy) -> str:
         if not (content.startswith(b"\xff\xd8\xff") and content.rstrip().endswith(b"\xff\xd9")):
             raise UploadSecurityError("content_type_mismatch", "Nội dung JPEG không hợp lệ.", status_code=415)
         return "image/jpeg"
-    if extension in {".txt", ".md"}:
+    if extension in {".webp", ".bmp", ".tif", ".tiff"}:
+        from PIL import Image
+        try:
+            with Image.open(BytesIO(content)) as image:
+                expected = {'.webp': 'WEBP', '.bmp': 'BMP', '.tif': 'TIFF', '.tiff': 'TIFF'}[extension]
+                if image.format != expected:
+                    raise ValueError('format mismatch')
+                image.verify()
+        except Exception as exc:
+            raise UploadSecurityError('content_type_mismatch', 'Nội dung ảnh không hợp lệ.', status_code=415) from exc
+        return {'.webp': 'image/webp', '.bmp': 'image/bmp', '.tif': 'image/tiff', '.tiff': 'image/tiff'}[extension]
+    if extension in {".txt", ".md", ".json"}:
         if b"\x00" in content:
             raise UploadSecurityError("binary_text_payload", "Tệp văn bản chứa dữ liệu nhị phân.", status_code=415)
         try:

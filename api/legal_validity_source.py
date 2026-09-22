@@ -177,6 +177,7 @@ class VBPLValiditySource:
         as_of: date,
         expected_issuing_agency: str | None = None,
         expected_issued_date: str | None = None,
+        expected_title: str | None = None,
     ) -> ValidityFetchResult:
         expected = normalize_law_number(instrument)
         if expected is None:
@@ -199,6 +200,42 @@ class VBPLValiditySource:
             if isinstance(item, Mapping)
             and normalize_law_number(_value(item, "docNum", "soKyHieu", "lawNumber")) == expected
         ]
+        if len(matches) > 1 and expected_title:
+            # VBPL may return an English mirror or different instruments sharing
+            # the same local/assembly number. Use the governance title only to
+            # disambiguate identity; never to manufacture metadata.
+            non_translation = [
+                item for item in matches
+                if not str(_value(item, "id", "documentId") or "").casefold().startswith("vbpqta_")
+            ]
+            if len(non_translation) == 1:
+                matches = non_translation
+            else:
+                stop = {
+                    "luat", "bo", "nghi", "quyet", "dinh", "thong", "tu", "so",
+                    "quy", "dinh", "ve", "cua", "va", "mot", "cac", "nam",
+                }
+                expected_tokens = {
+                    token for token in re.findall(r"[a-z0-9]+", _fold(expected_title))
+                    if len(token) > 1 and token not in stop
+                }
+                ranked: list[tuple[float, Mapping[str, Any]]] = []
+                for item in matches:
+                    title_tokens = {
+                        token for token in re.findall(
+                            r"[a-z0-9]+", _fold(_value(item, "title", "name", "subject") or "")
+                        ) if len(token) > 1 and token not in stop
+                    }
+                    score = (
+                        len(expected_tokens & title_tokens) / len(expected_tokens)
+                        if expected_tokens else 0.0
+                    )
+                    ranked.append((score, item))
+                ranked.sort(key=lambda pair: pair[0], reverse=True)
+                if ranked and ranked[0][0] >= 0.5 and (
+                    len(ranked) == 1 or ranked[0][0] - ranked[1][0] >= 0.2
+                ):
+                    matches = [ranked[0][1]]
         if len(matches) != 1:
             identity = IdentityStatus.MISSING if not matches else IdentityStatus.AMBIGUOUS
             code = (
@@ -321,6 +358,7 @@ class VBPLValiditySource:
         as_of: date,
         expected_issuing_agency: str | None = None,
         expected_issued_date: str | None = None,
+        expected_title: str | None = None,
     ) -> ValidityFetchResult:
         observed_at = datetime.now(timezone.utc)
         payload = [{"keyword": instrument, "pageNumber": 0, "pageSize": self.page_size}]
@@ -358,6 +396,7 @@ class VBPLValiditySource:
                 document_id=document_id,
                 expected_issuing_agency=expected_issuing_agency,
                 expected_issued_date=expected_issued_date,
+                expected_title=expected_title,
                 observed_at=observed_at,
                 as_of=as_of,
             )

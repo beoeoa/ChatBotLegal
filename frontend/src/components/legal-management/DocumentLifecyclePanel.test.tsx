@@ -50,8 +50,8 @@ describe('DocumentLifecyclePanel', () => {
     render(<DocumentLifecyclePanel documentId="doc-1" isAdmin />)
 
     expect(await screen.findByText('Bị thay thế')).toBeInTheDocument()
-    expect(screen.getByText('1 dependency đang chờ rà soát')).toBeInTheDocument()
-    expect(screen.getByText('missing')).toBeInTheDocument()
+    expect(screen.getByText('1 nội dung liên quan đang chờ rà soát')).toBeInTheDocument()
+    expect(screen.getByText('Thiếu dữ liệu tra cứu')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Xem trước tái lập chỉ mục' }))
 
     await waitFor(() => {
@@ -59,6 +59,6 @@ describe('DocumentLifecyclePanel', () => {
         document_id: 'doc-1', provisions: ['Điều 1'],
       })
     })
-    expect(await screen.findByText(/Preview tăng dần đã tạo/)).toBeInTheDocument()
+    expect(await screen.findByText(/Đã xác định phần dữ liệu cần cập nhật/)).toBeInTheDocument()
   })
 })

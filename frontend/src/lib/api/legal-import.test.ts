@@ -47,6 +47,7 @@ describe('legalImportApi form-resolution contract', () => {
     expect(fetchMock).toHaveBeenCalledWith('http://localhost:5055/ready/import', {
       cache: 'no-store',
       credentials: 'include',
+      signal: expect.any(AbortSignal),
     })
     expect(result.status).toBe('ready')
   })
@@ -68,6 +69,7 @@ describe('legalImportApi form-resolution contract', () => {
     expect(fetchMock).toHaveBeenCalledWith('/api/ready/import', {
       cache: 'no-store',
       credentials: 'include',
+      signal: expect.any(AbortSignal),
     })
   })
 

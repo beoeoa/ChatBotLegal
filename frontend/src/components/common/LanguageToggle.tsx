@@ -9,12 +9,14 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { Languages } from 'lucide-react'
 import { useTranslation } from '@/lib/hooks/use-translation'
+import { cn } from '@/lib/utils'
 
 interface LanguageToggleProps {
   iconOnly?: boolean
+  className?: string
 }
 
-export function LanguageToggle({ iconOnly = false }: LanguageToggleProps) {
+export function LanguageToggle({ iconOnly = false, className }: LanguageToggleProps) {
   const { language, setLanguage, t } = useTranslation()
   
   // Keep the actual language code for proper comparison
@@ -23,14 +25,19 @@ export function LanguageToggle({ iconOnly = false }: LanguageToggleProps) {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button 
-          variant={iconOnly ? "ghost" : "outline"} 
+        <Button
+          variant={iconOnly ? "ghost" : "ghost"}
           size={iconOnly ? "icon" : "default"} 
-          className={iconOnly ? "h-9 w-full sidebar-menu-item" : "w-full justify-start gap-2 sidebar-menu-item"}
+          className={cn(
+            iconOnly
+              ? "h-9 w-full sidebar-menu-item"
+              : "w-full justify-start gap-2 rounded-none border-0 bg-transparent text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground sidebar-menu-item",
+            className,
+          )}
+          aria-label={t('navigation.language')}
         >
-          <Languages className="h-[1.2rem] w-[1.2rem]" />
+          <Languages aria-hidden="true" className="h-[1.2rem] w-[1.2rem]" />
           {!iconOnly && <span>{t('common.language')}</span>}
-          <span className="sr-only">{t('navigation.language')}</span>
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">

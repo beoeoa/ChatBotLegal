@@ -1,6 +1,6 @@
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from loguru import logger
 
 from api.models import (
@@ -463,6 +463,73 @@ async def add_source_to_notebook(notebook_id: str, source_id: str, request: Requ
         raise HTTPException(
             status_code=500, detail=f"Error linking source to notebook: {str(e)}"
         )
+
+
+def _legal_document_text(value: object) -> str:
+    """Collect actual legal content without manufacturing a metadata summary."""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        return "\n\n".join(filter(None, (_legal_document_text(item) for item in value)))
+    if isinstance(value, dict):
+        preferred = []
+        for key in ("full_text", "content", "text", "articles", "chunks"):
+            if key in value:
+                preferred.append(_legal_document_text(value[key]))
+        return "\n\n".join(filter(None, preferred))
+    return ""
+
+
+@router.post("/notebooks/{notebook_id}/legal-documents/{legal_document_id}")
+async def add_legal_document_to_notebook(
+    notebook_id: str,
+    legal_document_id: str,
+    request: Request,
+):
+    """Idempotently link a real legal document record into one notebook."""
+    await _assert_notebook_access(notebook_id, request, action="write")
+    from api.routers.legal_search import get_legal_document
+
+    document = await get_legal_document(
+        legal_document_id,
+        Response(),
+        request,
+        article=None,
+        include_content=True,
+        law_number=None,
+    )
+    canonical_id = str(document.get("doc_id") or document.get("document_id") or "").strip()
+    if not canonical_id or canonical_id != str(legal_document_id).strip():
+        raise HTTPException(status_code=409, detail="Định danh văn bản không khớp dữ liệu kho.")
+    existing = await repo_query(
+        "SELECT * FROM source WHERE legal_document_id = $document_id LIMIT 1;",
+        {"document_id": canonical_id},
+    )
+    if existing:
+        source = Source(**existing[0])
+    else:
+        content = _legal_document_text(document)
+        if not content:
+            raise HTTPException(status_code=422, detail="Văn bản chưa có nội dung thực tế để thêm vào hồ sơ.")
+        source = Source(
+            title=str(document.get("document_title") or document.get("title") or canonical_id),
+            topics=[str(document.get("domain") or document.get("domain_name") or "phap_luat")],
+            full_text=content,
+            legal_document_id=canonical_id,
+            asset={"url": document.get("source_url")} if document.get("source_url") else None,
+        )
+        await source.save()
+        await repo_query(
+            "UPDATE $source_id SET source_scope = 'legal-corpus', review_status = 'active';",
+            {"source_id": ensure_record_id(source.id)},
+        )
+    await add_source_to_notebook(notebook_id, str(source.id), request)
+    return {
+        "id": str(source.id),
+        "legal_document_id": canonical_id,
+        "title": source.title,
+        "message": "Đã liên kết văn bản pháp luật vào hồ sơ.",
+    }
 
 
 @router.delete("/notebooks/{notebook_id}/sources/{source_id}")

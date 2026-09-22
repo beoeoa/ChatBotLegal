@@ -31,13 +31,13 @@ describe('AdminSupportPage', () => {
     } })
   })
 
-  it('shows SLA metadata but gates private content behind a reason and audit request', async () => {
+  it('shows response deadlines but protects private content behind a recorded reason', async () => {
     render(<AdminSupportPage />)
-    expect(await screen.findByText('Quá SLA phản hồi')).toBeInTheDocument()
+    expect(await screen.findByText('Quá hạn phản hồi')).toBeInTheDocument()
     expect(screen.queryByText('Nội dung chỉ hiện sau audit')).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: /Mở nội dung có kiểm soát/ }))
-    const open = screen.getByRole('button', { name: 'Ghi audit và mở nội dung' })
+    const open = screen.getByRole('button', { name: 'Ghi lịch sử và mở nội dung' })
     expect(open).toBeDisabled()
     fireEvent.change(screen.getByLabelText('Lý do truy cập'), { target: { value: 'Kiểm tra khiếu nại SLA 123' } })
     expect(open).toBeEnabled()

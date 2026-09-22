@@ -20,8 +20,8 @@ export function useSources(notebookId?: string) {
     queryKey: QUERY_KEYS.sources(notebookId),
     queryFn: () => sourcesApi.list({ notebook_id: notebookId }),
     enabled: !!notebookId,
-    staleTime: 5 * 1000, // 5 seconds - more responsive for real-time source updates
-    refetchOnWindowFocus: true, // Refetch when user comes back to the tab
+    staleTime: 30 * 1000,
+    refetchOnWindowFocus: false,
   })
 }
 
@@ -50,8 +50,8 @@ export function useNotebookSources(notebookId: string) {
     initialPageParam: 0,
     getNextPageParam: (lastPage) => lastPage.nextOffset,
     enabled: !!notebookId,
-    staleTime: 5 * 1000,
-    refetchOnWindowFocus: true,
+    staleTime: 30 * 1000,
+    refetchOnWindowFocus: false,
   })
 
   // Flatten all pages into a single array (memoized to prevent infinite re-renders)
@@ -81,8 +81,8 @@ export function useSource(id: string) {
     queryKey: QUERY_KEYS.source(id),
     queryFn: () => sourcesApi.get(id),
     enabled: !!id,
-    staleTime: 30 * 1000, // 30 seconds - shorter stale time for more responsive updates
-    refetchOnWindowFocus: true, // Refetch when user comes back to the tab
+    staleTime: 30 * 1000,
+    refetchOnWindowFocus: false,
   })
 }
 

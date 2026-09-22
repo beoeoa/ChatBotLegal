@@ -19,6 +19,8 @@ DEFAULT_AUTH_LIMITS: dict[str, tuple[int, int]] = {
     "/api/auth/register": (5, 60 * 60),
     "/api/auth/forgot-password": (5, 60 * 60),
     "/api/auth/reset-password": (5, 60 * 60),
+    "/api/auth/firebase/session": (10, 15 * 60),
+    "/api/auth/firebase/link": (10, 15 * 60),
     "/api/auth/totp/setup": (5, 15 * 60),
     "/api/auth/totp/confirm": (10, 15 * 60),
 }

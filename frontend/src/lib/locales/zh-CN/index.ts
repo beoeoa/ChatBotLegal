@@ -103,7 +103,6 @@ export const zhCN = {
     searchTerms: "搜索词",
     strategy: "策略",
     individualAnswers: "独立回答 ({count})",
-    finalAnswer: "最终回答",
     notebookLabel: "笔记本: {name}",
     itemNotFound: "未找到该 {type}",
     accessibility: {
@@ -818,7 +817,6 @@ export const zhCN = {
   },
   models: {
     embedding: "嵌入模型",
-    tts: "文字转语音",
     stt: "语音转文字",
     apiKey: "API 密钥",
     deleteSuccess: "模型删除成功",
@@ -844,8 +842,6 @@ export const zhCN = {
     largeContextModelDesc: "用于处理大文档 - 推荐 Gemini",
     embeddingModelLabel: "嵌入模型",
     embeddingModelDesc: "用于语义搜索和向量嵌入",
-    ttsModelLabel: "文字转语音模型",
-    ttsModelDesc: "用于生成播客",
     sttModelLabel: "语音转文字模型",
     sttModelDesc: "用于音频转录",
     embeddingChangeTitle: "嵌入模型变更",

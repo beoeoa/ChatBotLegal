@@ -1,0 +1,2 @@
+-- Non-destructive rollback. Legacy mode ignores this projection while keeping
+-- assignment evidence available for audit and a later retry.

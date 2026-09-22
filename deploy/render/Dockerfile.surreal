@@ -1,0 +1,10 @@
+FROM surrealdb/surrealdb:v2.6.5
+
+# The database is new for this deployment. Its only durable path is the
+# dedicated Render disk; the root user can initialize an empty mount.
+USER root
+ENV SURREAL_USER=root \
+    SURREAL_PATH=rocksdb:/mydata/mydatabase.db \
+    SURREAL_BIND=0.0.0.0:8000
+EXPOSE 8000
+CMD ["start", "--log", "info"]

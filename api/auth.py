@@ -184,7 +184,10 @@ class PasswordAuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         passwords = configured_role_passwords()
-        real_users_exist = await has_real_users()
+        # A configured shared password is already sufficient to decide that
+        # authentication must stay enabled. Avoid a SurrealDB round trip on
+        # every request; real session tokens are still resolved below.
+        real_users_exist = False if passwords else await has_real_users()
 
         # Skip authentication if no password is set
         if not passwords and not real_users_exist:
@@ -248,6 +251,36 @@ class PasswordAuthMiddleware(BaseHTTPMiddleware):
             )
 
         requested_role = normalize_role(request.headers.get(ROLE_HEADER))
+
+        # Local compatibility passwords are deterministic credentials, not
+        # database session tokens. Resolve them before probing the session
+        # store so the first page load does not wait for two unnecessary DB
+        # queries. Production continues to require the normal session path.
+        if not production:
+            legacy_roles = allowed_roles_for_password(credentials)
+            if legacy_roles:
+                if not is_role_allowed(legacy_roles, requested_role):
+                    return JSONResponse(
+                        status_code=403,
+                        content={
+                            "detail": f"Role '{requested_role}' is not allowed for this password"
+                        },
+                    )
+                if (
+                    path_requires_admin(request.url.path, request.method)
+                    and requested_role != "admin"
+                ):
+                    return JSONResponse(
+                        status_code=403,
+                        content={"detail": "Admin role required"},
+                    )
+                request.state.user_role = requested_role
+                request.state.user_id = None
+                request.state.username = None
+                request.state.user_email = None
+                request.state.auth_mode = "legacy_password"
+                request.state.authenticated = True
+                return await call_next(request)
 
         session_auth = await get_user_from_session_token(credentials)
         if session_auth:
@@ -350,7 +383,7 @@ async def check_api_password(
     Raises 401 if credentials are missing or don't match the configured password.
     """
     passwords = configured_role_passwords()
-    real_users_exist = await has_real_users()
+    real_users_exist = False if passwords else await has_real_users()
     production = production_mode_enabled()
 
     # No password configured - skip authentication

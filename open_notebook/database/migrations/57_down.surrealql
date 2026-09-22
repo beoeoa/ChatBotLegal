@@ -1,0 +1,14 @@
+REMOVE FIELD IF EXISTS timing_summary ON TABLE conversation_message;
+REMOVE FIELD IF EXISTS answer_status ON TABLE conversation_message;
+REMOVE FIELD IF EXISTS fallback_tier ON TABLE conversation_message;
+REMOVE FIELD IF EXISTS outcome ON TABLE conversation_message;
+REMOVE FIELD IF EXISTS reason_code ON TABLE conversation_message;
+REMOVE FIELD IF EXISTS retryable ON TABLE conversation_message;
+REMOVE FIELD IF EXISTS scope ON TABLE conversation_message;
+REMOVE FIELD IF EXISTS persistence_degraded ON TABLE conversation_message;
+REMOVE FIELD IF EXISTS release_id ON TABLE conversation_message;
+REMOVE FIELD IF EXISTS manifest_hash ON TABLE conversation_message;
+REMOVE FIELD IF EXISTS canonical_domain ON TABLE conversation_message;
+REMOVE FIELD IF EXISTS evidence_count ON TABLE conversation_message;
+REMOVE FIELD IF EXISTS coverage_warning ON TABLE conversation_message;
+REMOVE FIELD IF EXISTS blocked_reason ON TABLE conversation_message;

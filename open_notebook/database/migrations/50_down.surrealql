@@ -1,0 +1,4 @@
+REMOVE FIELD IF EXISTS failed_document_id ON TABLE legal_crawl_candidate;
+REMOVE FIELD IF EXISTS failed_import_result ON TABLE legal_crawl_candidate;
+REMOVE FIELD IF EXISTS reconciliation ON TABLE legal_crawl_candidate;
+REMOVE FIELD IF EXISTS reconciliation ON TABLE legal_import_job;

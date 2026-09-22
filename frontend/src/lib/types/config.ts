@@ -8,6 +8,8 @@ export interface BackendConfigResponse {
   latestVersion?: string | null
   hasUpdate?: boolean
   dbStatus?: "online" | "offline"
+  systemName?: string
+  organizationName?: string
 }
 
 /**
@@ -23,6 +25,8 @@ export interface AppConfig {
   latestVersion?: string | null
   hasUpdate?: boolean
   dbStatus?: "online" | "offline"
+  systemName?: string
+  organizationName?: string
 }
 
 /**

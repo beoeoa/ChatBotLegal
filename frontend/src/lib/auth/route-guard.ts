@@ -3,8 +3,11 @@ import { ADMIN_LANDING_PATH, allowedPathsForRole } from '@/lib/navigation/capabi
 
 const EXTRA_ALLOWED_PATHS: Partial<Record<UserRole, string[]>> = {
   citizen: ['/legal-docs', '/legal-documents'],
-  officer: ['/legal-docs', '/legal-documents'],
-  admin: ['/legal-docs', '/legal-documents'],
+  // `/sources` is the established URL used by the current sidebar while
+  // `/legal-library` is the canonical navigation URL. Both render the same
+  // read-only public catalog and must share the same role boundary.
+  officer: ['/legal-docs', '/legal-documents', '/sources'],
+  admin: ['/legal-docs', '/legal-documents', '/sources'],
 }
 
 type RouteGuardInput = {

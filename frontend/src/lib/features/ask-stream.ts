@@ -10,7 +10,7 @@ export type AskProgressStage =
 const STAGE_LABELS: Record<AskProgressStage, string> = {
   preparing: 'Đang chuẩn bị gửi câu hỏi',
   accepted: 'Hệ thống đã tiếp nhận câu hỏi',
-  retrieval: 'Đang tìm nguồn pháp luật phù hợp',
+  retrieval: 'Đang tìm văn bản',
   generation: 'Đang soạn câu trả lời',
   validation: 'Đang kiểm tra căn cứ pháp lý',
   finalizing: 'Đang hoàn thiện câu trả lời',
@@ -20,7 +20,7 @@ const STAGE_LABELS: Record<AskProgressStage, string> = {
 export function isAskSseEnabled(
   value: string | undefined = process.env.NEXT_PUBLIC_ASK_SSE_ENABLED,
 ): boolean {
-  return value?.trim().toLowerCase() === 'true'
+  return value === undefined || value.trim().toLowerCase() === 'true'
 }
 
 export function askStageLabel(stage: string): string {

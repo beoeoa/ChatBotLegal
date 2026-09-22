@@ -1,0 +1,13 @@
+-- Roll back only the additive import-pipeline projection fields.
+REMOVE FIELD IF EXISTS pipeline_stage ON TABLE legal_crawl_candidate;
+REMOVE FIELD IF EXISTS preparation_status ON TABLE legal_crawl_candidate;
+REMOVE FIELD IF EXISTS blockers ON TABLE legal_crawl_candidate;
+REMOVE FIELD IF EXISTS document_id ON TABLE legal_crawl_candidate;
+REMOVE FIELD IF EXISTS chunk_count ON TABLE legal_crawl_candidate;
+REMOVE FIELD IF EXISTS indexed_at ON TABLE legal_crawl_candidate;
+REMOVE FIELD IF EXISTS vector_collection ON TABLE legal_crawl_candidate;
+REMOVE FIELD IF EXISTS chatbot_ready ON TABLE legal_crawl_candidate;
+
+REMOVE FIELD IF EXISTS pipeline_stage ON TABLE legal_import_job;
+REMOVE FIELD IF EXISTS indexed_at ON TABLE legal_import_job;
+REMOVE FIELD IF EXISTS vector_collection ON TABLE legal_import_job;

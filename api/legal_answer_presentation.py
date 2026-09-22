@@ -18,12 +18,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 PRESENTATION_VERSION = "legal-answer-v1"
 
 AnswerStatus = Literal[
-    "grounded",
-    "partial_grounded",
-    "broad_grounded",
-    "clarifying",
-    "source_gap",
-    "provider_error",
+    "verified",
+    "partial",
+    "cannot_verify",
 ]
 AnswerRoute = Literal[
     "exact_article",
@@ -46,6 +43,7 @@ class LegalAnswerPresentationSections(BaseModel):
     legal_bases: list[dict[str, Any]] = Field(default_factory=list)
     caveats: list[str] = Field(default_factory=list)
     clarifying_questions: list[str] = Field(default_factory=list)
+    unverified_explanations: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class LegalAnswerPresentationV1(BaseModel):
@@ -147,6 +145,17 @@ def _answer_route(payload: Mapping[str, Any]) -> AnswerRoute:
     if payload.get("procedure_detail") or payload.get("recommended_forms"):
         return "procedure_form"
     return "general_legal"
+
+
+def _answer_status(payload: Mapping[str, Any], evidence_count: int) -> AnswerStatus:
+    candidate = _text(payload.get("answer_status"))
+    if candidate in {"verified", "partial", "cannot_verify"}:
+        return candidate  # type: ignore[return-value]
+    if candidate in {"grounded", "broad_grounded"}:
+        return "verified" if evidence_count > 0 else "cannot_verify"
+    if candidate == "partial_grounded":
+        return "partial" if evidence_count > 0 else "cannot_verify"
+    return "cannot_verify"
 
 
 def _procedure(payload: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -257,6 +266,7 @@ def project_legal_answer_presentation(payload: Any) -> LegalAnswerPresentationV1
         legal_bases = section_citations
     legal_bases = _deduplicate_structured(legal_bases)
     recommended_forms = _structured_list(source.get("recommended_forms"))
+    unverified_explanations = _structured_list(source.get("unverified_explanations"))
 
     explicit_evidence_count = source.get("evidence_count")
     evidence_count = (
@@ -265,6 +275,7 @@ def project_legal_answer_presentation(payload: Any) -> LegalAnswerPresentationV1
         else len(legal_bases)
     )
     route = _answer_route(source)
+    answer_status = _answer_status(source, evidence_count)
     legal_as_of = _date(source.get("legal_as_of"))
     historical_label = None
     if route == "historical" and legal_as_of is not None:
@@ -274,7 +285,7 @@ def project_legal_answer_presentation(payload: Any) -> LegalAnswerPresentationV1
         _append_text(caveats, historical_label)
 
     return LegalAnswerPresentationV1(
-        answer_status=source.get("answer_status") or "source_gap",
+        answer_status=answer_status,
         answer_route=route,
         legal_as_of=legal_as_of,
         pipeline_version=_text(_trace_value(source, "pipeline_version")),
@@ -283,7 +294,9 @@ def project_legal_answer_presentation(payload: Any) -> LegalAnswerPresentationV1
         validity_snapshot=_text(_trace_value(source, "validity_snapshot")),
         evidence_count=evidence_count,
         verification_label=(
-            "Đã xác minh từ nguồn pháp lý" if evidence_count > 0 else None
+            "Đã xác minh từ nguồn pháp lý"
+            if answer_status == "verified" and evidence_count > 0
+            else None
         ),
         historical_label=historical_label,
         sections=LegalAnswerPresentationSections(
@@ -295,5 +308,6 @@ def project_legal_answer_presentation(payload: Any) -> LegalAnswerPresentationV1
             legal_bases=legal_bases,
             caveats=caveats,
             clarifying_questions=clarifying_questions,
+            unverified_explanations=unverified_explanations,
         ),
     )

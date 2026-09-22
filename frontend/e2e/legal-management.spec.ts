@@ -98,10 +98,11 @@ test.beforeEach(async ({ page }, testInfo) => {
 
 test('admin can inspect metadata and explicit unavailable states without mutations', async ({ page }) => {
   await page.goto('/legal-management')
-  await expect(page.getByRole('heading', { name: /Quản lý kho văn bản/i })).toBeVisible()
+  await expect(page.getByRole('heading', { name: /Kho văn bản pháp luật/i })).toBeVisible()
   await expect(page.getByText('01/2026/QD-TEST')).toBeVisible()
-  await expect(page.getByText(/Kho vector ch.a ph.n h.i/i)).toBeVisible()
-  await expect(page.getByText(/Ch.a c. li.n k.t FAQ/i)).toBeVisible()
+  await page.getByText('Tình trạng kho tra cứu', { exact: true }).click()
+  await expect(page.getByText('Không thể đọc dữ liệu tại thời điểm này.', { exact: true })).toBeVisible()
+  await expect(page.getByText('Tìm chính xác số, ký hiệu: Chưa sẵn sàng')).toBeVisible()
   await expect(page.locator('main').getByRole('button', { name: /^(Xóa|Lưu|Cập nhật|Nhập văn bản)$/i })).toHaveCount(0)
 
   await expect(page.getByRole('link', { name: /Quyet dinh thu nghiem/i })).toHaveAttribute('href', '/legal-management/1')
@@ -122,8 +123,9 @@ for (const role of ['citizen', 'officer'] as const) {
     await page.goto('/legal-management')
     await expect(page).toHaveURL(/\/search$/, { timeout: 30_000 })
     await expect(page.getByRole('heading', { name: /Quản lý kho văn bản/i })).toHaveCount(0)
-    expect(observedManagementMethods.length).toBeGreaterThan(0)
-    expect(new Set(observedManagementMethods)).toEqual(new Set(['GET']))
-    expect(deniedManagementReads).toBe(observedManagementMethods.length)
+    // Authorization is enforced before any management metadata request. A
+    // zero-request result is the desired privacy and performance behavior.
+    expect(observedManagementMethods).toEqual([])
+    expect(deniedManagementReads).toBe(0)
   })
 }

@@ -32,7 +32,11 @@ const nextConfig: NextConfig = {
     // INTERNAL_API_URL: Where Next.js server-side should proxy API requests
     // Default: http://127.0.0.1:5055 (single-container deployment)
     // Override for multi-container: INTERNAL_API_URL=http://api-service:5055
-    const internalApiUrl = process.env.INTERNAL_API_URL || 'http://127.0.0.1:5055'
+    // Render Blueprints expose private services as host:port (without a scheme).
+    const internalApiUrl = process.env.INTERNAL_API_URL ||
+      (process.env.INTERNAL_API_HOSTPORT
+        ? `http://${process.env.INTERNAL_API_HOSTPORT}`
+        : 'http://127.0.0.1:5055')
 
     console.log(`[Next.js Rewrites] Proxying /api/* to ${internalApiUrl}/api/*`)
 

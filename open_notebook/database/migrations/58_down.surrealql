@@ -1,0 +1,2 @@
+-- Intentionally non-destructive. Runtime rollback leaves document identity,
+-- validity audit history and linked notebook sources intact.

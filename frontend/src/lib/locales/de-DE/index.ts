@@ -106,7 +106,6 @@ export const deDE = {
     searchTerms: "Suchbegriffe",
     strategy: "Strategie",
     individualAnswers: "Einzelantworten ({count})",
-    finalAnswer: "Endgültige Antwort",
     notebookLabel: "Notebook: {name}",
     itemNotFound: "{type} konnte nicht gefunden werden",
     accessibility: {
@@ -821,7 +820,6 @@ export const deDE = {
   },
   models: {
     embedding: "Embedding-Modelle",
-    tts: "Text-to-Speech (TTS)",
     stt: "Speech-to-Text (STT)",
     apiKey: "API-Schlüssel",
     deleteSuccess: "Modell erfolgreich gelöscht",
@@ -847,8 +845,6 @@ export const deDE = {
     largeContextModelDesc: "Wird für die Verarbeitung großer Dokumente verwendet – Gemini empfohlen",
     embeddingModelLabel: "Embedding-Modell",
     embeddingModelDesc: "Wird für semantische Suche und Vektor-Embeddings verwendet",
-    ttsModelLabel: "Text-to-Speech-Modell",
-    ttsModelDesc: "Wird für die Podcast-Erstellung verwendet",
     sttModelLabel: "Speech-to-Text-Modell",
     sttModelDesc: "Wird für Audiotranskription verwendet",
     embeddingChangeTitle: "Embedding-Modell ändern",

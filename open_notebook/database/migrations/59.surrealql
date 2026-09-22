@@ -1,0 +1,7 @@
+-- Migration 59: Add rich administrative procedure fields to ward_procedure
+DEFINE FIELD IF NOT EXISTS guidance ON TABLE ward_procedure TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS submission_place ON TABLE ward_procedure TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS legal_basis ON TABLE ward_procedure TYPE option<array<string>>;
+DEFINE FIELD IF NOT EXISTS legal_basis.* ON TABLE ward_procedure TYPE string;
+DEFINE FIELD IF NOT EXISTS catalog_status ON TABLE ward_procedure TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS archived ON TABLE ward_procedure TYPE option<bool>;

@@ -126,7 +126,7 @@ export function CrawlerDiffView({
       {viewMode === 'summary' && changeDetails && (
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">Thay đổi metadata</CardTitle>
+            <CardTitle className="text-base">Thay đổi thông tin mô tả</CardTitle>
           </CardHeader>
           <CardContent>
             <div className="space-y-3">

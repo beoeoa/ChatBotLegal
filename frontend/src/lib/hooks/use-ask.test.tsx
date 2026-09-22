@@ -94,7 +94,7 @@ describe('useAsk transport contract', () => {
     })
 
     await waitFor(() => {
-      expect(result.current.stageLabel).toBe('Đang tìm nguồn pháp luật phù hợp')
+      expect(result.current.stageLabel).toBe('Đang tìm văn bản')
       expect(result.current.citations).toEqual(finalResponse.citations)
     })
     expect(result.current.finalAnswer).toBeNull()
@@ -137,6 +137,23 @@ describe('useAsk transport contract', () => {
     expect(result.current.error).not.toBeNull()
   })
 
+  it('keeps streamed text when the opened stream fails', async () => {
+    vi.mocked(isAskSseEnabled).mockReturnValue(true)
+    vi.mocked(searchApi.askKnowledgeBaseStream).mockImplementationOnce(async (_params, handlers) => {
+      handlers.onEvent({ type: 'text_delta', text: 'Phần trả lời đã nhận.', provisional: true })
+      throw new AskStreamTransportError('opened failure', true)
+    })
+    const { result } = renderHook(() => useAsk())
+
+    await act(async () => {
+      await result.current.sendAsk('Câu hỏi fixture', models, 'citizen')
+    })
+
+    expect(result.current.finalAnswer).toBe('Phần trả lời đã nhận.')
+    expect(result.current.stageLabel).toContain('đã nhận vẫn được giữ lại')
+    expect(result.current.error).not.toBeNull()
+  })
+
   it('treats AbortController cancellation as cancelled, never as error', async () => {
     vi.mocked(isAskSseEnabled).mockReturnValue(true)
     vi.mocked(searchApi.askKnowledgeBaseStream).mockImplementationOnce((params) => (
@@ -158,20 +175,49 @@ describe('useAsk transport contract', () => {
     expect(searchApi.askKnowledgeBaseSimple).not.toHaveBeenCalled()
   })
 
-  it('reuses the turn idempotency key when retrying the same question', async () => {
+  it('reuses an explicit turn id only for retries', async () => {
     vi.mocked(searchApi.askKnowledgeBaseSimple)
       .mockRejectedValueOnce(new Error('fixture failure'))
       .mockResolvedValueOnce(finalResponse)
     const { result } = renderHook(() => useAsk())
 
     await act(async () => {
-      await result.current.sendAsk('  Câu hỏi   fixture  ', models, 'citizen', { conversationId: 'conv-1' })
-      await result.current.sendAsk('Câu hỏi fixture', models, 'citizen', { conversationId: 'conv-1' })
+      await result.current.sendAsk('  Câu hỏi   fixture  ', models, 'citizen', { conversationId: 'conv-1', turnId: 'turn-retry-1' })
+      await result.current.sendAsk('Câu hỏi fixture', models, 'citizen', { conversationId: 'conv-1', turnId: 'turn-retry-1' })
     })
 
     const first = vi.mocked(searchApi.askKnowledgeBaseSimple).mock.calls[0][0]
     const second = vi.mocked(searchApi.askKnowledgeBaseSimple).mock.calls[1][0]
     expect(first.idempotency_key).toBe(second.idempotency_key)
+  })
+
+  it('assigns a new turn to repeated wording after the context changes', async () => {
+    vi.mocked(searchApi.askKnowledgeBaseSimple).mockResolvedValue(finalResponse)
+    const { result } = renderHook(() => useAsk())
+    await act(async () => {
+      await result.current.sendAsk('Còn phí?', models, 'citizen', { conversationId: 'conv-1' })
+      await result.current.sendAsk('Còn phí?', models, 'citizen', { conversationId: 'conv-1' })
+    })
+    const calls = vi.mocked(searchApi.askKnowledgeBaseSimple).mock.calls
+    expect(calls[0][0].idempotency_key).not.toBe(calls[1][0].idempotency_key)
+  })
+
+  it('ignores a late response from the superseded request', async () => {
+    const first = deferred<typeof finalResponse>()
+    const second = deferred<typeof finalResponse>()
+    vi.mocked(searchApi.askKnowledgeBaseSimple)
+      .mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise)
+    const { result } = renderHook(() => useAsk())
+    let oldRequest!: ReturnType<typeof result.current.sendAsk>
+    let newRequest!: ReturnType<typeof result.current.sendAsk>
+    act(() => { oldRequest = result.current.sendAsk('Câu cũ', models, 'citizen') })
+    act(() => { newRequest = result.current.sendAsk('Câu mới', models, 'citizen') })
+    second.resolve({ ...finalResponse, answer: 'Câu trả lời mới' })
+    await act(async () => { await newRequest })
+    first.resolve(finalResponse)
+    await act(async () => { await oldRequest })
+    expect(result.current.finalAnswer).toBe('Câu trả lời mới')
+    expect(result.current.cancelled).toBe(false)
   })
 
   it.each(['officer', 'admin'] as const)(

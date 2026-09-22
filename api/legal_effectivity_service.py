@@ -15,7 +15,7 @@ from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Awaitable, Callable, Iterable
+from typing import Any, Awaitable, Callable, Iterable, Mapping
 from uuid import uuid4
 
 import httpx
@@ -27,11 +27,15 @@ from api.legal_validity_registry import (
     default_registry,
     default_snapshot_cache,
 )
+from api.legal_serving_dashboard import load_active_serving_release
 from api.legal_validity_source import VBPLValiditySource
 from open_notebook.database.repository import repo_create, repo_query
 
 REPORT_PATH = notebook_data_dir() / "operations" / "legal-effectivity-latest.json"
 LEGAL_SEARCH_URL = os.getenv("LEGAL_SEARCH_URL", "http://127.0.0.1:8765").rstrip("/")
+LEGAL_MANAGEMENT_URL = os.getenv(
+    "LEGAL_MANAGEMENT_URL", "http://127.0.0.1:8765"
+).rstrip("/")
 
 DocumentLoader = Callable[..., Awaitable[list[dict[str, Any]]]]
 NotificationHandler = Callable[[dict[str, Any]], Awaitable[None]]
@@ -189,7 +193,7 @@ async def _load_runtime_documents(
 
     async with httpx.AsyncClient(timeout=30) as client:
         response = await client.get(
-            f"{LEGAL_SEARCH_URL}/documents",
+            f"{LEGAL_MANAGEMENT_URL}/documents",
             params={
                 "as_of": as_of.isoformat(),
                 "limit": min(max(limit, 1), 100),
@@ -285,6 +289,29 @@ class LegalValiditySyncService:
             except (OSError, json.JSONDecodeError):
                 pass
         documents = (snapshot or {}).get("documents") or {}
+        active_release = None
+        release_mismatch = False
+        if self.registry is default_registry:
+            try:
+                active_release = load_active_serving_release()
+            except Exception:
+                active_release = None
+        if active_release is not None:
+            allowed_ids = {
+                str(value) for value in active_release.retrievable_document_ids
+            }
+            documents = {
+                law_number: item
+                for law_number, item in documents.items()
+                if isinstance(item, dict)
+                and str(item.get("document_id") or "") in allowed_ids
+            }
+            release_mismatch = (
+                str((snapshot or {}).get("release_id") or "")
+                != active_release.release_id
+                or str((snapshot or {}).get("manifest_sha256") or "")
+                != active_release.manifest_sha256
+            )
         status_counts = Counter(
             str(item.get("normalized_status") or "unknown")
             for item in documents.values()
@@ -316,7 +343,10 @@ class LegalValiditySyncService:
         reason_code = None
         if failures or report.get("status") in {"degraded", "failed"}:
             source_status = "degraded"
-            reason_code = sorted(failures)[0] if failures else "VALIDITY_SYNC_FAILED"
+            reason_code = (
+                str(report.get("error_code") or "").strip()
+                or (sorted(failures)[0] if failures else "VALIDITY_SYNC_FAILED")
+            )
         dashboard_status = health.get("status")
         if source_status == "degraded" and dashboard_status == "healthy":
             dashboard_status = "degraded"
@@ -325,6 +355,15 @@ class LegalValiditySyncService:
                 "coverage", {"eligible": 0, "observed": 0, "fresh": 0}
             )
         )
+        if active_release is not None:
+            coverage = {
+                "eligible": len(active_release.retrievable_document_ids),
+                "observed": len(documents),
+                "fresh": len(documents),
+            }
+        if release_mismatch:
+            dashboard_status = "degraded"
+            coverage["fresh"] = 0
         if health.get("status") in {"missing", "stale", "degraded"}:
             coverage["fresh"] = 0
         return {
@@ -348,8 +387,25 @@ class LegalValiditySyncService:
                     "reason_code": reason_code,
                 }
             ],
-            "reason_code": health.get("reason_code"),
+            "reason_code": (
+                "validity_snapshot_release_mismatch"
+                if release_mismatch
+                else health.get("reason_code")
+            ),
             "age_seconds": health.get("age_seconds"),
+            "failure_phase": report.get("failure_phase"),
+            "error_code": report.get("error_code"),
+            "error_message": report.get("error_message"),
+            "release_id": (
+                active_release.release_id
+                if active_release is not None
+                else (snapshot or {}).get("release_id")
+            ),
+            "manifest_sha256": (
+                active_release.manifest_sha256
+                if active_release is not None
+                else (snapshot or {}).get("manifest_sha256")
+            ),
         }
 
     async def _fetch_one(self, document: dict[str, Any], as_of: date):
@@ -367,6 +423,50 @@ class LegalValiditySyncService:
             expected_issuing_agency=str(document.get("issuing_agency") or "") or None,
             expected_issued_date=str(document.get("issued_date") or "") or None,
         )
+
+    async def recheck_event(self, event: Mapping[str, Any]) -> dict[str, Any]:
+        """Recheck one reviewed event against its official source immediately.
+
+        This deliberately does not use the rotating inventory cursor.  An Admin
+        pressing "request recheck" expects this exact document to be checked.
+        A failed source fetch is fail-closed: no observation or snapshot is
+        changed and the event remains in the review queue.
+        """
+
+        law_number = normalize_law_number(event.get("law_number"))
+        if not law_number:
+            raise ValueError("validity_recheck_law_number_required")
+        checked_at = self.now().astimezone(timezone.utc)
+        document = {
+            "law_number": law_number,
+            "document_id": event.get("document_id"),
+            "issuing_agency": event.get("issuing_agency"),
+            "issued_date": event.get("issued_date"),
+        }
+        result = await self._fetch_one(document, vietnam_legal_date(checked_at))
+        if result.observation is None:
+            return {
+                "status": "source_unavailable",
+                "checked_at": checked_at.isoformat(),
+                "reason_code": result.reason_code,
+                "observation_created": False,
+                "event_created": False,
+            }
+        recorded = await self.registry.record_observation(
+            result.observation,
+            scope=str(event.get("scope") or "") or None,
+            document_title=str(event.get("document_title") or "") or None,
+        )
+        await self.registry.refresh_snapshot_projection()
+        return {
+            "status": "completed",
+            "checked_at": checked_at.isoformat(),
+            "reason_code": result.reason_code,
+            "normalized_status": result.observation.normalized_status.value,
+            "source_url": result.observation.source_url,
+            "observation_created": bool(recorded.get("created")),
+            "event_created": bool(recorded.get("event")),
+        }
 
     async def run(
         self,
@@ -392,6 +492,7 @@ class LegalValiditySyncService:
             ttl_seconds=lease_ttl,
         ):
             return {
+                "run_id": None,
                 "checked_at": started_at.isoformat(),
                 "status": "skipped_lease",
                 "scanned": {"documents": 0, "forms": 0},
@@ -401,7 +502,9 @@ class LegalValiditySyncService:
             }
 
         run_record: dict[str, Any] | None = None
+        phase = "lease"
         try:
+            phase = "prepare_run"
             run_record = await self.registry.start_sync_run(
                 trigger=trigger,
                 requested_by=requested_by,
@@ -415,6 +518,7 @@ class LegalValiditySyncService:
                 and set(normalized_scopes) == {"central", "haiphong", "local"}
                 else 0
             )
+            phase = "inventory"
             loaded_documents = await self.document_loader(
                 scopes=normalized_scopes,
                 limit=bounded_limit,
@@ -458,6 +562,7 @@ class LegalValiditySyncService:
                 async with semaphore:
                     return document, await self._fetch_one(document, legal_as_of)
 
+            phase = "official_source"
             fetched = await asyncio.gather(
                 *(fetch(document) for document in documents), return_exceptions=True
             )
@@ -499,14 +604,34 @@ class LegalValiditySyncService:
             completed_at = self.now().astimezone(timezone.utc)
             status = "degraded" if failures else "completed"
             if not failures:
-                latest = await self.registry.latest_serving_observations()
+                phase = "snapshot"
+                release = None
+                try:
+                    release = load_active_serving_release() if self.registry is default_registry else None
+                except Exception:
+                    # Test fixtures and pre-V2 installations may not have a
+                    # release pointer. They retain the legacy projection.
+                    release = None
+                eligible_ids = (
+                    [str(value) for value in release.retrievable_document_ids]
+                    if release is not None else None
+                )
+                latest = await self.registry.latest_serving_observations(
+                    document_ids=eligible_ids
+                )
+                serving_overrides = await self.registry.serving_action_overrides()
                 self.registry.write_snapshot(
                     observations=latest,
                     last_success_at=completed_at,
-                    eligible_count=eligible_count,
+                    eligible_count=len(eligible_ids) if eligible_ids is not None else eligible_count,
                     mode=_mode(),
+                    eligible_document_ids=eligible_ids,
+                    release_id=release.release_id if release is not None else None,
+                    manifest_sha256=release.manifest_sha256 if release is not None else None,
+                    serving_action_overrides=serving_overrides,
                 )
             report = {
+                "run_id": str((run_record or {}).get("id") or "") or None,
                 "checked_at": completed_at.isoformat(),
                 "last_success_at": completed_at.isoformat() if not failures else None,
                 "status": status,
@@ -536,9 +661,10 @@ class LegalValiditySyncService:
             if self.notifier is not None:
                 await self.notifier(report)
             return report
-        except Exception:
+        except Exception as exc:
             completed_at = self.now().astimezone(timezone.utc)
             report = {
+                "run_id": str((run_record or {}).get("id") or "") or None,
                 "checked_at": completed_at.isoformat(),
                 "last_success_at": None,
                 "status": "failed",
@@ -548,7 +674,10 @@ class LegalValiditySyncService:
                 "scanned": {"documents": 0, "forms": 0},
                 "observations_created": 0,
                 "events_created": 0,
-                "failures": {"VALIDITY_SYNC_INTERNAL_FAILURE": 1},
+                "failures": {f"VALIDITY_SYNC_{phase.upper()}_FAILURE": 1},
+                "failure_phase": phase,
+                "error_code": type(exc).__name__,
+                "error_message": str(exc)[:500] or "Không có chi tiết lỗi.",
                 "findings": [],
                 "duration_ms": round((perf_counter() - started_tick) * 1000, 3),
                 "limitation": "Lần đồng bộ thất bại; snapshot bảo vệ gần nhất được giữ nguyên.",

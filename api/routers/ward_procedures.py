@@ -57,6 +57,7 @@ FORM_CHECKSUM_MANIFEST_PATH = FORMS_DATA_DIR / "canonical_form_checksums_v1.json
 FORM_RELEASE_GATE_STATUS_PATH = PROJECT_ROOT / "data" / "form_release_gate" / "status_v1.json"
 
 class FormTemplate(BaseModel):
+    model_config = ConfigDict(extra="ignore")
     name: str = Field(..., description="Tên biểu mẫu (ví dụ: Tờ khai đăng ký kết hôn)")
     file_type: str = Field("docx", description="Loại file (docx, pdf)")
     download_url: str = Field(..., description="Đường dẫn tải biểu mẫu")
@@ -79,229 +80,87 @@ class Procedure(BaseModel):
     duration: str = Field(..., description="Thời gian giải quyết")
     fee: str = Field(..., description="Lệ phí giải quyết")
     forms: List[FormTemplate] = Field(default_factory=list, description="Danh sách biểu mẫu trống đính kèm")
+    guidance: str = Field(default="", description="Hướng dẫn giải quyết")
+    submission_place: str = Field(default="", description="Nơi tiếp nhận và trả kết quả")
+    legal_basis: List[str] = Field(default_factory=list, description="Căn cứ pháp lý")
+    primary_organization_unit_id: Optional[str] = None
+    supporting_organization_unit_ids: List[str] = Field(default_factory=list)
+    source_url: Optional[str] = None
+    catalog_status: str = Field(default="approved")
 from datetime import datetime
 from open_notebook.database.repository import repo_query, repo_create, repo_update
 
-# Seed data for ALL of Hai Phong city procedures and forms
-HAI_PHONG_PROCEDURES_SEED: List[Dict[str, Any]] = [
-    {
-        "id": "dang_ky_khai_sinh",
-        "name": "Đăng ký khai sinh (Thẩm quyền cấp xã)",
-        "department": "Tư pháp - Hộ tịch",
-        "domain_slug": "ho_tich_chung_thuc",
-        "steps": [
-            "Bước 1: Người đi đăng ký khai sinh nộp hồ sơ trực tiếp tại Bộ phận Một cửa của UBND xã/phường/thị trấn trên địa bàn TP Hải Phòng hoặc nộp trực tuyến qua Cổng dịch vụ công Hải Phòng.",
-            "Bước 2: Công chức Tư pháp - Hộ tịch tiếp nhận hồ sơ, đối chiếu thông tin trong CSDL quốc gia về dân cư.",
-            "Bước 3: Công chức ghi nội dung khai sinh vào Sổ đăng ký khai sinh, cùng người đi đăng ký khai sinh ký tên vào Sổ hộ tịch.",
-            "Bước 4: Chủ tịch UBND cấp xã phê duyệt, ký Giấy khai sinh bản chính cấp cho công dân."
-        ],
-        "documents_required": [
-            "Tờ khai đăng ký khai sinh theo mẫu ban hành kèm Thông tư 04/2020/TT-BTP.",
-            "Giấy chứng sinh (do cơ sở y tế nơi trẻ sinh ra cấp). Nếu không có giấy chứng sinh thì nộp văn bản của người làm chứng xác nhận về việc sinh.",
-            "Trường hợp cha, mẹ đã kết hôn thì phải xuất trình Giấy chứng nhận kết hôn."
-        ],
-        "duration": "Giải quyết ngay trong ngày tiếp nhận hồ sơ. Nếu nhận hồ sơ sau 15 giờ thì trả kết quả vào ngày làm việc tiếp theo.",
-        "fee": "Miễn phí hoàn toàn đối với việc đăng ký khai sinh đúng hạn, trẻ em dưới 6 tuổi, người có công.",
-        "forms": [
-            {
-                "name": "Tờ khai đăng ký khai sinh (Thông tư 04/2020/TT-BTP)",
-                "file_type": "docx",
-                "download_url": "/api/procedures/dang_ky_khai_sinh/forms/0"
-            }
-        ]
-    },
-    {
-        "id": "dang_ky_ket_hon",
-        "name": "Đăng ký kết hôn trong nước (Cấp xã)",
-        "department": "Tư pháp - Hộ tịch",
-        "domain_slug": "ho_tich_chung_thuc",
-        "steps": [
-            "Bước 1: Hai bên nam, nữ trực tiếp có mặt tại Bộ phận Một cửa UBND cấp xã nơi một trong hai bên thường trú hoặc tạm trú để nộp hồ sơ.",
-            "Bước 2: Cán bộ hộ tịch tiếp nhận hồ sơ, kiểm tra điều kiện kết hôn theo Luật Hôn nhân và Gia đình.",
-            "Bước 3: Sau khi xác nhận hai bên hoàn toàn tự nguyện và đủ điều kiện kết hôn, công chức hộ tịch ghi việc kết hôn vào Sổ hộ tịch.",
-            "Bước 4: Nam, nữ ký tên vào Giấy chứng nhận kết hôn và Sổ hộ tịch. Chủ tịch UBND xã ký và trao Giấy chứng nhận kết hôn cho hai bên."
-        ],
-        "documents_required": [
-            "Tờ khai đăng ký kết hôn theo mẫu (hai bên có thể khai chung vào một tờ khai).",
-            "Giấy xác nhận tình trạng hôn nhân (Giấy độc thân) do UBND cấp xã nơi cư trú trước đó cấp nếu cư trú ngoài địa bàn đăng ký kết hôn.",
-            "Căn cước công dân của hai bên nam, nữ."
-        ],
-        "duration": "Trong thời hạn 3 ngày làm việc kể từ ngày nhận đủ hồ sơ hợp lệ. Trường hợp cần xác minh thêm điều kiện kết hôn thì thời hạn không quá 5 ngày làm việc.",
-        "fee": "Miễn phí lệ phí đăng ký kết hôn đối với công dân Việt Nam cư trú trong nước.",
-        "forms": [
-            {
-                "name": "Tờ khai đăng ký kết hôn chuẩn quốc gia",
-                "file_type": "docx",
-                "download_url": "/api/procedures/dang_ky_ket_hon/forms/0"
-            }
-        ]
-    },
-    {
-        "id": "xac_nhan_doc_than",
-        "name": "Cấp Giấy xác nhận tình trạng hôn nhân (Giấy xác nhận độc thân)",
-        "department": "Tư pháp - Hộ tịch",
-        "domain_slug": "ho_tich_chung_thuc",
-        "steps": [
-            "Bước 1: Công dân nộp hồ sơ trực tiếp tại Bộ phận Một cửa của UBND cấp xã nơi cư trú hoặc nộp trực tuyến qua Cổng dịch vụ công trực tuyến Hải Phòng.",
-            "Bước 2: Công chức tư pháp - hộ tịch kiểm tra thông tin hộ tịch, sổ đăng ký kết hôn để xác minh tình trạng.",
-            "Bước 3: Trình Chủ tịch UBND xã/phường phê duyệt và ký Giấy xác nhận tình trạng hôn nhân.",
-            "Bước 4: Trả kết quả Giấy xác nhận tình trạng hôn nhân cho công dân (Giấy có giá trị sử dụng 6 tháng kể từ ngày cấp)."
-        ],
-        "documents_required": [
-            "Tờ khai cấp Giấy xác nhận tình trạng hôn nhân theo mẫu quy định.",
-            "Bản sao CCCD hoặc hộ chiếu của người yêu cầu.",
-            "Trường hợp đã ly hôn hoặc vợ/chồng đã mất thì phải nộp bản án ly hôn có hiệu lực hoặc Giấy chứng tử của vợ/chồng."
-        ],
-        "duration": "Không quá 3 ngày làm việc kể từ ngày nhận đủ hồ sơ hợp lệ. Trường hợp cần xác minh qua các địa phương khác thì không quá 10 ngày làm việc.",
-        "fee": "15.000 VNĐ / bản xác nhận. Miễn lệ phí đối với hộ nghèo, người cao tuổi, người khuyết tật.",
-        "forms": [
-            {
-                "name": "Tờ khai cấp Giấy xác nhận tình trạng hôn nhân",
-                "file_type": "docx",
-                "download_url": "/api/procedures/xac_nhan_doc_than/forms/0"
-            }
-        ]
-    },
-    {
-        "id": "dang_ky_khai_tu",
-        "name": "Đăng ký khai tử (Cấp xã)",
-        "department": "Tư pháp - Hộ tịch",
-        "domain_slug": "ho_tich_chung_thuc",
-        "steps": [
-            "Bước 1: Người có trách nhiệm đi đăng ký khai tử nộp hồ sơ tại Bộ phận Một cửa của UBND cấp xã nơi người chết cư trú cuối cùng.",
-            "Bước 2: Công chức Tư pháp - Hộ tịch kiểm tra hồ sơ, đối chiếu thông tin và ghi nội dung khai tử vào Sổ hộ tịch.",
-            "Bước 3: Người đi khai tử ký tên vào Sổ hộ tịch. Chủ tịch UBND xã ký và cấp Trích lục khai tử cho gia đình."
-        ],
-        "documents_required": [
-            "Tờ khai đăng ký khai tử theo mẫu quy định.",
-            "Giấy báo tử hoặc giấy tờ thay thế Giấy báo tử do cơ quan có thẩm quyền cấp (Ví dụ: Giấy xác nhận của công an nếu chết do tai nạn, bản án của Tòa án).",
-            "Căn cước công dân của người chết (nếu có) để thu hồi hoặc cập nhật trạng thái."
-        ],
-        "duration": "Giải quyết ngay trong ngày làm việc khi tiếp nhận hồ sơ. Nếu nộp sau 15 giờ thì trả kết quả vào ngày làm việc tiếp theo.",
-        "fee": "Miễn phí hoàn toàn đối với việc đăng ký khai tử đúng hạn.",
-        "forms": [
-            {
-                "name": "Tờ khai đăng ký khai tử (Thông tư 04/2020/TT-BTP)",
-                "file_type": "docx",
-                "download_url": "/api/procedures/dang_ky_khai_tu/forms/0"
-            }
-        ]
-    },
-    {
-        "id": "cap_giay_phep_xay_dung",
-        "name": "Cấp giấy phép xây dựng nhà ở riêng lẻ đô thị (Thẩm quyền cấp quận/huyện tiếp nhận hướng dẫn tại phường)",
-        "department": "Địa chính - Xây dựng - Đô thị - Môi trường",
-        "domain_slug": "dat_dai_xay_dung",
-        "steps": [
-            "Bước 1: Chủ đầu tư nộp hồ sơ đề nghị cấp phép tại Bộ phận Một cửa UBND cấp xã để kiểm tra hiện trạng đất đai, hoặc nộp trực tiếp tại UBND cấp Quận/Huyện.",
-            "Bước 2: Cán bộ Địa chính - Xây dựng phường/xã kiểm tra quy hoạch đô thị, hành lang chỉ giới giao thông đường bộ và cam kết an toàn liền kề.",
-            "Bước 3: Hồ sơ chuyển phòng Quản lý đô thị cấp Quận/Huyện thẩm định thiết kế bản vẽ thi công.",
-            "Bước 4: Nhận Giấy phép xây dựng kèm bản vẽ thiết kế có đóng dấu phê duyệt."
-        ],
-        "documents_required": [
-            "Đơn đề nghị cấp giấy phép xây dựng nhà ở riêng lẻ (Mẫu ban hành kèm Nghị định 15/2021/NĐ-CP).",
-            "Bản sao Sổ đỏ (Giấy chứng nhận quyền sử dụng đất, quyền sở hữu nhà ở).",
-            "02 bộ bản vẽ thiết kế xây dựng kèm theo phương án móng, mặt bằng, mặt đứng, mặt cắt.",
-            "Bản cam kết bảo đảm an toàn đối với công trình liền kề, lân cận."
-        ],
-        "duration": "Không quá 15 ngày làm việc kể từ ngày nhận đủ hồ sơ hợp lệ.",
-        "fee": "50.000 VNĐ / giấy phép.",
-        "forms": [
-            {
-                "name": "Đơn đề nghị cấp giấy phép xây dựng nhà ở riêng lẻ",
-                "file_type": "docx",
-                "download_url": "/api/procedures/cap_giay_phep_xay_dung/forms/0"
-            },
-            {
-                "name": "Bản cam kết bảo đảm an toàn cho công trình liền kề",
-                "file_type": "docx",
-                "download_url": "/api/procedures/cap_giay_phep_xay_dung/forms/1"
-            }
-        ]
-    },
-    {
-        "id": "tro_cap_xa_hoi",
-        "name": "Thủ tục đề nghị hưởng trợ cấp xã hội hàng tháng (Cấp xã)",
-        "department": "Lao động - Thương binh và Xã hội",
-        "domain_slug": "an_sinh_y_te_giao_duc",
-        "steps": [
-            "Bước 1: Đối tượng hoặc người giám hộ nộp hồ sơ trực tiếp tại UBND cấp xã nơi cư trú thường trú.",
-            "Bước 2: Cán bộ Lao động - Thương binh & Xã hội tiếp nhận, đối chiếu các điều kiện bảo trợ theo Nghị định 20/2021/NĐ-CP.",
-            "Bước 3: Hội đồng xét duyệt trợ giúp xã hội cấp xã họp xét duyệt và niêm yết công khai danh sách tại trụ sở UBND xã/phường trong 7 ngày.",
-            "Bước 4: Chuyển hồ sơ lên phòng Lao động - Thương binh & Xã hội cấp Quận/Huyện quyết định chi trả trợ cấp hàng tháng."
-        ],
-        "documents_required": [
-            "Tờ khai đề nghị trợ giúp xã hội theo Mẫu số 1a, 1b ban hành kèm theo Nghị định 20/2021/NĐ-CP.",
-            "Bản sao CCCD hoặc giấy tờ xác nhận thông tin cư trú của đối tượng.",
-            "Giấy tờ chứng minh hoàn cảnh đặc biệt (Giấy xác nhận khuyết tật, quyết định nuôi dưỡng trẻ mồ côi...)."
-        ],
-        "duration": "Trong vòng 15 ngày làm việc kể từ ngày nhận đủ hồ sơ hợp lệ.",
-        "fee": "Miễn phí hoàn toàn.",
-        "forms": [
-            {
-                "name": "Tờ khai đề nghị trợ giúp xã hội (Mẫu 1a/1b)",
-                "file_type": "docx",
-                "download_url": "/api/procedures/tro_cap_xa_hoi/forms/0"
-            }
-        ]
-    },
-    {
-        "id": "dang_ky_ho_kinh_doanh",
-        "name": "Đăng ký thành lập Hộ kinh doanh cá thể",
-        "department": "Tài chính - Kế hoạch (Tiếp nhận hướng dẫn tại phường)",
-        "domain_slug": "hanh_chinh_cong",
-        "steps": [
-            "Bước 1: Cá nhân hoặc đại diện hộ gia đình chuẩn bị hồ sơ và nộp tại Bộ phận Một cửa của UBND cấp Quận/Huyện (hoặc nộp bản khai thông tin hướng dẫn tại phường).",
-            "Bước 2: Cơ quan đăng ký kinh doanh cấp huyện thụ lý, kiểm tra tính hợp lệ của ngành nghề kinh doanh và tên hộ kinh doanh.",
-            "Bước 3: Cấp Giấy chứng nhận đăng ký hộ kinh doanh cho công dân.",
-            "Bước 4: Công dân nhận giấy chứng nhận và thực hiện nghĩa vụ đăng ký thuế ban đầu."
-        ],
-        "documents_required": [
-            "Giấy đề nghị đăng ký hộ kinh doanh theo mẫu quy định tại Thông tư 01/2021/TT-BKHĐT.",
-            "Danh sách các cá nhân thành viên hộ gia đình đăng ký thành lập hộ kinh doanh (nếu có).",
-            "Bản sao hợp lệ CCCD của cá nhân tham gia hộ kinh doanh.",
-            "Bản sao hợp đồng thuê nhà hoặc giấy chứng nhận quyền sở hữu địa điểm kinh doanh."
-        ],
-        "duration": "Trong vòng 3 ngày làm việc kể từ ngày nhận hồ sơ hợp lệ.",
-        "fee": "100.000 VNĐ / lần cấp.",
-        "forms": [
-            {
-                "name": "Giấy đề nghị đăng ký hộ kinh doanh",
-                "file_type": "docx",
-                "download_url": "/api/procedures/dang_ky_ho_kinh_doanh/forms/0"
-            }
-        ]
-    },
-    {
-        "id": "sang_ten_so_do",
-        "name": "Đăng ký biến động quyền sử dụng đất, quyền sở hữu tài sản gắn liền với đất (Sang tên sổ đỏ)",
-        "department": "Địa chính - Xây dựng - Đô thị - Môi trường",
-        "domain_slug": "dat_dai_xay_dung",
-        "steps": [
-            "Bước 1: Các bên chuẩn bị Hợp đồng chuyển nhượng/tặng cho quyền sử dụng đất được công chứng tại Văn phòng công chứng.",
-            "Bước 2: Người sử dụng đất nộp hồ sơ tại Bộ phận Một cửa của UBND cấp xã hoặc Chi nhánh Văn phòng đăng ký đất đai cấp huyện.",
-            "Bước 3: Công chức Địa chính - Xây dựng xã tiếp nhận, kiểm tra hiện trạng sử dụng đất, nguồn gốc đất và xác nhận hồ sơ đủ điều kiện biến động.",
-            "Bước 4: Hồ sơ chuyển đến Văn phòng đăng ký đất đai để cập nhật trang 4 Sổ đỏ hoặc cấp Sổ đỏ mới cho người mua."
-        ],
-        "documents_required": [
-            "Tờ khai đăng ký biến động đất đai, tài sản gắn liền với đất (Mẫu số 09/ĐK).",
-            "Hợp đồng chuyển nhượng, tặng cho quyền sử dụng đất đã được công chứng.",
-            "Bản gốc Giấy chứng nhận quyền sử dụng đất (Sổ đỏ) đã cấp.",
-            "Tờ khai thuế thu nhập cá nhân và Tờ khai lệ phí trước bạ."
-        ],
-        "duration": "Không quá 10 ngày làm việc kể từ ngày nhận đủ hồ sơ hợp lệ.",
-        "fee": "Lệ phí địa chính: 15.000 VNĐ; Lệ phí trước bạ: 0.5% giá trị chuyển nhượng; Thuế thu nhập cá nhân: 2% giá trị chuyển nhượng (nếu không được miễn).",
-        "forms": [
-            {
-                "name": "Đơn đăng ký biến động đất đai, tài sản gắn liền với đất (Mẫu số 09/ĐK)",
-                "file_type": "docx",
-                "download_url": "/api/procedures/sang_ten_so_do/forms/0",
-                "official_level": "reference",
-                "review_status": "candidate_pending_review"
-            }
-        ]
+from api.system_settings import (
+    active_organization_units,
+    active_settings,
+    legal_domain_labels,
+    normalize_legal_domains,
+)
+from api.organization_service import replace_procedure_unit_assignments
+
+async def _procedure_organization_projection(proc, units=None):
+    return {
+        "primary_organization_unit_id": proc.get("primary_organization_unit_id"),
+        "supporting_organization_unit_ids": proc.get("supporting_organization_unit_ids") or [],
+        "department": proc.get("department") or "",
     }
-]
+
+from api.seed_haiphong_90_procedures import HAI_PHONG_90_PROCEDURES
+
+# Seed data for ALL of Hai Phong city procedures and forms (10 procedures per domain, 90 total)
+HAI_PHONG_PROCEDURES_SEED: List[Dict[str, Any]] = HAI_PHONG_90_PROCEDURES
+
+@router.get("/directory")
+async def procedure_directory():
+    settings = await active_settings()
+    units = [
+        unit
+        for unit in await active_organization_units(settings)
+        if getattr(unit, "is_active", True)
+    ]
+    # Calling the route function directly must pass real values; FastAPI's
+    # Query objects are only resolved when the endpoint handles an HTTP call.
+    procs = await list_procedures(department=None, domain=None, query=None)
+    domain_labels = legal_domain_labels(
+        normalize_legal_domains(getattr(settings, "legal_domains", None))
+    )
+
+    departments = []
+    total_procedures = len(procs)
+
+    for unit in units:
+        unit_fields = []
+        domain_codes = getattr(unit, "domain_codes", []) or []
+        for code in domain_codes:
+            field_name = domain_labels.get(code, code)
+            field_procs = [
+                p for p in procs
+                if (getattr(p, "primary_organization_unit_id", None) == unit.id or getattr(p, "department", "") == unit.name)
+                and getattr(p, "domain_slug", "") == code
+            ]
+            procedure_count = len(field_procs)
+            candidate_count = sum(1 for p in field_procs if getattr(p, "catalog_status", "approved") == "candidate_pending_review")
+            missing_count = max(0, 10 - procedure_count)
+            coverage_status = "full" if procedure_count >= 10 else "source_gap"
+            unit_fields.append({
+                "code": code,
+                "name": field_name,
+                "procedure_count": procedure_count,
+                "candidate_count": candidate_count,
+                "target_count": 10,
+                "missing_count": missing_count,
+                "coverage_status": coverage_status,
+            })
+        departments.append({
+            "id": unit.id,
+            "name": unit.name,
+            "fields": unit_fields,
+        })
+
+    return {
+        "departments": departments,
+        "total_procedures": total_procedures,
+    }
 
 @router.get("", response_model=List[Procedure])
 async def list_procedures(
@@ -325,6 +184,7 @@ async def list_procedures(
         where_sql = (" WHERE " + " AND ".join(conditions)) if conditions else ""
         sql = f"SELECT * FROM ward_procedure{where_sql} ORDER BY name ASC;"
         db_procs = await repo_query(sql, params)
+        db_procs = [item for item in db_procs if not item.get("archived")]
         if not db_procs and not conditions:
             # Fallback to seed list if database is empty and no filters requested
             db_procs = HAI_PHONG_PROCEDURES_SEED
@@ -349,9 +209,16 @@ async def list_procedures(
                 domain_slug=proc_data.get("domain_slug"),
                 steps=proc_data.get("steps") or [],
                 documents_required=proc_data.get("documents_required") or [],
-                duration=proc_data.get("duration"),
-                fee=proc_data.get("fee"),
-                forms=[FormTemplate(**normalize_form_record(f)) for f in (proc_data.get("forms") or [])]
+                duration=proc_data.get("duration") or "",
+                fee=proc_data.get("fee") or "",
+                forms=[FormTemplate(**normalize_form_record(f)) for f in (proc_data.get("forms") or [])],
+                guidance=proc_data.get("guidance") or "",
+                submission_place=proc_data.get("submission_place") or "",
+                legal_basis=proc_data.get("legal_basis") or [],
+                primary_organization_unit_id=proc_data.get("primary_organization_unit_id"),
+                supporting_organization_unit_ids=proc_data.get("supporting_organization_unit_ids") or [],
+                source_url=proc_data.get("source_url"),
+                catalog_status=proc_data.get("catalog_status") or "approved",
             )
             
             if department and department.lower() not in proc.department.lower():
@@ -373,9 +240,16 @@ async def list_procedures(
                 domain_slug=proc_data["domain_slug"],
                 steps=proc_data["steps"],
                 documents_required=proc_data["documents_required"],
-                duration=proc_data["duration"],
-                fee=proc_data["fee"],
-                forms=[FormTemplate(**normalize_form_record(f)) for f in proc_data["forms"]]
+                duration=proc_data.get("duration") or "",
+                fee=proc_data.get("fee") or "",
+                forms=[FormTemplate(**normalize_form_record(f)) for f in (proc_data.get("forms") or [])],
+                guidance=proc_data.get("guidance") or "",
+                submission_place=proc_data.get("submission_place") or "",
+                legal_basis=proc_data.get("legal_basis") or [],
+                primary_organization_unit_id=proc_data.get("primary_organization_unit_id"),
+                supporting_organization_unit_ids=proc_data.get("supporting_organization_unit_ids") or [],
+                source_url=proc_data.get("source_url"),
+                catalog_status=proc_data.get("catalog_status") or "approved",
             )
             if department and department.lower() not in proc.department.lower():
                 continue
@@ -584,7 +458,8 @@ def infer_form_domain(record: Dict[str, Any]) -> str | None:
 
 def normalize_form_record(record: Dict[str, Any]) -> Dict[str, Any]:
     """Copy a form record and normalize user-facing display fields."""
-    normalized = dict(record or {})
+    from api.procedure_form_links import resolve_catalog_link
+    normalized = resolve_catalog_link(record or {})
     display_name = normalize_form_display_name(normalized)
     normalized["name"] = display_name
     normalized["form_title"] = display_name
@@ -863,45 +738,59 @@ async def download_seed_procedure_form(proc_id: str, form_index: int):
 
 
 @router.post("/import-default", status_code=201)
-async def import_default_procedures():
+async def import_default_procedures(request: Request = None):
     """Nạp toàn bộ danh mục thủ tục hành chính & biểu mẫu của Thành phố Hải Phòng vào database."""
+    role = get_request_role(request) if request else "admin"
+    if role != "admin":
+        raise HTTPException(status_code=403, detail="Chỉ quản trị viên mới có quyền nhập dữ liệu.")
     try:
         count = 0
+        now = datetime.now()
         for proc in HAI_PHONG_PROCEDURES_SEED:
-            existing = await repo_query("SELECT id FROM ward_procedure WHERE id = $id OR id = $rec_id;", {"id": proc["id"], "rec_id": f"ward_procedure:{proc['id']}"})
+            domain = proc["domain_slug"]
+            name = proc["name"]
+            existing = await repo_query(
+                "SELECT id FROM ward_procedure WHERE domain_slug = $domain AND name = $name;",
+                {"domain": domain, "name": name},
+            )
+            projection = await _procedure_organization_projection(proc)
+            primary_unit_id = projection.get("primary_organization_unit_id") or proc.get("primary_organization_unit_id") or ""
+            supporting_ids = projection.get("supporting_organization_unit_ids") or proc.get("supporting_organization_unit_ids") or []
+
+            payload = {
+                "name": name,
+                "department": projection.get("department") or proc["department"],
+                "domain_slug": domain,
+                "primary_organization_unit_id": primary_unit_id,
+                "supporting_organization_unit_ids": supporting_ids,
+                "steps": proc.get("steps", []),
+                "documents_required": proc.get("documents_required", []),
+                "guidance": proc.get("guidance", ""),
+                "submission_place": proc.get("submission_place", ""),
+                "legal_basis": proc.get("legal_basis", []),
+                "duration": proc.get("duration", ""),
+                "fee": proc.get("fee", ""),
+                "forms": proc.get("forms", []),
+                "catalog_status": proc.get("catalog_status") or "approved",
+                "archived": False,
+                "updated": now,
+            }
             if existing:
-                await repo_update(
-                    "ward_procedure",
-                    f"ward_procedure:{proc['id']}",
-                    {
-                        "name": proc["name"],
-                        "department": proc["department"],
-                        "domain_slug": proc["domain_slug"],
-                        "steps": proc["steps"],
-                        "documents_required": proc["documents_required"],
-                        "duration": proc["duration"],
-                        "fee": proc["fee"],
-                        "forms": proc["forms"],
-                        "updated": datetime.now()
-                    }
-                )
+                existing_id = str(existing[0]["id"])
+                target_key = existing_id if ":" in existing_id else f"ward_procedure:{existing_id}"
+                await repo_update("ward_procedure", target_key, payload)
+                proc_id = existing_id.removeprefix("ward_procedure:")
             else:
-                await repo_create(
-                    "ward_procedure",
-                    {
-                        "id": proc["id"],
-                        "name": proc["name"],
-                        "department": proc["department"],
-                        "domain_slug": proc["domain_slug"],
-                        "steps": proc["steps"],
-                        "documents_required": proc["documents_required"],
-                        "duration": proc["duration"],
-                        "fee": proc["fee"],
-                        "forms": proc["forms"],
-                        "created": datetime.now(),
-                        "updated": datetime.now()
-                    }
-                )
+                payload["id"] = proc["id"]
+                payload["created"] = now
+                await repo_create("ward_procedure", payload)
+                proc_id = proc["id"]
+
+            await replace_procedure_unit_assignments(
+                procedure_id=proc_id,
+                primary_organization_unit_id=primary_unit_id,
+                supporting_organization_unit_ids=supporting_ids,
+            )
             count += 1
         return {"success": True, "message": f"Đã nạp thành công {count} thủ tục hành chính Hải Phòng."}
     except Exception as exc:
@@ -2705,7 +2594,14 @@ async def review_classified_form_candidate(
         if blockers:
             raise HTTPException(
                 status_code=422,
-                detail={"code": "FORM_LEGACY_INTAKE_INCOMPLETE", "fields": blockers},
+                detail={
+                    "code": "FORM_LEGACY_INTAKE_INCOMPLETE",
+                    # Keep one human-readable recovery instruction for the
+                    # review UI while preserving field-level messages for
+                    # precise highlighting.
+                    "message": " ".join(blockers.values()),
+                    "fields": blockers,
+                },
             )
         from api.form_governance_models import ActorContext, FormReviewSubmission
         from api.form_governance_service import get_form_governance_service

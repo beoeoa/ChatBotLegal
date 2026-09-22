@@ -155,7 +155,7 @@ export function LifecycleReadinessPanel() {
       setCandidate(result)
       setActionMessage('Đã tạo ứng viên. Trạng thái phục vụ chưa thay đổi cho tới khi xác nhận.')
     } catch {
-      setActionMessage('Không thể tạo ứng viên. Kiểm tra nguồn, ngày áp dụng và quyền Admin.')
+      setActionMessage('Không thể ghi nhận thay đổi. Hãy kiểm tra nguồn, ngày áp dụng và quyền quản trị viên.')
     } finally {
       setSubmitting(false)
     }
@@ -286,7 +286,7 @@ export function LifecycleReadinessPanel() {
           <AlertTitle>Chỉ xem trước và rà soát</AlertTitle>
           <AlertDescription className="flex flex-wrap items-center justify-between gap-3">
             <span>Trang này không xóa dữ liệu tìm kiếm, không lập chỉ mục lại và không thay đổi kho đang phục vụ.</span>
-            <span className="inline-flex items-center gap-1 text-xs"><Layers3 className="h-3.5 w-3.5" />Kho kỹ thuật: {manifest?.active_collection || 'Chưa xác định'}</span>
+            <span className="inline-flex items-center gap-1 text-xs"><Layers3 className="h-3.5 w-3.5" />Kho tìm kiếm: {manifest?.gate_passed ? 'Đang hoạt động' : 'Cần rà soát'}</span>
           </AlertDescription>
         </Alert>
       </CardContent>

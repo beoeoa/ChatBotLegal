@@ -3,12 +3,17 @@ FROM python:3.12-slim-bookworm AS api-builder
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
 ENV TIKTOKEN_CACHE_DIR=/app/tiktoken-cache
+ENV PLAYWRIGHT_BROWSERS_PATH=/app/playwright-browsers
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
 COPY open_notebook/__init__.py ./open_notebook/__init__.py
 COPY scripts/patch_moviepy_pillow_metadata.py /tmp/patch_moviepy_pillow_metadata.py
+COPY scripts/patch_crawl4ai_lxml_metadata.py /tmp/patch_crawl4ai_lxml_metadata.py
 RUN uv sync --frozen --no-dev --extra ocr \
+    && .venv/bin/python -m patchright install chromium \
     && .venv/bin/python /tmp/patch_moviepy_pillow_metadata.py \
+       --site-packages /app/.venv/lib/python3.12/site-packages \
+    && .venv/bin/python /tmp/patch_crawl4ai_lxml_metadata.py \
        --site-packages /app/.venv/lib/python3.12/site-packages \
     && .venv/bin/python -m pip check \
     && mkdir -p /app/tiktoken-cache \
@@ -19,12 +24,13 @@ RUN echo 'Acquire::Check-Date "false";' > /etc/apt/apt.conf.d/99ignore-release-d
     && apt-get update \
     && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends \
-       curl ffmpeg tesseract-ocr tesseract-ocr-eng tesseract-ocr-vie \
+       chromium curl ffmpeg tesseract-ocr tesseract-ocr-eng tesseract-ocr-vie \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system app \
     && useradd --system --gid app --home /app app
 WORKDIR /app
 COPY --from=api-builder /app/.venv /app/.venv
+COPY --from=api-builder /app/playwright-browsers /app/playwright-browsers
 COPY --from=api-builder /app/tiktoken-cache /app/tiktoken-cache
 # pytubefix needs the bundled Node executable, not npm/corepack or the C/C++
 # headers shipped in nodejs-wheel. Removing those build/package-manager assets
@@ -46,14 +52,16 @@ COPY config /app/config
 COPY prompts /app/prompts
 COPY assets /app/assets
 COPY frontend/src/app /app/frontend/src/app
+COPY frontend/src/lib/data/commune-catalog.json /app/frontend/src/lib/data/commune-catalog.json
 COPY pyproject.toml /app/pyproject.toml
-RUN mkdir -p /app/data /app/tiktoken-cache \
-    && chown -R app:app /app/data /app/tiktoken-cache
+RUN mkdir -p /app/data /app/runtime-data /app/tiktoken-cache \
+    && chown -R app:app /app/data /app/runtime-data /app/tiktoken-cache
 ENV PATH=/app/.venv/bin:$PATH \
     VIRTUAL_ENV=/app/.venv \
     UV_NO_SYNC=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    PLAYWRIGHT_BROWSERS_PATH=/app/playwright-browsers \
     TIKTOKEN_CACHE_DIR=/app/tiktoken-cache
 USER app
 EXPOSE 5055

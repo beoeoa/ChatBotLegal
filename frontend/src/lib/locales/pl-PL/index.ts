@@ -103,7 +103,6 @@ export const plPL = {
     searchTerms: "Hasła wyszukiwania",
     strategy: "Strategia",
     individualAnswers: "Pojedyncze odpowiedzi ({count})",
-    finalAnswer: "Ostateczna odpowiedź",
     notebookLabel: "Notatnik: {name}",
     itemNotFound: "Nie udało się odnaleźć elementu ({type})",
     accessibility: {
@@ -818,7 +817,6 @@ export const plPL = {
   },
   models: {
     embedding: "Modele osadzania",
-    tts: "Synteza mowy (TTS)",
     stt: "Rozpoznawanie mowy (STT)",
     apiKey: "Klucz API",
     deleteSuccess: "Model usunięty pomyślnie",
@@ -844,8 +842,6 @@ export const plPL = {
     largeContextModelDesc: "Używany do przetwarzania dużych dokumentów – zalecany Gemini",
     embeddingModelLabel: "Model osadzania",
     embeddingModelDesc: "Używany do wyszukiwania semantycznego i osadzeń wektorowych",
-    ttsModelLabel: "Model syntezy mowy",
-    ttsModelDesc: "Używany do generowania podcastów",
     sttModelLabel: "Model rozpoznawania mowy",
     sttModelDesc: "Używany do transkrypcji audio",
     embeddingChangeTitle: "Zmiana modelu osadzania",

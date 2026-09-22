@@ -56,8 +56,10 @@ import {
 import { Credential, CreateCredentialRequest, UpdateCredentialRequest, DiscoveredModel } from '@/lib/api/credentials'
 import { Model, ModelDefaults } from '@/lib/types/models'
 import { PROVIDER_MODALITIES, isSupportedProviderModality, localOllamaBaseUrl, providerSetupReadiness } from '@/lib/utils/model-setup'
+import { formatApiError } from '@/lib/utils/error-handler'
 import { MigrationBanner, ModelTestResultDialog } from '@/components/settings'
 import { EmbeddingModelChangeDialog } from '@/components/settings/EmbeddingModelChangeDialog'
+import { ChatModelPolicyForm } from '../components/ChatModelPolicyForm'
 
 type ModelType = 'language' | 'embedding' | 'text_to_speech' | 'speech_to_text'
 
@@ -162,6 +164,7 @@ function CredentialFormDialog({
 
   const [name, setName] = useState('')
   const [apiKey, setApiKey] = useState('')
+  const [clearApiKey, setClearApiKey] = useState(false)
   const [baseUrl, setBaseUrl] = useState('')
   const [showApiKey, setShowApiKey] = useState(false)
   const [project, setProject] = useState('')
@@ -176,6 +179,7 @@ function CredentialFormDialog({
       setName(credential.name || '')
       setBaseUrl(credential.base_url || '')
       setApiKey('')
+      setClearApiKey(false)
       setProject(credential.project || '')
       setLocation(credential.location || '')
       setCredentialsPath(credential.credentials_path || '')
@@ -185,6 +189,7 @@ function CredentialFormDialog({
       setName('')
       setBaseUrl(initialBaseUrl || (provider === 'ollama' ? 'http://localhost:11434' : ''))
       setApiKey('')
+      setClearApiKey(false)
       setProject('')
       setLocation('')
       setCredentialsPath('')
@@ -203,7 +208,8 @@ function CredentialFormDialog({
     if (isEditing && credential) {
       const data: UpdateCredentialRequest = {}
       if (name !== credential.name) data.name = name
-      if (apiKey.trim()) data.api_key = apiKey.trim()
+      if (isOpenAICompatible && clearApiKey) data.api_key = ''
+      else if (apiKey.trim()) data.api_key = apiKey.trim()
       if (baseUrl !== (credential.base_url || '')) data.base_url = baseUrl || undefined
       if (JSON.stringify(modalities) !== JSON.stringify(credential.modalities)) data.modalities = modalities
       if (isVertex) {
@@ -337,6 +343,17 @@ function CredentialFormDialog({
                 </button>
               </div>
               {isEditing && <p className="text-xs text-muted-foreground">{t('apiKeys.apiKeyEditHint')}</p>}
+              {isEditing && isOpenAICompatible && credential?.has_api_key && (
+                <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    checked={clearApiKey}
+                    onChange={(e) => setClearApiKey(e.target.checked)}
+                    disabled={isSubmitting}
+                  />
+                  Xóa khóa API đã lưu (LM Studio thường không yêu cầu khóa)
+                </label>
+              )}
               {docsUrl && (
                 <a href={docsUrl} target="_blank" rel="noopener noreferrer" className="text-xs text-primary hover:underline">
                   {t('apiKeys.getApiKey')} &rarr;
@@ -359,6 +376,11 @@ function CredentialFormDialog({
                 disabled={isSubmitting}
               />
               <p className="text-xs text-muted-foreground">{t('apiKeys.baseUrlOverrideHint')}</p>
+              {isOpenAICompatible && (
+                <p className="text-xs text-amber-700 dark:text-amber-300">
+                  LM Studio: dùng <code>http://&lt;địa-chỉ-máy&gt;:1234/v1</code>. Nút lấy model sẽ đọc đúng mã model đang tải; không dùng đường dẫn REST <code>/api/v1</code>.
+                </p>
+              )}
             </div>
           )}
 
@@ -443,8 +465,7 @@ function DiscoverModelsDialog({
         },
         onError: (error: unknown) => {
           setHasDiscovered(true)
-          const msg = error instanceof Error ? error.message : String(error)
-          setDiscoveryError(msg)
+          setDiscoveryError(formatApiError(error, 'Không thể tải danh sách mô hình từ nhà cung cấp.'))
         },
       })
     }
@@ -803,7 +824,6 @@ function CredentialItem({
       'Tools': defaults.default_tools_model,
       'Large Ctx': defaults.large_context_model,
       'Embedding': defaults.default_embedding_model,
-      'TTS': defaults.default_text_to_speech_model,
       'STT': defaults.default_speech_to_text_model,
     }
     for (const [slot, modelId] of Object.entries(slotMap)) {
@@ -1131,7 +1151,6 @@ function DefaultModelSelectors({
   const primaryConfigs: DefaultConfig[] = [
     { key: 'default_chat_model', label: t('models.chatModelLabel'), description: t('models.chatModelDesc'), modelType: 'language', required: true, id: `${generatedId}-chat` },
     { key: 'default_embedding_model', label: t('models.embeddingModelLabel'), description: t('models.embeddingModelDesc'), modelType: 'embedding', required: true, id: `${generatedId}-embed` },
-    { key: 'default_text_to_speech_model', label: t('models.ttsModelLabel'), description: t('models.ttsModelDesc'), modelType: 'text_to_speech', id: `${generatedId}-tts` },
     { key: 'default_speech_to_text_model', label: t('models.sttModelLabel'), description: t('models.sttModelDesc'), modelType: 'speech_to_text', id: `${generatedId}-stt` },
   ]
 
@@ -1184,8 +1203,11 @@ function DefaultModelSelectors({
         {missingRequired.length > 0 && (
           <Alert>
             <AlertCircle className="h-4 w-4" />
-            <AlertDescription className="flex items-center justify-between gap-4">
-              <span>{t('models.missingRequiredModels').replace('{models}', missingRequired.join(', '))}</span>
+            <AlertDescription className="flex flex-wrap items-center justify-between gap-4">
+              <div className="min-w-0 flex-1 space-y-1">
+                <p>{t('models.missingRequiredModels').replace('{models}', missingRequired.join(', '))}</p>
+                <p className="text-sm">Đây là cấu hình model mặc định cho các chức năng dùng chung, không phải kết quả kiểm tra kho tra cứu pháp luật. Kho pháp luật có dịch vụ tìm kiếm riêng; xem trạng thái vận hành tại trang quản trị.</p>
+              </div>
               <Button
                 variant="outline" size="sm"
                 onClick={() => autoAssign.mutate()}
@@ -1199,8 +1221,8 @@ function DefaultModelSelectors({
           </Alert>
         )}
 
-        {/* Primary models: Chat, Embedding, TTS, STT */}
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        {/* Primary runtime models. TTS has no product caller, so it is not exposed as a default. */}
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {primaryConfigs.map(config => {
             const available = getModelsForType(config.modelType)
             const currentValue = watch(config.key) || undefined
@@ -1390,7 +1412,7 @@ function EasyModelSetup({
     <Card className="border-primary/30 bg-primary/[0.02]">
       <CardHeader>
         <CardTitle className="flex items-center gap-2"><Wand2 className="h-5 w-5 text-primary" /> Thiết lập AI có hướng dẫn</CardTitle>
-        <CardDescription>Hoàn thành lần lượt 4 bước. Sau khi cấu hình xong, người dùng chỉ cần đặt câu hỏi; không phải chọn model trong màn hình hỏi đáp.</CardDescription>
+        <CardDescription>Thiết lập model mặc định cho các chức năng dùng chung theo 4 bước. Trình thiết lập này không thay đổi model tìm kiếm riêng của kho pháp luật và không dùng để kết luận kho đó sẵn sàng hay gặp lỗi.</CardDescription>
       </CardHeader>
       <CardContent className="space-y-5">
         <div className="grid gap-3 md:grid-cols-2">
@@ -1400,15 +1422,15 @@ function EasyModelSetup({
             className={`rounded-lg border p-4 text-left transition-colors ${runMode === 'local' ? 'border-primary bg-primary/5' : 'hover:bg-muted'}`}
           >
             <span className="flex items-center gap-2 font-medium"><Laptop className="h-5 w-5" /> Chạy local bằng Ollama</span>
-            <span className="mt-1 block text-xs text-muted-foreground">Không cần API key, dữ liệu không gửi tới nhà cung cấp AI.</span>
+            <span className="mt-1 block text-xs text-muted-foreground">Không cần khóa kết nối; dữ liệu không gửi tới nhà cung cấp AI.</span>
           </button>
           <button
             type="button"
             onClick={() => setRunMode('cloud')}
             className={`rounded-lg border p-4 text-left transition-colors ${runMode === 'cloud' ? 'border-primary bg-primary/5' : 'hover:bg-muted'}`}
           >
-            <span className="flex items-center gap-2 font-medium"><Cloud className="h-5 w-5" /> Dùng API cloud</span>
-            <span className="mt-1 block text-xs text-muted-foreground">Dễ triển khai nhiều người dùng; cần API key của nhà cung cấp.</span>
+            <span className="flex items-center gap-2 font-medium"><Cloud className="h-5 w-5" /> Dùng dịch vụ đám mây</span>
+            <span className="mt-1 block text-xs text-muted-foreground">Dễ triển khai cho nhiều người dùng; cần khóa kết nối của nhà cung cấp.</span>
           </button>
         </div>
 
@@ -1433,7 +1455,7 @@ function EasyModelSetup({
                 </SelectContent>
               </Select>
             )}
-            <p className="text-xs text-muted-foreground">{runMode === 'local' ? initialBaseUrl : 'API key được mã hóa trước khi lưu.'}</p>
+            <p className="text-xs text-muted-foreground">{runMode === 'local' ? initialBaseUrl : 'Khóa kết nối được mã hóa trước khi lưu.'}</p>
           </div>
 
           <div className="space-y-2">
@@ -1471,14 +1493,14 @@ function EasyModelSetup({
                   ? 'Đã đủ model trả lời và embedding để kích hoạt.'
                   : readiness.blockers.includes('connection_not_verified')
                     ? 'Cần kiểm tra kết nối thành công trước khi kích hoạt.'
-                    : 'Cần đăng ký đủ một model trả lời và một model embedding thật.'}
+                    : 'Để kích hoạt cặp model qua trình thiết lập này, cần đăng ký một model trả lời và một model embedding thật. Điều này không chặn kho pháp luật đang dùng dịch vụ tìm kiếm riêng.'}
             </p>
           </div>
         </div>
 
         <Alert>
           <AlertCircle className="h-4 w-4" />
-          <AlertDescription><strong>Model trả lời</strong> dùng để hiểu và soạn câu trả lời. <strong>Model embedding</strong> dùng để biến văn bản/câu hỏi thành vector tìm kiếm. Không đổi model embedding của kho đang chạy nếu chưa tái lập chỉ mục có kiểm soát.</AlertDescription>
+          <AlertDescription><strong>Mô hình trả lời</strong> dùng để hiểu và soạn câu trả lời. <strong>Mô hình tạo dữ liệu tìm kiếm</strong> dùng để biểu diễn văn bản và câu hỏi theo ngữ nghĩa. Không đổi mô hình tìm kiếm của kho đang chạy nếu chưa tạo lại dữ liệu tra cứu có kiểm soát.</AlertDescription>
         </Alert>
 
         <CredentialFormDialog
@@ -1567,8 +1589,10 @@ export default function ApiKeysPage() {
   if (isLoading) {
     return (
       <AppShell>
-        <div className="flex items-center justify-center min-h-[60vh]">
+        <div className="flex min-h-[60vh] flex-col items-center justify-center gap-3" aria-busy="true">
+          <h1 className="text-2xl font-bold">Đang tải cấu hình mô hình và khóa API</h1>
           <LoadingSpinner size="lg" />
+          <p className="text-sm text-muted-foreground">Vui lòng chờ trong giây lát.</p>
         </div>
       </AppShell>
     )
@@ -1616,6 +1640,8 @@ export default function ApiKeysPage() {
           {models && defaults && (
             <DefaultModelSelectors models={models} defaults={defaults} />
           )}
+
+          <ChatModelPolicyForm />
 
           {/* Provider Cards */}
           <div className="grid gap-4">

@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 import unicodedata
 import math
+import hashlib
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from typing import Any
@@ -92,6 +93,84 @@ def _structural_units(value: Any) -> list[str]:
     return units
 
 
+def _top_level_clause_groups(value: Any) -> list[dict[str, str]]:
+    """Return compact previews for each top-level Khoản in source order.
+
+    The outline is a projection only: previews are bounded source text and
+    never replace the immutable Article body.  Keeping one preview per
+    Khoản lets a broad question be answered from the complete structure
+    without sending every child chunk to a model.
+    """
+
+    groups: list[dict[str, str]] = []
+    seen_labels: set[str] = set()
+    current_label: str | None = None
+    current_lines: list[str] = []
+
+    def flush() -> None:
+        if not current_label:
+            return
+        preview = " ".join(line.strip() for line in current_lines if line.strip())
+        if preview:
+            preview = re.sub(r"\s+", " ", preview).strip()[:300]
+        # A PDF extraction can restart numbering inside a quoted amendment.
+        # Keep one representative for each top-level label so the outline
+        # describes the Article rather than repeating ``Khoản 1`` many times.
+        label_key = current_label.casefold()
+        if label_key in seen_labels:
+            return
+        seen_labels.add(label_key)
+        groups.append({"label": current_label, "preview": preview})
+
+    for raw_line in str(value or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        clause = _CLAUSE_LINE.match(raw_line)
+        if clause:
+            flush()
+            current_label = f"Khoản {clause.group('number').casefold()}"
+            current_lines = [raw_line[clause.end() :].strip()]
+            continue
+        if current_label:
+            current_lines.append(raw_line)
+    flush()
+    return groups
+
+
+def _top_level_clause_groups_from_rows(
+    rows: Iterable[Mapping[str, Any]],
+) -> list[dict[str, str]]:
+    """Build one preview per structural top-level clause.
+
+    ``article_content`` is often plain extracted text.  Numbered definitions
+    and quoted amendments inside that text can look like new top-level
+    clauses, so parsing the text alone produces repeated labels (for example
+    eight ``Khoản 1`` entries).  The immutable chunk metadata already carries
+    the structural path; use it to group previews and keep the text parser as
+    a compatibility fallback only.
+    """
+
+    groups: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for row in rows:
+        parsed = parse_structural_path(
+            str(
+                row.get("structural_path")
+                or row.get("chunk_heading")
+                or row.get("title")
+                or ""
+            )
+        )
+        clause = _identity(parsed.get("clause_number"))
+        if not clause:
+            continue
+        label = f"Khoản {clause.casefold()}"
+        if label in seen:
+            continue
+        seen.add(label)
+        preview = re.sub(r"\s+", " ", _identity(row.get("content"))).strip()[:300]
+        groups.append({"label": label, "preview": preview})
+    return groups
+
+
 def _row_structural_units(row: Mapping[str, Any]) -> set[str]:
     units = set(_structural_units(row.get("content")))
     parsed = parse_structural_path(str(row.get("chunk_heading") or ""))
@@ -170,6 +249,119 @@ def is_single_exact_article_plan(plan: Any) -> bool:
     return len(laws) == 1 and len(articles) == 1
 
 
+def is_article_overview_request(value: Any) -> bool:
+    """Detect a broad ``Điều ... quy định gì?`` request deterministically."""
+
+    folded = " ".join(_fold_tokens(value))
+    if _requests_full_article(value):
+        return False
+    if any(token in folded.split() for token in ("khoan", "diem", "muc")):
+        return False
+    return any(
+        marker in folded
+        for marker in (
+            "noi dung gi",
+            "quy dinh gi",
+            "noi dung cua dieu",
+            "dieu nay quy dinh",
+            "pham vi dieu chinh",
+            "tom tat dieu",
+        )
+    )
+
+
+def is_full_article_request(value: Any) -> bool:
+    """Return whether the user asks to read the complete Article verbatim."""
+
+    return _requests_full_article(value)
+
+
+def build_article_outline(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    """Build a compact, checksum-bound projection of a complete Article."""
+
+    ordered = sorted(
+        (dict(row) for row in rows),
+        key=lambda row: (
+            _integer(row.get("chunk_index"))
+            if _integer(row.get("chunk_index")) is not None
+            else 2**31,
+            _integer(row.get("chunk_id"))
+            if _integer(row.get("chunk_id")) is not None
+            else 2**31,
+        ),
+    )
+    if not ordered:
+        return {
+            "version": "article_outline_v1",
+            "chunk_count": 0,
+            "structural_unit_count": 0,
+            "top_level_group_count": 0,
+            "top_level_groups": [],
+            "checksum": "",
+        }
+    assembled = max(
+        (_identity(row.get("article_content")) for row in ordered),
+        key=len,
+        default="",
+    ) or "\n\n".join(
+        _identity(row.get("content"))
+        for row in ordered
+        if _identity(row.get("content"))
+    ).strip()
+    units = _structural_units(assembled)
+    top_level_groups = _top_level_clause_groups_from_rows(ordered)
+    if not top_level_groups:
+        top_level_groups = _top_level_clause_groups(assembled)
+    opening_excerpt = next(
+        (line.strip() for line in assembled.splitlines() if line.strip()),
+        "",
+    )[:600]
+    referenced_articles = list(
+        dict.fromkeys(
+            match.casefold()
+            for match in re.findall(
+                r"\bĐiều\s+([0-9]+[a-zA-Z]?)\b", assembled, flags=re.IGNORECASE
+            )
+        )
+    )
+    return {
+        "version": "article_outline_v1",
+        "law_number": ordered[0].get("law_number"),
+        "article_number": ordered[0].get("article_number"),
+        "document_id": ordered[0].get("document_id"),
+        "document_title": next(
+            (
+                _identity(row.get("document_title") or row.get("law_name") or row.get("title"))
+                for row in ordered
+                if _identity(row.get("document_title") or row.get("law_name") or row.get("title"))
+            ),
+            "",
+        ),
+        "article_title": next(
+            (
+                _identity(row.get("article_title") or row.get("article_heading"))
+                for row in ordered
+                if _identity(row.get("article_title") or row.get("article_heading"))
+            ),
+            "",
+        ),
+        "chunk_count": len(ordered),
+        "character_count": len(assembled),
+        "structural_unit_count": len(units),
+        "top_level_group_count": len(top_level_groups),
+        # Keep the complete deduplicated structure in the projection. The
+        # serving layer samples beginning/middle/end when building a prompt,
+        # so this does not enlarge the model context while avoiding a hidden
+        # first-64 truncation for unusually long Articles.
+        "top_level_groups": top_level_groups,
+        "first_structural_units": units[:8],
+        "last_structural_units": units[-8:] if len(units) > 8 else [],
+        "referenced_articles": referenced_articles[:64],
+        "opening_excerpt": opening_excerpt,
+        "checksum": hashlib.sha256(assembled.encode("utf-8")).hexdigest(),
+    }
+
+
 def build_exact_article_packet(
     rows: Iterable[Mapping[str, Any]],
     *,
@@ -208,6 +400,7 @@ def build_exact_article_packet(
             "missing_content_segments": [],
             "content_coverage_ratio": 0.0,
             "assembled_content": "",
+            "article_outline": build_article_outline([]),
         }
 
     first = ordered[0]
@@ -326,9 +519,38 @@ def build_exact_article_packet(
         "content_coverage_ratio": round(coverage_ratio, 4),
         "attachment_boundary_detected": attachment_boundary_detected,
         "excluded_attachment_chunk_count": excluded_attachment_chunks,
+        # Keep only source metadata in the packet projection.  The full body
+        # remains private to the exact-index worker; a too-large full-text
+        # request can still open the official viewer without copying the body
+        # into the answer prompt or public trace.
+        "source_url": next(
+            (
+                _identity(row.get("source_url") or row.get("url"))
+                for row in ordered
+                if _identity(row.get("source_url") or row.get("url"))
+            ),
+            "",
+        ),
+        "document_title": next(
+            (
+                _identity(
+                    row.get("document_title")
+                    or row.get("law_name")
+                    or row.get("title")
+                )
+                for row in ordered
+                if _identity(
+                    row.get("document_title")
+                    or row.get("law_name")
+                    or row.get("title")
+                )
+            ),
+            "",
+        ),
         # The stored Article body is the canonical source-order reconstruction.
         # Every stored chunk must cover it before the packet can become complete.
         "assembled_content": parent_content,
+        "article_outline": build_article_outline(ordered),
     }
 
 
@@ -339,7 +561,11 @@ def _requests_full_article(value: Any) -> bool:
         for marker in (
             "day du dieu",
             "toan bo dieu",
+            "toan van dieu",
+            "doc toan van",
             "nguyen van dieu",
+            "toan bo van ban",
+            "toan van van ban",
             "dieu nay gom nhung noi dung",
             "gom nhung noi dung nao",
             "giu dung thu tu khoan diem",
@@ -565,6 +791,7 @@ def attach_exact_article_packet(
                 "exact_article_omitted_chunk_count": packet.get(
                     "omitted_chunk_count", 0
                 ),
+                "exact_article_outline": dict(packet.get("article_outline") or {}),
             }
         )
         row["parent_context_original_chars"] = int(
@@ -604,6 +831,9 @@ def public_exact_article_packet(packet: Mapping[str, Any] | None) -> dict[str, A
         "context_coverage_ratio",
         "attachment_boundary_detected",
         "excluded_attachment_chunk_count",
+        "article_outline",
+        "source_url",
+        "document_title",
     )
     return {key: packet.get(key) for key in allowed}
 
@@ -612,6 +842,9 @@ __all__ = [
     "attach_exact_article_packet",
     "build_exact_article_packet",
     "build_exact_article_serving_packet",
+    "build_article_outline",
     "is_single_exact_article_plan",
+    "is_article_overview_request",
+    "is_full_article_request",
     "public_exact_article_packet",
 ]

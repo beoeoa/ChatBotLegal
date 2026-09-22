@@ -46,6 +46,18 @@ def _normative_content(row: Mapping[str, Any]) -> str:
     return ""
 
 
+def is_foreign_civil_reregistration_provision(row: Mapping[str, Any]) -> bool:
+    """Articles 40–42 inherit the overseas/foreign scope of Article 40.
+
+    Source: https://vbpl.vn/TW/Pages/vbpq-print.aspx?ItemID=92897
+    This is an applicability filter, not an assertion of current effectivity.
+    """
+    law = _fold(row.get("law_number")).replace(" ", "")
+    article = _fold(row.get("article_number"))
+    match = re.fullmatch(r"(?:dieu\s*)?(40|41|42)[.]?", article)
+    return law == "123/2015/nd-cp" and match is not None
+
+
 def _temporal_mismatch(query: str, content: str) -> bool:
     query_years = [int(value) for value in re.findall(r"\b(?:19|20)\d{2}\b", query)]
     if not query_years:
@@ -217,6 +229,77 @@ def _issue_tokens(value: str) -> set[str]:
     }
 
 
+def _effectivity_key(row: Mapping[str, Any]) -> int:
+    """Prefer current material inside the same legal-authority group."""
+
+    status = _fold(
+        " ".join(
+            str(row.get(name) or "")
+            for name in (
+                "effectivity_status", "effective_status", "legal_status",
+                "status", "validity_status",
+            )
+        )
+    )
+    if any(marker in status for marker in (
+        "het hieu luc", "expired", "repealed", "bai bo", "superseded",
+    )):
+        return -1
+    if any(marker in status for marker in (
+        "con hieu luc", "dang hieu luc", "effective", "current", "active",
+    )):
+        return 1
+    return 0
+
+
+def _phrase_match_score(query: str, row: Mapping[str, Any]) -> int:
+    """Score exact query phrases in article headings and normative text.
+
+    This is a tie-breaker within authority/effectivity groups. It cannot make
+    a lower-validity document outrank a superior legal source.
+    """
+
+    generic = {
+        "anh", "chi", "toi", "mot", "nhung", "truong", "hop", "nao",
+        "duoc", "phai", "khi", "thi", "the", "va", "hoac", "cho",
+        "cua", "trong", "tren", "ve", "voi", "lam", "gi",
+    }
+    words = [
+        token for token in re.findall(r"[a-z0-9]+", query)
+        if len(token) >= 2 and token not in generic
+    ]
+    title = _fold(
+        " ".join(
+            str(row.get(name) or "")
+            for name in ("article_title", "chunk_heading")
+        )
+    )
+    body = _normative_content(row)
+    score = 0
+    seen: set[str] = set()
+    for size in (5, 4, 3, 2):
+        for offset in range(max(0, len(words) - size + 1)):
+            phrase = " ".join(words[offset : offset + size])
+            if phrase in seen:
+                continue
+            seen.add(phrase)
+            if phrase in title:
+                score += size * size * 4
+            elif phrase in body:
+                score += size * size
+    title_tokens = set(re.findall(r"[a-z0-9]+", title))
+    body_tokens = set(re.findall(r"[a-z0-9]+", body))
+    distinctive = set(words)
+    score += 3 * len(distinctive & title_tokens)
+    score += len(distinctive & body_tokens)
+
+    requested_article = re.search(r"\bdieu\s+(\d+[a-z]?)\b", query)
+    row_article = re.search(r"(?:dieu\s*)?(\d+[a-z]?)", _fold(row.get("article_number")))
+    if requested_article and row_article and requested_article.group(1) == row_article.group(1):
+        score += 250
+    return score
+
+
 def rank_issue_evidence(
     issue_query: str,
     candidates: Sequence[Mapping[str, Any]],
@@ -254,7 +337,7 @@ def rank_issue_evidence(
         )
     )
     query_tokens = _issue_tokens(issue_query)
-    accepted: list[tuple[int, Mapping[str, Any], float]] = []
+    accepted: list[tuple[int, Mapping[str, Any], float, int, int]] = []
     decisions: list[dict[str, Any]] = []
     for index, row in enumerate(candidates):
         searchable = _searchable(row)
@@ -413,7 +496,6 @@ def rank_issue_evidence(
                     "co chu ky cua cac ben lien quan",
                     "hop dong hoac van ban ve chuyen quyen",
                     "ho so",
-                    "giay to",
                     "don dang ky",
                     "don de nghi",
                     "chung tu",
@@ -677,6 +759,13 @@ def rank_issue_evidence(
                 for marker in ("cong dan viet nam", "nguoi viet nam")
             )
         )
+        foreign_reregistration_mismatch = (
+            is_foreign_civil_reregistration_provision(row)
+            and "dang ky lai" in query
+            and any(term in query for term in ("khai sinh", "ket hon", "khai tu"))
+            and not any(term in query for term in ("nuoc ngoai", "viet kieu", "quoc tich"))
+            and not re.search(r"\bdieu\s+(?:40|41|42)\b", query)
+        )
         internal_consultation_mismatch = (
             any(
                 marker in query
@@ -855,17 +944,23 @@ def rank_issue_evidence(
             decision = "reject"
             reason = "transaction_type_mismatch_inheritance"
         elif internal_cadastral_record_mismatch:
-            penalty = 0.2
+            decision = "reject"
+            reason = "document_actor_mismatch_internal_cadastral_record"
         elif internal_form_distribution_mismatch:
-            penalty = 0.2
+            decision = "reject"
+            reason = "document_actor_mismatch_internal_form_distribution"
         elif internal_tax_transfer_mismatch:
-            penalty = 0.2
+            decision = "reject"
+            reason = "document_actor_mismatch_internal_tax_transfer"
         elif first_registration_document_support_missing:
-            penalty = 0.2
+            decision = "reject"
+            reason = "missing_first_registration_document_support"
         elif deadline_type_mismatch:
-            penalty = 0.2
+            decision = "reject"
+            reason = "deadline_type_mismatch_land_tenure"
         elif first_registration_deadline_missing:
-            penalty = 0.2
+            decision = "reject"
+            reason = "deadline_not_first_registration_specific"
         elif finance_context_mismatch:
             decision = "reject"
             reason = "finance_context_mismatch_land_price_uses"
@@ -920,6 +1015,9 @@ def rank_issue_evidence(
         elif residence_database_definition_mismatch:
             decision = "reject"
             reason = "residence_case_mismatch_database_definition"
+        elif foreign_reregistration_mismatch:
+            decision = "reject"
+            reason = "subject_mismatch_foreign_reregistration"
         elif foreign_only_mismatch:
             decision = "reject"
             reason = "subject_mismatch_foreign_only"
@@ -956,7 +1054,9 @@ def rank_issue_evidence(
             if query_tokens and not overlap:
                 penalty = 0.15
                 reason = "indirect_subject_overlap"
-            accepted.append((index, row, penalty))
+            phrase_score = _phrase_match_score(query, row)
+            effectivity = _effectivity_key(row)
+            accepted.append((index, row, penalty, phrase_score, effectivity))
 
         decisions.append(
             {
@@ -964,6 +1064,12 @@ def rank_issue_evidence(
                 "decision": decision,
                 "reason": reason,
                 "penalty": penalty,
+                "phrase_match_score": (
+                    _phrase_match_score(query, row) if decision == "keep" else 0
+                ),
+                "effectivity_rank": (
+                    _effectivity_key(row) if decision == "keep" else 0
+                ),
             }
         )
 
@@ -972,8 +1078,10 @@ def rank_issue_evidence(
         key=lambda item: (
             -_authority_key(item[1])[0],
             -_authority_key(item[1])[1],
+            -item[4],
+            -item[3],
             -(float(item[1].get("score") or 0.0) - item[2]),
             item[0],
         ),
     )
-    return [row for _, row, _ in ordered], decisions
+    return [row for _, row, _, _, _ in ordered], decisions

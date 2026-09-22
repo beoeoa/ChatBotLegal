@@ -39,12 +39,47 @@ async def begin(key: str | None) -> tuple[str, Any]:
         return "owner", future
 
 
-async def complete(key: str | None, value: Any) -> None:
+def is_cacheable_result(value: Any) -> bool:
+    """Return whether an Ask result is safe to replay for a retry.
+
+    Idempotency still resolves concurrent waiters with every completed result,
+    but transient/failed legal answers must not be retained as a five-minute
+    replay.  Otherwise the UI's intentional stable retry key would replay a
+    ``cannot_verify`` response after the retrieval service has recovered.
+    """
+
+    def field(name: str, default: Any = None) -> Any:
+        if isinstance(value, dict):
+            return value.get(name, default)
+        return getattr(value, name, default)
+
+    status = str(field("answer_status", "") or "").strip().casefold()
+    grounding = str(field("grounding_status", "") or "").strip().casefold()
+    try:
+        evidence_count = int(field("evidence_count", 0) or 0)
+    except (TypeError, ValueError):
+        evidence_count = 0
+    if status == "cannot_verify":
+        return False
+    if grounding in {"insufficient_evidence", "retrieval_unavailable"}:
+        return False
+    if evidence_count <= 0:
+        return False
+    return True
+
+
+async def complete(
+    key: str | None,
+    value: Any,
+    *,
+    cacheable: bool = True,
+) -> None:
     if not key:
         return
     async with _lock:
         future = _inflight.pop(key, None)
-        _completed[key] = (time.monotonic() + _TTL_SECONDS, value)
+        if cacheable:
+            _completed[key] = (time.monotonic() + _TTL_SECONDS, value)
         if future and not future.done():
             future.set_result(value)
 

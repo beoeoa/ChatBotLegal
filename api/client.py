@@ -120,8 +120,8 @@ class APIClient:
         query: str,
         search_type: str = "text",
         limit: int = 100,
-        search_sources: bool = True,
-        search_notes: bool = True,
+        search_sources: bool = False,
+        search_notes: bool = False,
         minimum_score: float = 0.2,
     ) -> Union[Dict[Any, Any], List[Dict[Any, Any]]]:
         """Search the knowledge base."""

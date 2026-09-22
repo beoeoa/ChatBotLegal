@@ -1,0 +1,19 @@
+-- Direct RAG answer snapshot fields.
+-- Additive only: existing conversation messages remain readable and no legal
+-- corpus records are changed.  These fields keep the public answer contract
+-- durable instead of silently falling back to an answer-only row when a
+-- SCHEMAFULL Surreal table receives a Direct RAG response.
+DEFINE FIELD IF NOT EXISTS timing_summary ON TABLE conversation_message TYPE option<object> FLEXIBLE;
+DEFINE FIELD IF NOT EXISTS answer_status ON TABLE conversation_message TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS fallback_tier ON TABLE conversation_message TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS outcome ON TABLE conversation_message TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS reason_code ON TABLE conversation_message TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS retryable ON TABLE conversation_message TYPE option<bool>;
+DEFINE FIELD IF NOT EXISTS scope ON TABLE conversation_message TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS persistence_degraded ON TABLE conversation_message TYPE bool DEFAULT false;
+DEFINE FIELD IF NOT EXISTS release_id ON TABLE conversation_message TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS manifest_hash ON TABLE conversation_message TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS canonical_domain ON TABLE conversation_message TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS evidence_count ON TABLE conversation_message TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS coverage_warning ON TABLE conversation_message TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS blocked_reason ON TABLE conversation_message TYPE option<string>;

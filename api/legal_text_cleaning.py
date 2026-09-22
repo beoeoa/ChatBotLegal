@@ -127,6 +127,9 @@ def project_legal_evidence(source: Mapping[str, Any]) -> dict[str, Any]:
         content_result if child_is_content else clean_gazette_boilerplate(child_raw)
     )
     parent_result = clean_gazette_boilerplate(source.get("parent_context"))
+    explicit_capsule_result = clean_gazette_boilerplate(
+        source.get("evidence_capsule")
+    )
 
     clean_content = content_result["clean_text"]
     clean_child = child_result["clean_text"] or clean_content
@@ -139,17 +142,28 @@ def project_legal_evidence(source: Mapping[str, Any]) -> dict[str, Any]:
     ).strip()
 
     capsule_parts: list[str] = []
-    if heading:
-        capsule_parts.append(f"Cấu trúc: {heading}")
-    if clean_child:
-        capsule_parts.append(clean_child)
-    if clean_parent and clean_parent.casefold() != clean_child.casefold():
-        capsule_parts.append(f"Ngữ cảnh chi phối:\n{clean_parent}")
+    structural_status = str(source.get("structural_unit_status") or "")
+    if (
+        explicit_capsule_result["clean_text"]
+        and structural_status.startswith("complete")
+    ):
+        # A reviewed structural selector has already hydrated the complete
+        # Article/clause. Preserve that unit instead of rebuilding a shorter
+        # child-first capsule and losing its governing lead-in.
+        capsule_parts.append(explicit_capsule_result["clean_text"])
+    else:
+        if heading:
+            capsule_parts.append(f"Cấu trúc: {heading}")
+        if clean_child:
+            capsule_parts.append(clean_child)
+        if clean_parent and clean_parent.casefold() != clean_child.casefold():
+            capsule_parts.append(f"Ngữ cảnh chi phối:\n{clean_parent}")
 
     removed = list(content_result["removed_noise"])
     if not child_is_content:
         removed.extend(child_result["removed_noise"])
     removed.extend(parent_result["removed_noise"])
+    removed.extend(explicit_capsule_result["removed_noise"])
     projected.update(
         {
             "clean_content": clean_content,
@@ -161,7 +175,12 @@ def project_legal_evidence(source: Mapping[str, Any]) -> dict[str, Any]:
                 "removed_reasons": sorted({item["reason"] for item in removed}),
                 "needs_review": any(
                     result["needs_review"]
-                    for result in (content_result, child_result, parent_result)
+                    for result in (
+                        content_result,
+                        child_result,
+                        parent_result,
+                        explicit_capsule_result,
+                    )
                 ),
             },
         }

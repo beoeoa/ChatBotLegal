@@ -2,6 +2,23 @@ export interface ChunkHighlightState {
   highlight: boolean
 }
 
+/** Join exact chunk overlaps without changing source words, then expose
+ * paragraph boundaries for clause/point navigation. */
+export function viewerParagraphs(chunks: Array<{ content?: string }>): Array<{ content: string; chunk_id: string }> {
+  let joined = ''
+  for (const chunk of chunks) {
+    const next = chunk.content || ''
+    if (!next) continue
+    let overlap = 0
+    for (let size = Math.min(joined.length, next.length); size >= 24; size--) {
+      if (joined.endsWith(next.slice(0, size))) { overlap = size; break }
+    }
+    joined += overlap ? next.slice(overlap) : `${joined ? '\n' : ''}${next}`
+  }
+  return joined.split(/\n(?=\s*(?:\d+\.|[a-zđ]\))\s)/i)
+    .filter(Boolean).map((content, index) => ({ content, chunk_id: `paragraph-${index}` }))
+}
+
 export interface TocNode {
   id: string
   title: string
@@ -51,7 +68,13 @@ export function isTargetArticle(article: string, targetArticle: string): boolean
   return Boolean(article && targetArticle && article.trim().toLocaleLowerCase('vi-VN') === targetArticle.trim().toLocaleLowerCase('vi-VN'))
 }
 
-export function getChunkHighlightState(content: string, targetArticle: boolean, clause = '', point = ''): ChunkHighlightState {
+export function getChunkHighlightState(
+  content: string,
+  targetArticle: boolean,
+  clause = '',
+  point = '',
+  structuralClause = '',
+): ChunkHighlightState {
   if (!targetArticle) return { highlight: false }
   if (!clause && !point) return { highlight: true }
 
@@ -60,7 +83,11 @@ export function getChunkHighlightState(content: string, targetArticle: boolean, 
   const normPoint = normalize(point)
 
   const clauseMatch = normClause
-    ? (text.includes(`khoan ${normClause}`) || new RegExp(`^\\s*${escapeRegex(normClause)}[.)]`, 'm').test(text))
+    ? (
+      normalize(structuralClause) === normClause
+      || text.includes(`khoan ${normClause}`)
+      || new RegExp(`^\\s*${escapeRegex(normClause)}[.)]`, 'm').test(text)
+    )
     : true
 
   const pointMatch = normPoint
@@ -115,6 +142,7 @@ export function buildVBPLLegalTocTree(
     const clauseRegex = /^\s*(\d+)\.\s+([^\n]+)/gm
     let clauseMatch: RegExpExecArray | null
     const clausesMap: Map<string, TocNode> = new Map()
+    const clausePositions: Array<{ number: string; index: number }> = []
 
     while ((clauseMatch = clauseRegex.exec(fullText)) !== null) {
       const cNum = clauseMatch[1]
@@ -129,6 +157,7 @@ export function buildVBPLLegalTocTree(
         children: [],
       }
       clausesMap.set(cNum, cNode)
+      clausePositions.push({ number: cNum, index: clauseMatch.index })
       clauseNodes.push(cNode)
     }
 
@@ -139,17 +168,20 @@ export function buildVBPLLegalTocTree(
     while ((pointMatch = pointRegex.exec(fullText)) !== null) {
       const pLetter = pointMatch[1].toLowerCase()
       const pText = pointMatch[2].substring(0, 40).trim()
+      const owningClause = [...clausePositions]
+        .reverse()
+        .find((item) => item.index < pointMatch!.index)?.number
       const pNode: TocNode = {
-        id: buildSectionAnchor(artNum, undefined, pLetter),
+        id: buildSectionAnchor(artNum, owningClause, pLetter),
         title: `Điểm ${pLetter}`,
         label: `Điểm ${pLetter}: ${pText}...`,
         level: 'point',
         articleNumber: artNum,
+        clauseNumber: owningClause,
         pointLetter: pLetter,
       }
-      // Attach to last clause or article
-      if (clauseNodes.length > 0) {
-        clauseNodes[clauseNodes.length - 1].children?.push(pNode)
+      if (owningClause && clausesMap.has(owningClause)) {
+        clausesMap.get(owningClause)?.children?.push(pNode)
       }
     }
 

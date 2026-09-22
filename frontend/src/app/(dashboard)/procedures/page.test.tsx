@@ -16,4 +16,24 @@ describe('FAQ two-column page contract', () => {
     expect(source).toContain('buildSearchBackHref')
     expect(source).toContain('href={backHref}')
   })
+
+  it('loads the active release catalog and presents at most ten procedures per page', () => {
+    expect(source).toContain('const PAGE_SIZE = 10')
+    expect(source).toContain("'/procedures/forms-catalog/public-catalog?audience=citizen'")
+    expect(source).toContain("'/faq?review_status=approved&limit=500'")
+    expect(source).toContain('const totalPages')
+    expect(source).toContain('setPage((current) => Math.min(totalPages, current + 1))')
+    expect(source).toContain('Trang {page}/{totalPages}')
+  })
+
+  it('keeps the route read-only and lets the active release own public forms', () => {
+    expect(source).toContain('export default function ProceduresPage()')
+    expect(source).toContain('return <ProcedureCatalogPage />')
+    expect(source).toContain('releaseResponse.data.items')
+    expect(source).toContain('forms: OfficialForm[] = (published.forms || [])')
+    expect(source).not.toContain('guidance?.forms?.length ? guidance.forms')
+    expect(source).toContain('question: guidance?.question || published.name')
+    expect(source).toContain('documents_required: guidance?.documents_required?.length')
+    expect(source).toContain('Làm mới danh mục')
+  })
 })

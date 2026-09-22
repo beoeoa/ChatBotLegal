@@ -22,6 +22,9 @@ _SHA256_LEN = 64
 _DOCUMENT_STATES = frozenset(
     {"current_retrievable", "historical_only", "future_effective", "quarantined"}
 )
+_CANDIDATE_POLICY_ARTIFACTS = frozenset(
+    {"article_mapping", "owner_acceptance", "blocked_resolution"}
+)
 
 
 class V3ServingManifestError(RuntimeError):
@@ -221,6 +224,35 @@ def load_v3_serving_manifest(
     if not str(payload.get("manifest_version") or "") or not str(payload.get("dataset_version") or ""):
         raise V3ServingManifestError("v3_manifest_version_required")
 
+    candidate_policy = payload.get("candidate_policy")
+    if candidate_policy is not None:
+        if not isinstance(candidate_policy, Mapping) or not str(
+            candidate_policy.get("profile") or ""
+        ).strip():
+            raise V3ServingManifestError("v3_manifest_candidate_policy_invalid")
+        candidate_artifacts = candidate_policy.get("artifacts")
+        if (
+            not isinstance(candidate_artifacts, Mapping)
+            or set(candidate_artifacts) != _CANDIDATE_POLICY_ARTIFACTS
+        ):
+            raise V3ServingManifestError(
+                "v3_manifest_candidate_policy_artifacts_required"
+            )
+        for name, descriptor in candidate_artifacts.items():
+            if not isinstance(descriptor, Mapping):
+                raise V3ServingManifestError(
+                    f"v3_manifest_candidate_policy_{name}_invalid"
+                )
+            raw = Path(str(descriptor.get("path") or ""))
+            if not str(raw) or raw.is_absolute() or ".." in raw.parts:
+                raise V3ServingManifestError(
+                    f"v3_manifest_candidate_policy_{name}_path_invalid"
+                )
+            _sha(
+                descriptor.get("sha256"),
+                field=f"candidate_policy_{name}_sha256",
+            )
+
     root = Path(project_root).resolve() if project_root is not None else pointer_path.parents[2]
     if verify_file_artifacts:
         loaded = V3ServingManifest(
@@ -242,6 +274,21 @@ def load_v3_serving_manifest(
             declared_file = loaded.declared_file_path(path_field, project_root=root)
             if not declared_file.is_file() or file_sha256(declared_file) != str(payload.get(checksum_field) or ""):
                 raise V3ServingManifestError(f"v3_manifest_{path_field}_checksum_mismatch")
+        if isinstance(candidate_policy, Mapping):
+            for name, descriptor in (
+                candidate_policy.get("artifacts") or {}
+            ).items():
+                raw = Path(str(descriptor.get("path") or ""))
+                candidate_path = (root / raw).resolve()
+                if (
+                    root not in candidate_path.parents
+                    or not candidate_path.is_file()
+                    or file_sha256(candidate_path)
+                    != str(descriptor.get("sha256") or "")
+                ):
+                    raise V3ServingManifestError(
+                        f"v3_manifest_candidate_policy_{name}_checksum_mismatch"
+                    )
         reports = payload.get("vector_reports") or {}
         report_checksums = payload.get("vector_report_checksums") or {}
         if reports or report_checksums:

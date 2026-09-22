@@ -18,6 +18,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Literal, Mapping, Sequence
 
 from api.legal_domains import CANONICAL_DOMAIN_ALIASES, canonicalize_legal_domain
+from api.chat_behavior_policy import render_admin_style_addendum
 from open_notebook.utils.token_utils import token_count
 
 TURN_DECISION_VERSION = "conversation-turn-decision-v1"
@@ -74,6 +75,8 @@ _META_PATTERNS = (
     r"^(?:hello|hi|hey|alo|help)(?:\s+(?:bạn|ban|bot))?[.!?]*$",
     r"^chào\s+(?:bot|buổi\s+sáng|legal\s+bot)[.!?]*$",
     r"^(?:good\s+morning|hướng\s+dẫn\s+sử\s+dụng|trợ\s+giúp)[.!?]*$",
+    r"^(?:hãy\s+)?giúp\s+(?:tôi|mình)(?:\s+(?:việc|chuyện)\s+này)?[.!?]*$",
+    r"^(?:tôi|mình)\s+cần\s+(?:bạn\s+)?trợ\s+giúp[.!?]*$",
 )
 
 _DOCUMENT_MARKERS = (
@@ -99,8 +102,13 @@ _DOCUMENT_MARKERS = (
 )
 
 _DOCUMENT_DEICTIC_RE = re.compile(
-    r"\b(?:van ban|nguon|dieu(?: luat)?|khoan|quy dinh|tai lieu)"
-    r"(?:\s+[a-z0-9]+){0,4}\s+"
+    # Keep the deixis adjacent to the legal-source noun. Allowing arbitrary
+    # words between them made ordinary phrases such as ``khoản tiền nào do
+    # trả chậm`` look like a reference to ``khoản ... đó`` in the previous
+    # document and silently pinned a new labour question to a stale source.
+    # A bounded source qualifier can sit between "văn bản" and the pointer.
+    # Keep this list narrow so unrelated new subjects are not pinned.
+    r"\b(?:van ban(?:\s+(?:dia phuong|trung uong))?|nguon|dieu(?: luat)?|khoan|quy dinh|tai lieu)\s+"
     r"(?:tren|nay|do|gan nhat|vua\s+(?:duoc\s+)?"
     r"(?:neu|dan|dung|nhac\s+den|de\s+cap))\b"
 )
@@ -135,6 +143,8 @@ def _is_history_recall_request(question: str) -> bool:
             "yeu cau truoc",
             "luot truoc",
             "vua hoi",
+            "vua noi",
+            "ban vua noi",
             "vua roi",
             "dang hoi",
             "dang noi den",
@@ -144,6 +154,11 @@ def _is_history_recall_request(question: str) -> bool:
             "gan nhat",
             "toan bo phien",
             "trong phien",
+            "phien nay",
+            "cuoc tro chuyen",
+            "nho gi",
+            "memory",
+            "bo nho",
         )
     )
     recall_action = any(
@@ -185,7 +200,8 @@ def _is_history_recall_request(question: str) -> bool:
         )
         is None
     )
-    return explicit_no_search or explicit_session_summary or history_reference and (
+    direct_recall_question = bool(history_reference and re.search(r"\b(?:gi|cai gi|the nao|ra sao|nho gi)\b", folded))
+    return explicit_no_search or explicit_session_summary or direct_recall_question or history_reference and (
         recall_action
         or folded.rstrip(".!? ").endswith("gi")
         or re.search(
@@ -196,10 +212,73 @@ def _is_history_recall_request(question: str) -> bool:
     )
 
 
+def _is_conversation_preference_request(question: str) -> bool:
+    """Recognize turns that configure how the assistant should converse.
+
+    These requests are conversation control, not legal queries. A turn that
+    also names a legal issue still follows the legal route; the memory layer
+    can extract the preference from that turn independently.
+    """
+
+    folded = _fold(_compact(question))
+    if not folded:
+        return False
+    preference_signal = bool(
+        re.search(
+            r"\b(?:hay\s+|xin\s+)?goi\s+(?:toi|minh)\s+la\b",
+            folded,
+        )
+        or re.search(
+            r"\btra loi\b.{0,48}\b(?:ngan(?: gon)?|chi tiet|de hieu|"
+            r"gach dau dong|than thien|hai huoc)\b",
+            folded,
+        )
+        or re.search(
+            r"\b(?:hay\s+)?nho\s+(?:dieu do|cach xung ho|so thich|"
+            r"phong cach|yeu cau nay)\b",
+            folded,
+        )
+    )
+    if not preference_signal:
+        return False
+    return not (
+        _has_vietnamese_law_number(question)
+        or _topic_domains(question)
+        or _has_legal_substance(question)
+    )
+
+
 def _is_operational_legal_followup(question: str) -> bool:
     """Return True for a facet follow-up, rather than a source follow-up."""
 
     folded = _fold(_compact(question))
+    # co quan in a bot-operator sentence is product meta, not a legal facet.
+    if _is_product_or_session_meta(question):
+        return False
+    if re.search(r"\b(?:bot|chatbot|tro ly)\b", folded) and re.search(
+        r"\b(?:van hanh|chu quan|phien ban|giao dien|bao mat|dang nhap)\b",
+        folded,
+    ):
+        return False
+    # A question that points at the preceding rule but asks about local
+    # applicability is still a new legal lookup.  Treating it as a source
+    # follow-up would silently pin retrieval to the previous document and can
+    # hide the provincial/central rule the citizen is actually asking about.
+    if (
+        re.search(r"\bquy dinh\s+(?:tren|nay|do)\b", folded)
+        and re.search(
+            r"\b(?:ap dung|hai phong|trung uong|dia phuong|hien nay|hieu luc)\b",
+            folded,
+        )
+    ):
+        return True
+    # Temporal applicability compares the rule in force at a named point in
+    # time. It is legal analysis, even when it contains the deictic ``đó``.
+    if re.search(
+        r"\b(?:ap dung|quy dinh)\b.{0,80}\b(?:thoi diem|nam \d{4}|hien nay|hien hanh)\b",
+        folded,
+    ):
+        return True
     if any(
         marker in folded
         for marker in (
@@ -236,7 +315,35 @@ def _explicit_conversation_route(question: str) -> ConversationRoute | None:
     folded = _fold(_compact(question))
     if not folded:
         return None
+    if re.fullmatch(
+        r"(?:alo(?: (?:ban|em|anh|chi)(?: oi)?)?|"
+        r"(?:sao|tai sao) (?:ban )?tra loi (?:the|nhu the|vay)|"
+        r"(?:em|ban|anh|chi) dang lam gi(?: (?:the|vay))?)(?:[.!? ]*)",
+        folded,
+    ):
+        return "chat_meta"
+    if re.search(r"\b(?:ke(?:\s+lai)?\s+)?chuyen\s+(?:cuoi|vui)\b", folded):
+        # Light conversation is a supported chatbot capability. It must reach
+        # the selected model instead of becoming a canned scope refusal.
+        return "chat_meta"
+    # A session-opening greeting that only announces future legal questions is
+    # conversation meta, even when it mentions the generic word "thủ tục".
+    # Do not spend a retrieval/model call until the user actually states the
+    # first legal issue.  Concrete requests containing an action/object remain
+    # legal_query through the normal gates below.
+    if (
+        re.search(r"^(?:xin\s+)?chao\b", folded)
+        and re.search(r"\b(?:phien\s+nay|hom\s+nay|hoi\s+tiep|noi\s+tiep)\b", folded)
+        and re.search(r"\b(?:se\s+hoi|hoi\s+nhieu|nhieu\s+thu\s+tuc)\b", folded)
+        and not re.search(
+            r"\b(?:muon|can|co\s+the|duoc\s+khong|nop|lam|dang\s+ky|xin\s+cho)\b",
+            folded,
+        )
+    ):
+        return "chat_meta"
     if _is_history_recall_request(question):
+        return "chat_meta"
+    if _is_conversation_preference_request(question):
         return "chat_meta"
     if any(
         re.fullmatch(pattern, _compact(question), flags=re.IGNORECASE)
@@ -247,6 +354,20 @@ def _explicit_conversation_route(question: str) -> ConversationRoute | None:
     # gratitude heuristic, out-of-scope markers, and deictic document follow-up.
     if _is_standalone_legal_identifier_query(question):
         return "legal_query"
+    # A question about the version, source or effectivity of an explicitly
+    # named form is a fresh catalog/legal lookup.  It must not be pinned to an
+    # unrelated active document merely because it contains "văn bản nào".
+    if (
+        re.search(r"\b(?:mau(?:\s+so)?\s*[a-z0-9/-]+|ct\s*0?\d+|to khai)\b", folded)
+        and re.search(
+            r"\b(?:phien ban|con hieu luc|hieu luc|hien hanh|dang phat hanh|"
+            r"thuoc thong tu|theo van ban|nguon chinh thuc)\b",
+            folded,
+        )
+    ):
+        return "legal_query"
+    if _is_product_or_session_meta(question):
+        return "chat_meta"
     folded_clean = folded.rstrip(".!? ")
     if (
         "cam on" in folded_clean
@@ -277,17 +398,20 @@ def _explicit_conversation_route(question: str) -> ConversationRoute | None:
         )
     ):
         return "chat_meta"
-    if (
-        any(_fold(marker) in folded for marker in _OUT_OF_SCOPE_MARKERS)
-        or re.search(r"\b(?:viet|lam|sang tac)\b.*\bbai tho\b", folded)
-        or re.search(
-            r"\b(?:hom nay|ngay mai|du bao)\b.*\b(?:mua|thoi tiet|nhiet do)\b",
-            folded,
-        )
-        or re.search(r"\bke(?:\s+lai)?\s+chuyen\s+(?:cuoi|vui)\b", folded)
-        or re.search(r"\bchuyen cuoi\b", folded)
-    ):
+    if _is_explicit_out_of_scope(question):
         return "out_of_scope"
+    # An explicit reference to the previously named instrument is a source
+    # follow-up even when it also contains temporal words such as ``sửa đổi``
+    # or ``đang áp dụng hiện nay``.  The active-document availability check is
+    # performed by the unified router; this branch only preserves intent.
+    if (
+        re.search(r"\bvan ban\s+(?:do|nay)\b", folded)
+        and (
+            "sua doi" in folded
+            or re.search(r"\bphan nao\b", folded) is not None
+        )
+    ):
+        return "document_followup"
     if _is_operational_legal_followup(question):
         return "legal_query"
     if any(_fold(marker) in folded for marker in _DOCUMENT_MARKERS):
@@ -300,7 +424,7 @@ def _explicit_conversation_route(question: str) -> ConversationRoute | None:
 def _has_vietnamese_law_number(question: str) -> bool:
     """True when the turn names a QH / NĐ-CP / TT / QĐ instrument number."""
 
-    folded = _fold(_compact(question))
+    folded = _fresh_route_text(question)
     return bool(folded and _VIETNAMESE_LAW_NUMBER_RE.search(folded))
 
 
@@ -316,7 +440,7 @@ def _is_standalone_legal_identifier_query(question: str) -> bool:
     ``quy dinh gi``; ``Giải thích 123/2015/NĐ-CP`` has no request verb at all.
     """
 
-    folded = _fold(_compact(question))
+    folded = _fresh_route_text(question)
     if not folded:
         return False
     has_law_number = bool(_VIETNAMESE_LAW_NUMBER_RE.search(folded))
@@ -357,11 +481,84 @@ def _is_short_active_document_followup(
         return False
     if _is_standalone_legal_identifier_query(question):
         return False
-    # Facet words (công chứng, lệ phí, giấy tờ) must not block follow-up
-    # when a document is already pinned. Numbered instruments still win
-    # via the standalone check above.
+    # A pinned source is inherited for an explicitly document-scoped short
+    # turn (``khoản này``, ``văn bản đang mở`` and similar).  These phrases
+    # are already enough to bind the question to the active source, even if
+    # the requested facet is operational (fee, form, deadline, ...).  Keep
+    # generic facets such as ``cần giấy tờ gì`` on the normal legal route so a
+    # user is not silently pinned to an unrelated document.
     current = _compact(question)
-    return bool(current) and len(current) <= 80
+    if not current or len(current) > 80:
+        return False
+    folded = _fold(current)
+    explicit_source_markers = (
+        "khoan nay",
+        "khoan tren",
+        "dieu nay",
+        "dieu tren",
+        "van ban dang mo",
+        "van ban dang xem",
+        "van ban vua mo",
+        "tai lieu dang mo",
+        "tai lieu vua mo",
+        "co quan duoc neu o day",
+    )
+    if any(marker in folded for marker in explicit_source_markers):
+        # A few cross-document entitlements are phrased with a deictic
+        # ``khoản này`` but are genuinely new legal facets (not a request to
+        # describe the open source).  Keep the source shortcut for ordinary
+        # fee/deadline wording while routing these high-signal subjects back
+        # through the legal planner.
+        if any(marker in folded for marker in ("bhyt", "bao hiem y te", "duoc cap the", "tro cap", "muc huong")):
+            return False
+        return True
+    # A deictic phrase can still ask for a new legal facet.  It remains bound
+    # to the previous subject through the normal deterministic rewrite path.
+    if _is_operational_legal_followup(current):
+        return False
+    legal_facet_markers = (
+        "ho so",
+        "giay to",
+        "bieu mau",
+        "mau nao",
+        "nop o dau",
+        "co quan",
+        "tham quyen",
+        "le phi",
+        "muc phi",
+        "dieu kien",
+        "thu tuc",
+        "thoi han",
+        "bao lau",
+        "muc huong",
+        "duoc huong",
+        "tro cap",
+        "gia han",
+        "tach thua",
+        "tang cho",
+        "khieu nai",
+        "to cao",
+        "dang ky",
+        "nop online",
+        "xem xet",
+    )
+    if any(marker in folded for marker in legal_facet_markers):
+        return False
+    source_markers = (
+        "hieu luc",
+        "nguyen van",
+        "toan van",
+        "noi dung van ban",
+        "noi dung dieu",
+        "phan nay",
+        "phan do",
+        "dieu nay",
+        "quy dinh nay",
+        "quy dinh do",
+        "van ban nay",
+        "van ban do",
+    )
+    return any(marker in folded for marker in source_markers)
 
 
 def is_explicit_history_recall_request(question: str) -> bool:
@@ -436,6 +633,12 @@ def rewrite_legal_followup_deterministic(
         if not content or content == current:
             continue
         if _explicit_conversation_route(content) == "chat_meta":
+            continue
+        # Skip an earlier facet-only turn with no subject anchor. The next
+        # question should inherit the last self-contained legal topic rather
+        # than recursively appending ``Hồ sơ cụ thể gồm gì?`` to another
+        # generic facet.
+        if not _topic_domains(content) and not _has_legal_substance(content):
             continue
         previous = message
         break
@@ -520,9 +723,6 @@ _OUT_OF_SCOPE_MARKERS = (
     "dịch menu",
     "làm website",
     "soạn cv",
-    "kể chuyện cười",
-    "chuyện cười",
-    "kể chuyện vui",
     "viết code",
     "lập trình python",
     "chơi game",
@@ -533,6 +733,26 @@ _OUT_OF_SCOPE_MARKERS = (
     "tỷ giá",
     "tin tức giải trí",
     "lịch chiếu",
+    "messi",
+    "ronaldo",
+    "mua xe",
+    "xe vision",
+    "xe lead",
+    "dau tu vang",
+    "instagram",
+    "caption",
+    "tiktok",
+    "bai tap",
+    "dao ham",
+    "nhac hay",
+    "chay bo",
+    "nha hang",
+    "dat ban nha hang",
+    "troi mua",
+    "cuoi tuan nay mua",
+    "pixel",
+    "thue xe may o",
+    "usd",
 )
 
 _STOPWORDS = {
@@ -589,6 +809,26 @@ def _fold(value: Any) -> str:
     return "".join(
         char for char in normalized if unicodedata.category(char) != "Mn"
     ).replace("đ", "d")
+
+
+def _fresh_route_text(value: Any) -> str:
+    """Return the current clause when a user explicitly starts a new query.
+
+    Conversation ledgers often contain a phrase such as ``Câu hỏi trước là
+    ...; bây giờ tôi hỏi ...``.  Routing the whole string lets an old legal
+    topic override the new meta/OOS request.  Only a clear temporal+speaker+
+    ``hỏi`` boundary is stripped; ordinary legal questions remain unchanged.
+    """
+
+    folded = _fold(value)
+    match = re.search(
+        r"\b(?:bay gio|hien tai|luc nay)\s+(?:toi|minh|t|em)\s+"
+        r"(?:dang\s+)?hoi\b",
+        folded,
+    )
+    if match is None:
+        return folded
+    return folded[match.end() :].strip(" .!?;,:-") or folded
 
 
 def _checksum(payload: Any) -> str:
@@ -827,7 +1067,12 @@ def fallback_conversation_intent_v2(
         "question": _compact(question),
         "issues": [issue.to_payload() for issue in issues],
         "active_document_id": (
-            _compact((active_document or {}).get("document_id")) or None
+            _compact(
+                (active_document or {}).get("document_id")
+                or (active_document or {}).get("id")
+                or (active_document or {}).get("law_number")
+            )
+            or None
             if fallback_route == "document_followup"
             else None
         ),
@@ -843,7 +1088,12 @@ def fallback_conversation_intent_v2(
         current_question=_compact(question),
         issues=issues,
         active_document_id=(
-            _compact((active_document or {}).get("document_id")) or None
+            _compact(
+                (active_document or {}).get("document_id")
+                or (active_document or {}).get("id")
+                or (active_document or {}).get("law_number")
+            )
+            or None
             if fallback_route == "document_followup"
             else None
         ),
@@ -1159,20 +1409,26 @@ def build_conversation_router_prompt_short_v2(
     question: str,
     role: str,
     context_packet: "ConversationContextPacketV1",
+    active_document: Mapping[str, Any] | None = None,
 ) -> str:
-    """Compact 0.5B classify prompt: conversation_route + confidence only."""
+    """Compact provider-neutral advisory prompt: route + confidence only."""
 
-    history_block = _compact(getattr(context_packet, "prompt_block", "") or "")[:800]
+    history_block = _compact(getattr(context_packet, "prompt_block", "") or "")[:220]
     return (
-        "Bạn là bộ định tuyến hội thoại cho trợ lý pháp luật Hải Phòng. "
-        "Chỉ phân loại; không trả lời pháp luật; không chọn phòng ban, ACL "
-        "hoặc hiệu lực văn bản.\n"
-        "Xuất đúng một JSON object: "
-        '{"conversation_route":"legal_query","confidence":0.0}\n'
-        "conversation_route ∈ {legal_query, document_followup, chat_meta, out_of_scope}.\n"
-        f"Vai trò: {_compact(role)}\n"
-        f"Lịch sử (rút gọn):\n{history_block or '(trống)'}\n"
-        f"Câu hỏi: {_compact(question)}\n"
+        "Classify ONE current user message. Prefer JSON with keys "
+        "conversation_route and confidence. If JSON is unavailable, output "
+        "exactly ROUTE=<enum>; CONFIDENCE=<0..1>. Do not answer the user.\n"
+        "Priority: chat_meta=bot/system/account/history/source/report/error or "
+        "greeting; document_followup=referenced document (văn bản trên/này, "
+        "điều vừa dẫn); out_of_scope=weather/sports/shopping/cooking/entertainment/"
+        "travel/homework; legal_query=law/procedure/rights/duties/permit/fee.\n"
+        "Legal request beats an OOS product word. A general-world question with "
+        "no bot cue is not chat_meta. Vietnamese cues: chatbot do ai vận hành="
+        "chat_meta; kể chuyện cười=chat_meta; tối nay có trận bóng nào=out_of_scope; nên mua điện thoại="
+        "out_of_scope; đăng ký khai sinh cần gì=legal_query.\n"
+        f"Role={_compact(role)}; active_document={'yes' if active_document else 'no'}\n"
+        f"Context={history_block or '(none)'}\n"
+        f"User={_compact(question)}\n"
     )
 
 
@@ -1253,6 +1509,7 @@ def parse_conversation_intent_v2(
     active_document: Mapping[str, Any] | None = None,
     minimum_confidence: float = 0.55,
     environ: Mapping[str, str] | None = None,
+    allow_short_contract: bool = False,
 ) -> ConversationIntentDecisionV2:
     text = str(raw or "").strip()
     candidate = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
@@ -1260,13 +1517,30 @@ def parse_conversation_intent_v2(
     try:
         payload = json.loads(candidate)
     except (json.JSONDecodeError, TypeError):
-        return fallback_conversation_intent_v2(
-            question,
-            role=role,
-            allowed_domains=allowed_domains,
-            active_document=active_document,
-            reason_code="router_invalid_json",
+        # Advisory routing must not require provider-specific JSON mode. Accept
+        # only a deliberately narrow text contract; arbitrary prose still
+        # falls back to the deterministic decision.
+        route_match = re.search(
+            r"(?:route|conversation_route)[\"'`*\s]*[:=]\s*[\"'`*]*"
+            r"(chat_meta|document_followup|legal_query|out_of_scope)\s*"
+            r"[\"'`*]*(?:\s*[;,|]\s*|\s+)[\"'`*]*confidence[\"'`*\s]*[:=]\s*"
+            r"[\"'`*]*(0(?:\.\d+)?|1(?:\.0+)?)[\"'`*]*",
+            candidate,
+            flags=re.IGNORECASE,
         )
+        if route_match:
+            payload = {
+                "conversation_route": route_match.group(1).casefold(),
+                "confidence": float(route_match.group(2)),
+            }
+        else:
+            return fallback_conversation_intent_v2(
+                question,
+                role=role,
+                allowed_domains=allowed_domains,
+                active_document=active_document,
+                reason_code="router_invalid_contract",
+            )
     if not isinstance(payload, Mapping):
         return fallback_conversation_intent_v2(
             question,
@@ -1361,9 +1635,28 @@ def parse_conversation_intent_v2(
                 legal_object_anchors=anchors("legal_object_anchors"),
             )
         )
+    short_contract = bool(allow_short_contract and not (payload.get("issues") or ()))
     if route in {"chat_meta", "out_of_scope"}:
         issues = []
-    if route in {"legal_query", "document_followup"} and not issues:
+    if short_contract and route in {"legal_query", "document_followup"} and not issues:
+        # The Phase-B router deliberately emits only route+confidence to keep
+        # Qwen 0.5B fast.  Preserve the downstream V2 issue contract with a
+        # bounded, backend-owned current-query issue; domain/facet planning
+        # remains deterministic and no model-generated legal fact is trusted.
+        domain = (
+            canonicalize_legal_domain(sorted(normalized_allowed)[0])
+            if officer and normalized_allowed
+            else "unknown"
+        )
+        issues = [
+            ConversationIntentIssueV2(
+                issue_id="issue-1",
+                standalone_query=_compact(question)[:2000],
+                domain_candidate=domain or "unknown",
+                required_facets=("unknown",),
+            )
+        ]
+    if route in {"legal_query", "document_followup"} and not issues and not short_contract:
         fallback = fallback_conversation_intent_v2(
             question,
             role=role,
@@ -1523,8 +1816,13 @@ def decide_conversation_turn(
                 is not None
                 and folded_clean.endswith("gi")
             )
-            or ("cau hoi truoc" in folded_clean and "gi" in folded_clean)
-            or ("yeu cau truoc" in folded_clean and "gi" in folded_clean)
+            # ``gi`` must be a standalone recall pronoun.  A substring check
+            # makes unrelated new questions such as ``bây giờ tôi hỏi ...``
+            # look like a request to recall the previous turn.
+            or (
+                ("cau hoi truoc" in folded_clean or "yeu cau truoc" in folded_clean)
+                and re.search(r"\bgi\b", folded_clean) is not None
+            )
             or (
                 ("ban la ai" in folded_clean or "ban la chatbot" in folded_clean)
                 and not any(
@@ -1572,7 +1870,7 @@ def decide_conversation_turn(
                 and any(marker in folded_clean for marker in ("linh vuc", "chu de", "da hoi"))
             )
             or (
-                ("de xuat" in folded_clean or "goi y" in folded_clean)
+                folded_clean.startswith(("de xuat ", "goi y "))
                 and "cau hoi tiep theo" in folded_clean
             )
         )
@@ -1587,6 +1885,13 @@ def decide_conversation_turn(
     elif _is_standalone_legal_identifier_query(current):
         route = "legal_query"
         reason = "standalone_legal_identifier"
+    elif _needs_multi_topic_clarification(current, history_messages or ()):
+        # A short facet such as "Còn lệ phí?" cannot safely inherit one
+        # active document when the recent conversation contains several
+        # independent legal topics. Resolve the ambiguity before the active
+        # document shortcut so we do not retrieve from an arbitrary topic.
+        route = "chat_meta"
+        reason = "ambiguous_multi_topic_followup"
     elif _is_short_active_document_followup(current, active_document):
         route = "document_followup"
         reason = "active_document_followup"
@@ -1611,20 +1916,19 @@ def decide_conversation_turn(
         route = "document_followup"
         reason = "deictic_document_reference"
         document_required = True
-    elif (
-        any(_fold(marker) in folded for marker in _OUT_OF_SCOPE_MARKERS)
-        or re.search(r"\b(?:viet|lam|sang tac)\b.*\bbai tho\b", folded) is not None
-    ):
+    elif _is_explicit_out_of_scope(current):
         route = "out_of_scope"
         reason = "explicit_non_legal_request"
-    elif _needs_multi_topic_clarification(current, history_messages or ()):
-        # A short facet such as "Còn lệ phí?" cannot safely inherit one topic
-        # when the immediately preceding user turn asked three independent
-        # legal jobs.  Let the same DeepSeek call ask which job the citizen
-        # means; do not perform a broad or arbitrarily scoped retrieval.
-        route = "chat_meta"
-        reason = "ambiguous_multi_topic_followup"
-    available = bool(active_document and active_document.get("document_id"))
+    # UI adapters historically sent either ``document_id`` or the shorter
+    # ``id`` field.  Treat both as a bound active source; the serving layer
+    # normalizes the value before retrieval and never invents one.
+    available = bool(
+        active_document
+        and any(
+            str(active_document.get(key) or "").strip()
+            for key in ("document_id", "id", "law_number")
+        )
+    )
     payload = {
         "version": TURN_DECISION_VERSION,
         "route": route,
@@ -1645,19 +1949,284 @@ def decide_conversation_turn(
 
 
 def _topic_domains(value: Any) -> set[str]:
-    folded = _fold(value)
+    folded = _fresh_route_text(value)
     groups: tuple[tuple[str, tuple[str, ...]], ...] = (
         ("complaint", ("khieu nai", "to cao", "xu phat", "quyet dinh phat", "muc phat")),
-        ("residence", ("tam tru", "thuong tru", "cu tru", "can cuoc", "cccd", "luu tru", "tam vang", "ho khau")),
+        ("residence", ("tam tru", "thuong tru", "cu tru", "can cuoc", "cccd", "luu tru", "tam vang", "ho khau", "ct01")),
         ("social", ("tro cap", "huu tri xa hoi", "huu tri xh", "bao tro", "bhyt", "bhxh", "bao hiem xa hoi", "that nghiep", "om dau", "om da", "mai tang")),
-        ("civil", ("khai sinh", "khai tu", "ket hon", "ho tich", "chung thuc", "cong chung", "ly hon", "con nuoi", "hon nhan", "di chuc", "giam ho", "doc than")),
-        ("land", ("dat dai", "thua dat", "tach thua", "so do", "so hong", "xay dung", "sang ten", "dat o", "su dung dat", "dat nong nghiep", "chuyen muc dich", "chuyen nhuong", "xay nha", "giay chung nhan", "quyen su dung dat", "dat dang the chap")),
+        ("civil", ("khai sinh", "khai tu", "ket hon", "ho tich", "chung thuc", "cong chung", "ly hon", "con nuoi", "hon nhan", "di chuc", "giam ho", "doc than", "gks", "so ht")),
+        ("land", ("dat dai", "thua dat", "tach thua", "so do", "so hong", "xay dung", "sang ten", "dat o", "su dung dat", "dat nong nghiep", "chuyen muc dich", "chuyen nhuong", "xay nha", "giay chung nhan", "quyen su dung dat", "dat dang the chap", "gpxd", "giay phep xay", "phep xay dung")),
     )
     return {
         domain
         for domain, markers in groups
         if any(marker in folded for marker in markers)
     }
+
+_LEGAL_SUBSTANCE_MARKERS = (
+    "khai sinh",
+    "khai tu",
+    "ket hon",
+    "ly hon",
+    "ho tich",
+    "chung thuc",
+    "cong chung",
+    "giam ho",
+    "hon nhan",
+    "con nuoi",
+    "dat dai",
+    "thua dat",
+    "tach thua",
+    "so do",
+    "so hong",
+    "sang ten",
+    "dat o",
+    "gpxd",
+    "giay phep xay",
+    "phep xay dung",
+    "bhxh",
+    "bhyt",
+    "bao hiem xa hoi",
+    "bao hiem y te",
+    "that nghiep",
+    "tro cap",
+    "tam tru",
+    "thuong tru",
+    "cu tru",
+    "ct01",
+    "gks",
+    "so ht",
+    "nd-cp",
+    "qh13",
+    "qh15",
+    "truoc ba",
+    "luat dat",
+    "luat ho tich",
+    "luat cu tru",
+    "giay phep",
+    # High-signal legal objects that frequently co-occur with an otherwise
+    # noisy product/entertainment marker (TikTok, điện thoại, rạp phim,
+    # trồng rau).  Keep these as complete phrases; a bare ``luật`` or
+    # ``quyền`` is intentionally not enough to enter the legal pipeline.
+    "quyen rieng tu",
+    "dat coc",
+    "ho kinh doanh",
+    "ke khai thue",
+    "to giac",
+    "khong giao hang",
+    "hoan tien",
+    "hop dong",
+    "boi thuong",
+    "vi pham",
+    "trach nhiem",
+    "nghia vu",
+    "tham quyen",
+    "thoi han",
+    "le phi",
+    "tra gop",
+    "bao ve du lieu ca nhan",
+)
+
+
+def _has_legal_substance(question: str) -> bool:
+    """True when the turn names a real legal topic or numbered instrument.
+
+    Guards product-meta and OOS markers so they cannot steal khai sinh / dat /
+    BHXH / GPXD / luat-ND-CP questions. ``luat su`` is stripped so lawyer
+    identity questions about the bot stay chat_meta.
+    """
+
+    if _is_standalone_legal_identifier_query(question) or _has_vietnamese_law_number(
+        question
+    ):
+        return True
+    folded = _fresh_route_text(question).replace("luat su", " ")
+    if any(marker in folded for marker in _LEGAL_SUBSTANCE_MARKERS):
+        return True
+    from api.administrative_query_signals import has_administrative_request
+    return bool(_topic_domains(question)) or has_administrative_request(question)
+
+
+def _is_product_or_session_meta(question: str) -> bool:
+    """Chatbot/system/session questions, including ``co quan`` as operator."""
+
+    folded = _fresh_route_text(question)
+    if not folded:
+        return False
+    if _has_vietnamese_law_number(question) or _is_standalone_legal_identifier_query(
+        question
+    ):
+        return False
+    if _has_legal_substance(question):
+        return False
+    botish = bool(
+        re.search(
+            r"\b(?:bot|chatbot|tro ly|ung dung nay|he thong nay)\b",
+            folded,
+        )
+    )
+    if re.search(
+        r"\b(?:y kien luat su|co phai (?:la )?luat su|phai luat su|"
+        r"lich su chat|lich su hoi thoai|tai lich su|"
+        r"luu (?:cau hoi|lich su|du lieu)|huan luyen(?: lai)?|"
+         r"(?:xem|mo) (?:lai )?nguon(?: bot| chatbot| he thong)?|"
+         r"tra loi (?:dua tren|su dung) nguon|"
+         r"bao (?:loi|cao loi)|bao loi(?: cho)? (?:bot|chatbot|he thong)?|"
+         r"xoa .*\b(?:cuoc hoi thoai|lich su)\b|"
+         r"(?:doi|quen) mat khau|doi ngon ngu|mo .*\bhoi thoai\b|"
+         r"dinh kem (?:file|tep|tai lieu)|"
+         r"(?:bot )?tra loi .*\bmat bao lau\b|thoi gian (?:bot )?tra loi|"
+         r"chat voice|(?:hoi|su dung) bang voice|"
+         r"xuat (?:ban )?ghi (?:cuoc )?chat|"
+         r"ket noi co so du lieu|"
+         r"(?:co|dung) thu phi\b|"
+         r"gio lam viec .*\b(?:ho tro|bo phan)\b|"
+         r"(?:co the )?hoi tieng anh\b|"
+         r"tai khoan .*\bmenu\b|du lieu ca nhan|"
+        r"cau tra loi .*\bco loi\b|"
+        r"giao dien|giong noi|hoi bang giong|"
+        r"bao mat du lieu|chinh sach bao mat|"
+        r"phien ban (?:chatbot|bot|he thong)|phien ban hien tai|"
+        r"nhan vien truc|gio hanh chinh|"
+        r"dang nhap (?:can bo|khac|dan))\b",
+        folded,
+    ):
+        return True
+    if "phien ban chatbot" in folded or "phien ban bot" in folded:
+        return True
+    if "he thong" in folded and "bao mat" in folded:
+        return True
+    if re.search(r"\bdang nhap\b", folded) and re.search(
+        r"\b(?:can bo|tai khoan|dan thuong|dan)\b",
+        folded,
+    ):
+        return True
+    if re.search(r"\b(?:van hanh|chu quan|ai van hanh)\b", folded) and (
+        botish
+        or re.search(r"\b(?:bot|chatbot)\b.*\bco quan\b", folded)
+        or re.search(r"\bco quan\b.*\b(?:bot|chatbot|van hanh)\b", folded)
+    ):
+        return True
+    if botish and re.search(
+        r"\b(?:giao dien|bao mat|dang nhap|phien ban|lich su|"
+        r"nhan vien|gio hanh chinh|giong noi|co quan)\b",
+        folded,
+    ):
+        return True
+    return False
+
+
+def _blocks_out_of_scope(question: str) -> bool:
+    if _has_legal_substance(question):
+        return True
+    folded = _fresh_route_text(question).replace("luat su", " ")
+    return any(
+        tok in folded
+        for tok in (
+            "thu tuc",
+            "ho so",
+            "le phi",
+            "giay to",
+            "dang ky xe",
+            "thong tu",
+            "nghi dinh",
+            "quyet dinh",
+        )
+    )
+
+
+def _is_explicit_out_of_scope(question: str) -> bool:
+    """Non-legal smalltalk: weather, sports, shopping, homework, dining."""
+
+    if _blocks_out_of_scope(question):
+        return False
+    folded = _fresh_route_text(question)
+    if not folded:
+        return False
+    if any(_fold(marker) in folded for marker in _OUT_OF_SCOPE_MARKERS):
+        return True
+    if re.search(r"\b(?:viet|lam|sang tac)\b.*\bbai tho\b", folded):
+        return True
+    if re.search(
+        r"\b(?:hom nay|ngay mai|du bao|cuoi tuan|tuan nay)\b.*"
+        r"\b(?:mua|thoi tiet|nhiet do)\b",
+        folded,
+    ):
+        return True
+    # "Mai o Do Son co mua khong" folds to mai + mua (tomorrow + rain).
+    if re.search(r"\bmai\b.*\b(?:co\s+)?mua\b", folded):
+        return True
+    if re.search(r"\b(?:thoi tiet|nhiet do|troi mua|troi nang)\b", folded):
+        return True
+    if re.search(r"\bke(?:\s+lai)?\s+chuyen\s+co tich\b", folded):
+        return True
+    if re.search(
+        r"\b(?:mua|chon)\s+xe\b.*\b(?:vision|lead|sh|air blade|vespa)\b",
+        folded,
+    ) or re.search(r"\b(?:vision|lead)\s+hay\s+(?:vision|lead)\b", folded):
+        return True
+    if re.search(r"\b(?:messi|ronaldo|world cup|ngoai hang)\b", folded):
+        return True
+    if "du lieu ca nhan" in folded and re.search(
+        r"\b(?:tai khoan|chatbot|bot|he thong|bao mat|chinh sach)\b", folded
+    ):
+        return True
+    if re.search(r"\btran bong\b", folded):
+        return True
+    if re.search(r"\bluat choi\b", folded):
+        return True
+    if re.search(
+        r"\b(?:nen|mua|chon)\s+(?:dien thoai|smartphone|laptop|may tinh)\b",
+        folded,
+    ):
+        return True
+    if re.search(r"\bcach nau\b|\bbun ca\b", folded):
+        return True
+    if re.search(r"\b(?:du lich|loi chuc|chon xe)\b", folded):
+        return True
+    if re.search(r"\bchuong trinh truyen hinh\b", folded):
+        return True
+    if re.search(r"\b(?:dau tu|mua)\s+vang\b", folded):
+        return True
+    if re.search(r"\b(?:instagram|caption|tiktok)\b", folded):
+        return True
+    if re.search(r"\b(?:bai tap|dao ham|giai toan|tich phan|giai tich|hinh hoc|dai so)\b", folded):
+        return True
+    if re.search(r"\blop\s+(?:1[0-2]|[1-9])\b", folded) and re.search(
+        r"\b(?:giai|bai|toan)\b", folded
+    ):
+        return True
+    if re.search(r"\bthue xe may\b.*\b(?:o |gia|do son)\b", folded):
+        return True
+    if re.search(r"\b(?:nhac|playlist)\b.*\b(?:chay bo|tap the duc)\b", folded):
+        return True
+    if re.search(r"\bchay bo\b.*\bnhac\b", folded):
+        return True
+    if "nha hang" in folded and "giay phep" not in folded:
+        return True
+    # Cinema / showtimes. Entertainment "chieu", never legal "hieu luc" or
+    # statutory "chieu theo". phim/rap/chieu in either order; lich chieu; xem phim.
+    if re.search(r"\bhieu luc\b", folded) is None and "chieu theo" not in folded:
+        has_phim = bool(re.search(r"\bphim\b", folded))
+        has_rap = bool(re.search(r"\brap\b", folded))
+        has_chieu = bool(re.search(r"\bchieu\b", folded))
+        if has_phim and (has_rap or has_chieu):
+            return True
+        if has_rap and has_chieu:
+            return True
+        if "lich chieu" in folded or "xem phim" in folded:
+            return True
+    # Gardening / hydroponics / rooftop vegetables. Construction permits
+    # (GPXD, giay phep, xay dung) stay legal via _blocks_out_of_scope.
+    if "thuy canh" in folded or "trong rau" in folded:
+        return True
+    if "san thuong" in folded and re.search(
+        r"\b(?:rau|vuon|thuy canh|trong cay|trong rau)\b", folded
+    ):
+        return True
+    if re.search(r"\busd\b", folded):
+        return True
+    return False
 
 
 def _needs_multi_topic_clarification(
@@ -2088,9 +2657,13 @@ def document_reference_from_citation(
     *,
     pinned: bool = False,
 ) -> dict[str, Any] | None:
+    from urllib.parse import unquote, urlsplit
+    viewer_path = urlsplit(str(citation.get("viewer_url") or "")).path
+    viewer_id = unquote(viewer_path[len("/legal-documents/"):]) if viewer_path.startswith("/legal-documents/") else ""
     document_id = _compact(
         citation.get("document_id")
         or citation.get("doc_id")
+        or viewer_id
         or citation.get("law_number")
         or citation.get("source_url")
     )
@@ -2293,15 +2866,7 @@ def _build_legacy_conversational_prompt(
             "chung chung và không bịa nội dung. Nếu người dùng xin gợi ý, chỉ đưa các "
             "câu hỏi gợi ý, không trả lời thay."
         )
-    addendum = _compact(system_prompt_addendum or "")[:8000]
-    addendum_block = (
-        "\n\nHƯỚNG DẪN DIỄN ĐẠT BỔ SUNG DO ADMIN CẤU HÌNH\n"
-        f"{addendum}\n"
-        "Chỉ điều chỉnh cách trình bày; không thay thế căn cứ pháp luật, nguồn, "
-        "bảo mật hoặc quy tắc an toàn."
-        if addendum
-        else ""
-    )
+    addendum_block = render_admin_style_addendum(system_prompt_addendum)
     return (
         "Bạn là Trợ lý Pháp luật phường/xã tại Hải Phòng. "
         "Hãy giao tiếp ấm áp, chuyên nghiệp và tự nhiên.\n"
@@ -2342,6 +2907,7 @@ def build_conversational_prompt(
     active_document: Mapping[str, Any] | None = None,
     conversation_patch_envelope: bool = False,
     system_prompt_addendum: str | None = None,
+    answer_depth: str = "balanced",
 ) -> str:
     """Route every conversational turn through UnifiedChatAnswerPromptV1."""
 
@@ -2386,4 +2952,16 @@ def build_conversational_prompt(
         conversation_is_first_turn=context_packet.messages_considered == 0,
         suggestion_limit=2,
         conversation_patch_envelope=conversation_patch_envelope,
+        answer_depth=answer_depth,
+        communication_preferences={
+            key: _compact((state or {}).get(key))[:120]
+            for key in ("preferred_address", "response_style")
+            if _compact((state or {}).get(key))
+        },
     )
+
+
+def is_contextual_legal_followup(question: str) -> bool:
+    """Public serving-boundary check for an incomplete legal continuation."""
+
+    return _is_contextual_legal_followup(question)

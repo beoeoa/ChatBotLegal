@@ -22,6 +22,7 @@ ConversationRouteV1 = Literal[
     "out_of_scope",
 ]
 RouterSourceV1 = Literal["rule", "llm", "fail_open"]
+EvidencePacketStatusV1 = Literal["complete", "partial", "insufficient"]
 
 # Keys the 0.5B classifier is forbidden to emit. Stripped if present.
 LLM_ROUTER_FORBIDDEN_KEYS = frozenset(
@@ -48,6 +49,8 @@ class PipelineLegalIssueV1:
     query_text: str
     domain: str | None
     intent: str | None
+    subject_anchor: str | None = None
+    fact_anchors: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -64,7 +67,12 @@ class PipelineDecisionV1:
     source: RouterSourceV1
     independent_queries: tuple[str, ...] = ()
     legal_route: str | None = None
+    # The procedure identity is resolved once by Unified Router V1 and is
+    # carried to R28 as a ranking/identity hint.  It is never inferred by the
+    # answer model or re-resolved downstream.
+    procedure_candidate: str | None = None
     reason: str = ""
+    domain_source: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -75,6 +83,8 @@ class PipelineDecisionV1:
                     "query_text": item.query_text,
                     "domain": item.domain,
                     "intent": item.intent,
+                    "subject_anchor": item.subject_anchor,
+                    "fact_anchors": list(item.fact_anchors),
                 }
                 for item in self.legal_issues
             ],
@@ -86,7 +96,9 @@ class PipelineDecisionV1:
             "source": self.source,
             "independent_queries": list(self.independent_queries),
             "legal_route": self.legal_route,
+            "procedure_candidate": self.procedure_candidate,
             "reason": self.reason,
+            "domain_source": self.domain_source,
         }
 
 
@@ -98,6 +110,75 @@ class AuthorizationScopeV1:
     primary_unit_id: str | None
     grants_checksum: str
     allowed_domains: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class EvidenceUnitV1:
+    """One complete evidence unit (typically one law + article)."""
+
+    unit_id: str
+    law_number: str
+    article_number: str
+    chunk_ids: tuple[str, ...]
+    domain: str | None = None
+    effective_from: str | None = None
+    effective_to: str | None = None
+    document_serving_state: str | None = None
+    is_central_or_shared: bool = False
+    exact_match: bool = False
+    score: float = 0.0
+    content: str = ""
+    source_url: str | None = None
+    replacement_of: str | None = None
+    replaced_by: str | None = None
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "unit_id": self.unit_id,
+            "law_number": self.law_number,
+            "article_number": self.article_number,
+            "chunk_ids": list(self.chunk_ids),
+            "domain": self.domain,
+            "effective_from": self.effective_from,
+            "effective_to": self.effective_to,
+            "document_serving_state": self.document_serving_state,
+            "is_central_or_shared": self.is_central_or_shared,
+            "exact_match": self.exact_match,
+            "score": self.score,
+            "content": self.content,
+            "source_url": self.source_url,
+            "replacement_of": self.replacement_of,
+            "replaced_by": self.replaced_by,
+        }
+
+
+@dataclass(frozen=True)
+class EvidencePacketV1:
+    """Phase C retrieval packet. Weak packets must not be sent to an LLM."""
+
+    issue_id: str
+    status: EvidencePacketStatusV1
+    units: tuple[EvidenceUnitV1, ...]
+    missing_facets: tuple[str, ...] = ()
+    expansion_used: bool = False
+    cannot_verify: bool = False
+    reason: str = ""
+    candidate_count: int = 0
+    rerank_window: int = 50
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "issue_id": self.issue_id,
+            "status": self.status,
+            "units": [item.to_payload() for item in self.units],
+            "missing_facets": list(self.missing_facets),
+            "expansion_used": self.expansion_used,
+            "cannot_verify": self.cannot_verify,
+            "reason": self.reason,
+            "candidate_count": self.candidate_count,
+            "rerank_window": self.rerank_window,
+            "may_go_to_llm": self.status == "complete" and not self.cannot_verify,
+        }
 
 
 def strip_llm_router_forbidden_fields(payload: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -262,6 +343,16 @@ def _issues_from_legal_answer(
                 query_text=query,
                 domain=domain,
                 intent=intent,
+                subject_anchor=(
+                    _compact(getattr(item, "retrieval_subject", None))
+                    or _compact(getattr(item, "title", None))
+                    or None
+                ),
+                fact_anchors=tuple(
+                    _compact(value)
+                    for value in (getattr(item, "retrieval_facts", ()) or ())
+                    if _compact(value)
+                ),
             )
         )
         if query:
@@ -305,6 +396,7 @@ def pipeline_decision_from_router(
     domain = decision.canonical_domain
     temporal = decision.temporal_scope
     legal_route = decision.legal_route
+    procedure_candidate: str | None = None
     if route == "legal_query":
         issues, queries, facets, planned_domain, planned_temporal = _issues_from_legal_answer(
             legal_answer
@@ -313,6 +405,10 @@ def pipeline_decision_from_router(
         temporal = planned_temporal or temporal
         if legal_route is None and legal_answer is not None:
             legal_route = str(legal_answer.answer_route or "") or None
+        if legal_answer is not None:
+            procedure_candidate = (
+                str(legal_answer.procedure_id or "").strip() or None
+            )
     else:
         domain = None
         temporal = None
@@ -334,7 +430,9 @@ def pipeline_decision_from_router(
         source=source,
         independent_queries=queries,
         legal_route=legal_route,
+        procedure_candidate=procedure_candidate,
         reason=str(decision.reason or ""),
+        domain_source=(str(decision.domain_source or "").strip() or None),
     )
 
 

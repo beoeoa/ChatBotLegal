@@ -7,6 +7,9 @@ interface LocaleObject { [key: string]: LocaleValue }
 function mergeLocale(base: LocaleObject, locale: LocaleObject): LocaleObject {
   const merged: LocaleObject = { ...base }
   for (const [key, value] of Object.entries(locale)) {
+    // Ignore retired translation keys so old locale bundles cannot bring
+    // removed technical diagnostics back into the active interface.
+    if (!(key in base)) continue
     if (
       value && typeof value === 'object' && !Array.isArray(value) &&
       merged[key] && typeof merged[key] === 'object' && !Array.isArray(merged[key])

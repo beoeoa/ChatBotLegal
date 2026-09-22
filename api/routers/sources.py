@@ -309,6 +309,7 @@ async def get_sources(
                     else None,
                     source_scope=row.get("source_scope"),
                     review_status=row.get("review_status"),
+                    legal_document_id=row.get("legal_document_id"),
                     embedded=str(row["id"]) in embedded_set,
                     embedded_chunks=0,  # Not needed in list view
                     insights_count=row.get("insights_count", 0),

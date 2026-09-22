@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const api = vi.hoisted(() => ({
   list: vi.fn(),
   domains: vi.fn(),
+  communeCatalog: vi.fn(),
   exportXlsx: vi.fn(),
 }))
 
@@ -34,10 +35,21 @@ describe('SourcesPage', () => {
   beforeEach(() => {
     api.list.mockReset()
     api.domains.mockReset()
+    api.communeCatalog.mockReset()
     api.exportXlsx.mockReset()
     api.domains.mockResolvedValue([
       { slug: 'ho_tich_chung_thuc', name: 'Hộ tịch và chứng thực', field_count: 1 },
     ])
+    api.communeCatalog.mockResolvedValue([{
+      id: 'van-phong-hdnd-ubnd',
+      name: 'Văn phòng HĐND và UBND',
+      code: 'van_phong',
+      fields: [{
+        code: 'ho_tich_chung_thuc',
+        name: 'Hộ tịch - Chứng thực',
+        domains: ['ho_tich_chung_thuc'],
+      }],
+    }])
     api.list.mockImplementation(async (params: { offset?: number; limit?: number }) => {
       const offset = params.offset || 0
       const limit = params.limit || 20
@@ -88,20 +100,17 @@ describe('SourcesPage', () => {
     expect(screen.getByRole('button', { name: 'Trang 2', current: 'page' })).toBeInTheDocument()
   })
 
-  it('resets to page one and maps the selected date range to API parameters', async () => {
+  it('resets to page one and maps the selected validity milestone to API parameters', async () => {
     render(<SourcesPage />)
     await screen.findByText('Văn bản 1')
     fireEvent.click(screen.getByRole('button', { name: 'Trang sau' }))
     await screen.findByText('Văn bản 21')
 
-    fireEvent.change(screen.getByLabelText('Chọn loại ngày'), { target: { value: 'issued' } })
-    fireEvent.change(screen.getByLabelText('Từ ngày'), { target: { value: '2026-01-01' } })
-    fireEvent.change(screen.getByLabelText('Đến ngày'), { target: { value: '2026-06-30' } })
+    fireEvent.change(screen.getByLabelText('Lọc theo tình trạng hiệu lực'), { target: { value: 'expiring_30' } })
 
     await waitFor(() => expect(api.list).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        issued_from: '2026-01-01',
-        issued_to: '2026-06-30',
+        validity_status: 'expiring_30',
         limit: 20,
         offset: 0,
       }),
@@ -110,21 +119,18 @@ describe('SourcesPage', () => {
     expect(await screen.findByRole('button', { name: 'Trang 1', current: 'page' })).toBeInTheDocument()
   })
 
-  it('does not call the API for a reversed date range', async () => {
+  it('shows only the requested validity milestones and removes date-range controls', async () => {
     render(<SourcesPage />)
     await screen.findByText('Văn bản 1')
 
-    fireEvent.change(screen.getByLabelText('Từ ngày'), { target: { value: '2026-08-17' } })
-    await waitFor(() => expect(api.list).toHaveBeenLastCalledWith(
-      expect.objectContaining({ effective_from: '2026-08-17' }),
-      expect.any(AbortSignal),
-    ))
-    const callsBeforeInvalidRange = api.list.mock.calls.length
-    fireEvent.change(screen.getByLabelText('Đến ngày'), { target: { value: '2026-08-16' } })
-
-    expect(await screen.findByText('Ngày bắt đầu không được sau ngày kết thúc.')).toBeInTheDocument()
-    await new Promise((resolve) => window.setTimeout(resolve, 0))
-    expect(api.list).toHaveBeenCalledTimes(callsBeforeInvalidRange)
+    const milestone = screen.getByLabelText('Lọc theo tình trạng hiệu lực')
+    expect(milestone).toHaveTextContent('Còn hiệu lực')
+    expect(milestone).toHaveTextContent('Hết hiệu lực')
+    expect(milestone).toHaveTextContent('Sắp hết hiệu lực trong 30 ngày')
+    expect(milestone).not.toHaveTextContent('Sắp có hiệu lực')
+    expect(milestone).not.toHaveTextContent('Chưa xác minh hiệu lực')
+    expect(screen.queryByLabelText('Từ ngày')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Đến ngày')).not.toBeInTheDocument()
   })
 
   it('exports every result with the currently applied filters', async () => {
@@ -132,21 +138,49 @@ describe('SourcesPage', () => {
     render(<SourcesPage />)
     await screen.findByText('Văn bản 1')
 
-    fireEvent.change(screen.getByLabelText('Lọc theo lĩnh vực'), { target: { value: 'ho_tich_chung_thuc' } })
-    fireEvent.change(screen.getByLabelText('Từ ngày'), { target: { value: '2026-01-01' } })
+    fireEvent.change(screen.getByLabelText('Lọc theo phòng ban'), { target: { value: 'van-phong-hdnd-ubnd' } })
+    fireEvent.change(screen.getByLabelText('Lọc theo tình trạng hiệu lực'), { target: { value: 'expired' } })
     await waitFor(() => expect(api.list).toHaveBeenLastCalledWith(
-      expect.objectContaining({ domain: 'ho_tich_chung_thuc', effective_from: '2026-01-01' }),
+      expect.objectContaining({
+        domain: 'ho_tich_chung_thuc',
+        validity_status: 'expired',
+      }),
       expect.any(AbortSignal),
     ))
 
-    fireEvent.click(screen.getByRole('button', { name: 'Xuất Excel' }))
+    fireEvent.click(screen.getByRole('button', { name: /Xuất Excel \(45\)/ }))
     await waitFor(() => expect(api.exportXlsx).toHaveBeenCalledWith(expect.objectContaining({
       domain: 'ho_tich_chung_thuc',
-      effective_from: '2026-01-01',
+      validity_status: 'expired',
       sort_by: 'effective_date',
       sort_order: 'desc',
     })))
     expect(click).toHaveBeenCalled()
     click.mockRestore()
+  })
+
+  it('shows only the fields configured for the selected department', async () => {
+    api.communeCatalog.mockResolvedValueOnce([
+      {
+        id: 'kinh-te-ha-tang',
+        name: 'Phòng Kinh tế - Hạ tầng - Đô thị',
+        code: 'kinh_te',
+        fields: [
+          { code: 'dat_dai_xay_dung', name: 'Đất đai - Xây dựng', domains: ['dat_dai_xay_dung'] },
+          { code: 'trat_tu_do_thi', name: 'Trật tự đô thị', domains: ['trat_tu_do_thi'] },
+        ],
+      },
+    ])
+    render(<SourcesPage />)
+    await screen.findByText('Văn bản 1')
+
+    fireEvent.change(screen.getByLabelText('Lọc theo phòng ban'), { target: { value: 'kinh-te-ha-tang' } })
+
+    expect(screen.getByRole('option', { name: 'Đất đai - Xây dựng' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'Trật tự đô thị' })).toBeInTheDocument()
+    await waitFor(() => expect(api.list).toHaveBeenLastCalledWith(
+      expect.objectContaining({ domain: 'dat_dai_xay_dung', offset: 0 }),
+      expect.any(AbortSignal),
+    ))
   })
 })

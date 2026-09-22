@@ -12,6 +12,7 @@ import {
   type LegalImpactCaseProjection,
   type LifecycleTimeline,
 } from '@/lib/api/legal-management'
+import { systemStatusLabel } from '@/lib/utils/system-labels'
 
 const EVENT_LABELS: Record<string, string> = {
   effective: 'Có hiệu lực',
@@ -25,6 +26,10 @@ const EVENT_LABELS: Record<string, string> = {
   correct: 'Đính chính',
   extend: 'Gia hạn',
   consolidate: 'Hợp nhất',
+}
+
+function eventLabel(value: string) {
+  return EVENT_LABELS[value] || 'Thay đổi pháp lý'
 }
 
 export function DocumentLifecyclePanel({
@@ -58,7 +63,7 @@ export function DocumentLifecyclePanel({
           setImpacts(impactsResult.value.filter((item) => eventIds.has(item.change_event_id)))
         }
       } else {
-        setError('Chưa thể đọc timeline Feature 018 cho văn bản này.')
+        setError('Chưa thể đọc lịch sử hiệu lực của văn bản này.')
       }
       if (manifestResult.status === 'fulfilled') setManifestGate(manifestResult.value.gate_passed)
     }
@@ -84,11 +89,11 @@ export function DocumentLifecyclePanel({
       })
       setPreview(
         result.mode === 'incremental'
-          ? 'Preview tăng dần đã tạo; chưa ghi vector và chưa đổi active pointer.'
-          : 'Preview toàn văn đã tạo; chưa ghi vector và chưa đổi active pointer.',
+          ? 'Đã xác định phần dữ liệu cần cập nhật; chưa ghi vào kho tìm kiếm và chưa thay đổi dữ liệu đang phục vụ.'
+          : 'Đã xác định toàn bộ dữ liệu cần cập nhật; chưa ghi vào kho tìm kiếm và chưa thay đổi dữ liệu đang phục vụ.',
       )
     } catch {
-      setPreview('Không thể tạo preview chỉ mục ở thời điểm này.')
+      setPreview('Không thể xem trước phạm vi cập nhật kho tìm kiếm ở thời điểm này.')
     } finally {
       setLoadingPreview(false)
     }
@@ -99,28 +104,28 @@ export function DocumentLifecyclePanel({
       <CardHeader>
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <CardTitle className="flex items-center gap-2"><CalendarClock className="h-5 w-5" />Timeline, ảnh hưởng và chỉ mục</CardTitle>
-            <p className="mt-1 text-sm text-muted-foreground">Chỉ Admin thấy projection vận hành; nội dung văn bản vẫn dùng ACL hiện có.</p>
+            <CardTitle className="flex items-center gap-2"><CalendarClock className="h-5 w-5" />Lịch sử hiệu lực, ảnh hưởng và dữ liệu tra cứu</CardTitle>
+            <p className="mt-1 text-sm text-muted-foreground">Chỉ quản trị viên được xem thông tin vận hành; quyền đọc nội dung văn bản không thay đổi.</p>
           </div>
           <Badge variant={manifestGate ? 'default' : 'destructive'}>
-            {manifestGate ? 'Manifest đạt gate' : 'Chỉ mục cần rà soát'}
+            {manifestGate ? 'Kho tìm kiếm đạt yêu cầu' : 'Kho tìm kiếm cần rà soát'}
           </Badge>
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
-        {error && <Alert><AlertTriangle className="h-4 w-4" /><AlertTitle>Projection chưa sẵn sàng</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
+        {error && <Alert><AlertTriangle className="h-4 w-4" /><AlertTitle>Thông tin theo dõi chưa sẵn sàng</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
         <div className="grid gap-3 md:grid-cols-3">
           <div className="rounded-lg border p-4"><p className="text-sm text-muted-foreground">Sự kiện đã ghi</p><p className="mt-1 text-2xl font-semibold">{timeline?.events.length || 0}</p></div>
           <div className="rounded-lg border p-4"><p className="text-sm text-muted-foreground">Việc cần rà soát</p><p className="mt-1 text-2xl font-semibold">{impacts.length}</p></div>
-          <div className="rounded-lg border p-4"><p className="text-sm text-muted-foreground">Trạng thái vector</p><p className="mt-1 font-semibold">{timeline?.vector_state || 'Chưa xác định'}</p></div>
+          <div className="rounded-lg border p-4"><p className="text-sm text-muted-foreground">Trạng thái dữ liệu tra cứu</p><p className="mt-1 font-semibold">{systemStatusLabel(timeline?.vector_state)}</p></div>
         </div>
         {(timeline?.events || []).length > 0 && (
-          <ol className="space-y-3" aria-label="Timeline pháp lý">
+          <ol className="space-y-3" aria-label="Lịch sử hiệu lực pháp lý">
             {timeline?.events.map((event) => (
               <li key={event.id} className="rounded-lg border p-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="font-medium">{EVENT_LABELS[event.event_type] || event.event_type}</span>
-                  <Badge variant="outline">{event.status}</Badge>
+                  <span className="font-medium">{eventLabel(event.event_type)}</span>
+                  <Badge variant="outline">{systemStatusLabel(event.status)}</Badge>
                 </div>
                 <p className="mt-1 text-sm text-muted-foreground">Áp dụng: {event.effective_from || 'Chưa có ngày'}</p>
               </li>
@@ -130,14 +135,14 @@ export function DocumentLifecyclePanel({
         {impacts.length > 0 && (
           <Alert>
             <ScanSearch className="h-4 w-4" />
-            <AlertTitle>{impacts.length} dependency đang chờ rà soát</AlertTitle>
-            <AlertDescription>Không tự động sao chép nội dung hoặc phát hành revision mới.</AlertDescription>
+            <AlertTitle>{impacts.length} nội dung liên quan đang chờ rà soát</AlertTitle>
+            <AlertDescription>Hệ thống không tự động sao chép nội dung hoặc phát hành phiên bản mới.</AlertDescription>
           </Alert>
         )}
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-muted/20 p-4">
           <div className="flex items-start gap-2 text-sm">
             <ShieldCheck className="mt-0.5 h-4 w-4 text-primary" />
-            <span>Preview chỉ xác định phạm vi; execution cần gate và phê duyệt riêng.</span>
+            <span>Bản xem trước chỉ xác định phạm vi; việc cập nhật thật cần được kiểm tra và phê duyệt riêng.</span>
           </div>
           <Button variant="outline" onClick={() => void previewIndex()} disabled={loadingPreview || !timeline}>
             <Layers3 className="mr-2 h-4 w-4" />Xem trước tái lập chỉ mục

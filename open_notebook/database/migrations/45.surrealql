@@ -1,0 +1,14 @@
+-- Legal import pipeline observability. Additive only: no candidate, job or
+-- corpus history is rewritten by this migration.
+DEFINE FIELD IF NOT EXISTS pipeline_stage ON TABLE legal_crawl_candidate TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS preparation_status ON TABLE legal_crawl_candidate TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS blockers ON TABLE legal_crawl_candidate TYPE option<array<string>>;
+DEFINE FIELD IF NOT EXISTS document_id ON TABLE legal_crawl_candidate TYPE option<number>;
+DEFINE FIELD IF NOT EXISTS chunk_count ON TABLE legal_crawl_candidate TYPE option<number>;
+DEFINE FIELD IF NOT EXISTS indexed_at ON TABLE legal_crawl_candidate TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS vector_collection ON TABLE legal_crawl_candidate TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS chatbot_ready ON TABLE legal_crawl_candidate TYPE option<bool>;
+
+DEFINE FIELD IF NOT EXISTS pipeline_stage ON TABLE legal_import_job TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS indexed_at ON TABLE legal_import_job TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS vector_collection ON TABLE legal_import_job TYPE option<string>;

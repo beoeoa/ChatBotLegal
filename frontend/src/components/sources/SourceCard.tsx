@@ -27,6 +27,7 @@ import {
 } from 'lucide-react'
 import { useSourceStatus } from '@/lib/hooks/use-sources'
 import { useTranslation } from '@/lib/hooks/use-translation'
+import { formatApiError } from '@/lib/utils/error-handler'
 import type { TFunction } from 'i18next'
 import { cn } from '@/lib/utils'
 import { ContextToggle } from '@/components/common/ContextToggle'
@@ -264,7 +265,7 @@ export function SourceCard({
             {/* Processing message for active statuses */}
             {statusData?.message && (isProcessing || isFailed) && (
               <p className="text-xs text-gray-600 mb-2 italic">
-                {statusData.message}
+                {formatApiError(statusData.message, isFailed ? 'Không thể xử lý nguồn này. Vui lòng kiểm tra và thử lại.' : 'Hệ thống đang xử lý nguồn.')}
               </p>
             )}
 

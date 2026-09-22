@@ -1,6 +1,7 @@
 import { afterEach, describe, it, expect, vi, beforeEach } from 'vitest'
 import { searchApi } from './search'
 import apiClient from './client'
+import { useAuthStore } from '@/lib/stores/auth-store'
 
 vi.mock('./client', () => ({
   default: {
@@ -45,9 +46,7 @@ describe('searchApi.askKnowledgeBaseStream', () => {
   })
 
   it('uses the progress endpoint and keeps the transport signal out of JSON', async () => {
-    localStorage.setItem('auth-storage', JSON.stringify({
-      state: { token: 'test-token', role: 'officer' },
-    }))
+    useAuthStore.setState({ token: 'test-token', role: 'officer' })
     const encoder = new TextEncoder()
     const body = new ReadableStream<Uint8Array>({
       start(controller) {

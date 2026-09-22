@@ -1,0 +1,35 @@
+{
+  "schema_version": "legal-retrieval-metadata-overlay-v1",
+  "source": "official_vbpl_document_and_article_content",
+  "records": [
+    {
+      "law_number_normalized": "73 2025 QH15",
+      "article_normalized": "13",
+      "fields": {
+        "domain_slug": "an_sinh_y_te_giao_duc"
+      },
+      "official_url": "https://vbpl.vn/van-ban/chi-tiet/van-ban--179262",
+      "reason": "Luật Nhà giáo, Điều 13 quy định chuẩn nghề nghiệp nhà giáo; immutable chunks contain exact law/article/source but have an empty domain_slug."
+    },
+    {
+      "law_number_normalized": "73 2025 QH15",
+      "article_normalized": "14",
+      "fields": {
+        "domain_slug": "an_sinh_y_te_giao_duc"
+      },
+      "official_url": "https://vbpl.vn/van-ban/chi-tiet/van-ban--179262",
+      "reason": "Luật Nhà giáo, Điều 14 quy định tuyển dụng nhà giáo; exact immutable source content establishes the education domain."
+    },
+    {
+      "law_number_normalized": "88 2025 QH15",
+      "article_normalized": "18A",
+      "fields": {
+        "domain_slug": "khieu_nai_to_cao"
+      },
+      "official_url": "https://vbpl.vn/van-ban/chi-tiet/van-ban--178737",
+      "reason": "Điều 18a regulates electronic administrative-violation handling; exact immutable source content establishes the enforcement domain."
+    }
+  ],
+  "database_mutated": false,
+  "vector_mutated": false
+}

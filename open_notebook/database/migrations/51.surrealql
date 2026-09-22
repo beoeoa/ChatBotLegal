@@ -1,0 +1,9 @@
+-- Portable Crawl4AI source profiles and reversible source archival.
+-- Additive only: existing source rows remain valid and are backfilled by the
+-- crawler service according to their seeded purpose.
+DEFINE FIELD IF NOT EXISTS website_type ON TABLE legal_crawl_source TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS link_selector ON TABLE legal_crawl_source TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS next_page_selector ON TABLE legal_crawl_source TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS include_patterns ON TABLE legal_crawl_source TYPE option<array<string>>;
+DEFINE FIELD IF NOT EXISTS exclude_patterns ON TABLE legal_crawl_source TYPE option<array<string>>;
+DEFINE FIELD IF NOT EXISTS deleted_at ON TABLE legal_crawl_source TYPE option<datetime>;

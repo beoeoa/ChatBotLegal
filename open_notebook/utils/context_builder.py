@@ -335,17 +335,40 @@ class ContextBuilder:
 
         logger.info(f"Truncating from {total_tokens} to {max_tokens} tokens")
 
-        # Remove items from the end (lowest priority) until under limit
-        current_tokens = total_tokens
-        removed_count = 0
-
-        while current_tokens > max_tokens and self.items:
-            removed_item = self.items.pop()
-            current_tokens -= removed_item.token_count or 0
-            removed_count += 1
-
+        # Fill the budget in priority order. If the next source is larger than
+        # the remaining budget, retain a bounded excerpt instead of dropping
+        # the source entirely (which previously produced empty notebooks).
+        retained: List[ContextItem] = []
+        current_tokens = 0
+        for item in self.items:
+            remaining = max_tokens - current_tokens
+            if remaining <= 0:
+                break
+            if (item.token_count or 0) <= remaining:
+                retained.append(item)
+                current_tokens += item.token_count or 0
+                continue
+            if remaining < 100:
+                break
+            rendered = str(item.content)
+            excerpt = rendered[: remaining * 4]
+            bounded_item = ContextItem(
+                id=item.id,
+                type=item.type,
+                content={
+                    "retrieved_excerpt": excerpt,
+                    "truncated": True,
+                    "original_tokens": item.token_count,
+                },
+                priority=item.priority,
+            )
+            retained.append(bounded_item)
+            current_tokens += bounded_item.token_count or 0
+            break
+        removed_count = len(self.items) - len(retained)
+        self.items = retained
         logger.info(
-            f"Removed {removed_count} items, final token count: {current_tokens}"
+            f"Bounded context to {current_tokens} tokens; omitted {removed_count} lower-priority items"
         )
 
     def remove_duplicates(self) -> None:

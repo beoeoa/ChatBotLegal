@@ -21,15 +21,43 @@ import { Input } from '@/components/ui/input'
 import {
   LegalDocumentFilterParams,
   LegalDocumentListItem,
+  LegalDepartment,
   LegalDomain,
-  LegalRetrievalTier,
+  LegalValidityStatusFilter,
   legalDocumentsApi,
 } from '@/lib/api/legal-documents'
+import { formatApiError } from '@/lib/utils/error-handler'
 
 const PAGE_SIZE = 20
 
-type DateField = 'effective' | 'issued' | 'expired'
+type ValidityFilter = '' | LegalValidityStatusFilter
 type PaginationItem = number | 'ellipsis-start' | 'ellipsis-end'
+
+const VALIDITY_LABELS: Record<ValidityFilter, string> = {
+  '': 'Tất cả tình trạng hiệu lực',
+  active: 'Còn hiệu lực',
+  expiring_30: 'Sắp hết hiệu lực trong 30 ngày',
+  not_yet_effective: 'Sắp có hiệu lực',
+  expired: 'Hết hiệu lực',
+  unknown: 'Chưa xác minh hiệu lực',
+}
+
+function documentValidityLabel(document: LegalDocumentListItem): string {
+  return document.validity_sync?.display_label
+    || VALIDITY_LABELS[(document.validity_status || '') as ValidityFilter]
+    || 'Chưa xác minh hiệu lực'
+}
+
+function validityBadgeClass(status?: string | null): string {
+  if (status === 'active' || status === 'amended' || status === 'expired_partial' || status === 'suspended_partial') {
+    return 'border-emerald-200 bg-emerald-50 text-emerald-800'
+  }
+  if (status === 'expired' || status === 'replaced' || status === 'repealed' || status === 'suspended') {
+    return 'border-red-200 bg-red-50 text-red-800'
+  }
+  if (status === 'not_yet_effective') return 'border-blue-200 bg-blue-50 text-blue-800'
+  return 'border-amber-200 bg-amber-50 text-amber-900'
+}
 
 function paginationItems(page: number, pageCount: number): PaginationItem[] {
   if (pageCount <= 7) return Array.from({ length: pageCount }, (_, index) => index + 1)
@@ -54,26 +82,18 @@ function formatDate(value?: string | null): string {
 }
 
 function getErrorMessage(error: unknown): string {
-  const candidate = error as {
-    response?: { data?: { detail?: string | { message?: string } } }
-    message?: string
-  }
-  const detail = candidate.response?.data?.detail
-  if (typeof detail === 'string') return detail
-  if (detail && typeof detail === 'object' && detail.message) return detail.message
-  return candidate.message || 'Không tải được kho văn bản pháp luật.'
+  return formatApiError(error, 'Không tải được kho văn bản pháp luật.')
 }
 
 export default function SourcesPage() {
   const [documents, setDocuments] = useState<LegalDocumentListItem[]>([])
   const [domains, setDomains] = useState<LegalDomain[]>([])
+  const [departments, setDepartments] = useState<LegalDepartment[]>([])
   const [searchText, setSearchText] = useState('')
   const [query, setQuery] = useState('')
+  const [departmentId, setDepartmentId] = useState('')
   const [domain, setDomain] = useState('')
-  const [tier, setTier] = useState<LegalRetrievalTier>('all')
-  const [dateField, setDateField] = useState<DateField>('effective')
-  const [dateFrom, setDateFrom] = useState('')
-  const [dateTo, setDateTo] = useState('')
+  const [validityStatus, setValidityStatus] = useState<ValidityFilter>('')
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
   const [asOf, setAsOf] = useState('')
@@ -100,35 +120,31 @@ export default function SourcesPage() {
     legalDocumentsApi.domains()
       .then(setDomains)
       .catch(() => setDomains([]))
+    legalDocumentsApi.communeCatalog()
+      .then(setDepartments)
+      .catch(() => setDepartments([]))
   }, [])
 
-  const dateError = dateFrom && dateTo && dateFrom > dateTo
-    ? 'Ngày bắt đầu không được sau ngày kết thúc.'
-    : null
+  const selectedDepartment = useMemo(
+    () => departments.find((item) => item.id === departmentId),
+    [departmentId, departments],
+  )
+  const availableFields = useMemo(
+    () => selectedDepartment?.fields || [],
+    [selectedDepartment],
+  )
 
   const filterParams = useMemo<LegalDocumentFilterParams>(() => {
-    const params: LegalDocumentFilterParams = {
+    return {
       q: query || undefined,
       domain: domain || undefined,
-      tier,
+      validity_status: validityStatus || undefined,
       sort_by: 'effective_date',
       sort_order: 'desc',
     }
-    if (dateFrom) params[`${dateField}_from`] = dateFrom
-    if (dateTo) params[`${dateField}_to`] = dateTo
-    return params
-  }, [dateField, dateFrom, dateTo, domain, query, tier])
+  }, [domain, query, validityStatus])
 
   useEffect(() => {
-    if (dateError) {
-      requestSequence.current += 1
-      setDocuments([])
-      setTotal(0)
-      setError(dateError)
-      setLoading(false)
-      return
-    }
-
     const controller = new AbortController()
     const requestId = requestSequence.current + 1
     requestSequence.current = requestId
@@ -164,13 +180,9 @@ export default function SourcesPage() {
     })
 
     return () => controller.abort()
-  }, [dateError, filterParams, page, refreshVersion])
+  }, [filterParams, page, refreshVersion])
 
   const handleExport = async () => {
-    if (dateError) {
-      toast.error(dateError)
-      return
-    }
     try {
       setExporting(true)
       const exported = await legalDocumentsApi.exportXlsx(filterParams)
@@ -202,9 +214,21 @@ export default function SourcesPage() {
   }
 
   const selectedDomainName = useMemo(
-    () => domains.find((item) => item.slug === domain)?.name,
-    [domain, domains],
+    () => availableFields.find((item) => item.code === domain)?.name
+      || domains.find((item) => item.slug === domain)?.name,
+    [availableFields, domain, domains],
   )
+
+  const clearFilters = () => {
+    setSearchText('')
+    setQuery('')
+    setDepartmentId('')
+    setDomain('')
+    setValidityStatus('')
+    setPage(1)
+  }
+
+  const hasFilters = Boolean(query || departmentId || domain || validityStatus)
 
   return (
     <AppShell>
@@ -214,18 +238,18 @@ export default function SourcesPage() {
             <div>
               <div className="flex items-center gap-2">
                 <BookOpen className="h-6 w-6 text-primary" />
-                <h1 className="text-2xl font-semibold">Văn bản pháp luật</h1>
+                <h1 className="text-2xl font-semibold">Kho tra cứu công khai</h1>
               </div>
               <p className="mt-1 text-sm text-muted-foreground">
-                Kho văn bản đang được hệ thống Legal Retrieval dùng để tra cứu và tạo căn cứ trả lời.
+                Kho văn bản đang được hệ thống dùng để tra cứu và tạo căn cứ trả lời.
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
-              <Button variant="outline" onClick={() => void handleExport()} disabled={exporting || loading || Boolean(dateError)}>
+              <Button variant="outline" onClick={() => void handleExport()} disabled={exporting || loading}>
                 {exporting
                   ? <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
                   : <Download className="mr-2 h-4 w-4" />}
-                {exporting ? 'Đang xuất...' : 'Xuất Excel'}
+                {exporting ? 'Đang xuất...' : `Xuất Excel (${total.toLocaleString('vi-VN')})`}
               </Button>
               <Button variant="outline" onClick={() => setRefreshVersion((value) => value + 1)} disabled={loading}>
                 <RefreshCw className={`mr-2 h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
@@ -238,7 +262,7 @@ export default function SourcesPage() {
         <div className="min-h-0 flex-1 overflow-y-auto">
           <div className="mx-auto max-w-7xl space-y-5 p-6">
             <section className="space-y-3 rounded-xl border bg-card p-4 shadow-sm">
-              <div className="grid gap-3 lg:grid-cols-[1fr_260px_220px]">
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-[minmax(280px,1fr)_220px_220px_240px_auto]">
                 <label className="relative block">
                   <span className="sr-only">Tìm kiếm văn bản</span>
                   <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
@@ -250,6 +274,23 @@ export default function SourcesPage() {
                   />
                 </label>
                 <select
+                  value={departmentId}
+                  onChange={(event) => {
+                    const nextDepartmentId = event.target.value
+                    const nextDepartment = departments.find((item) => item.id === nextDepartmentId)
+                    setDepartmentId(nextDepartmentId)
+                    setDomain(nextDepartment?.fields[0]?.code || '')
+                    setPage(1)
+                  }}
+                  className="h-9 rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+                  aria-label="Lọc theo phòng ban"
+                >
+                  <option value="">Tất cả phòng ban</option>
+                  {departments.map((item) => (
+                    <option key={item.id} value={item.id}>{item.name}</option>
+                  ))}
+                </select>
+                <select
                   value={domain}
                   onChange={(event) => {
                     setDomain(event.target.value)
@@ -257,76 +298,49 @@ export default function SourcesPage() {
                   }}
                   className="h-9 rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
                   aria-label="Lọc theo lĩnh vực"
+                  disabled={!selectedDepartment || availableFields.length === 0}
                 >
-                  <option value="">Tất cả lĩnh vực</option>
-                  {domains.map((item) => (
-                    <option key={item.slug} value={item.slug}>{item.name}</option>
+                  {availableFields.length === 0 && (
+                    <option value="">
+                      {selectedDepartment ? 'Phòng ban chưa có lĩnh vực' : 'Chọn phòng ban trước'}
+                    </option>
+                  )}
+                  {availableFields.map((item) => (
+                    <option key={item.code} value={item.code}>{item.name}</option>
                   ))}
                 </select>
                 <select
-                  value={tier}
+                  value={validityStatus}
                   onChange={(event) => {
-                    setTier(event.target.value as LegalRetrievalTier)
+                    setValidityStatus(event.target.value as ValidityFilter)
                     setPage(1)
                   }}
                   className="h-9 rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
-                  aria-label="Lọc theo tầng truy xuất"
+                  aria-label="Lọc theo tình trạng hiệu lực"
                 >
-                  <option value="all">Toàn bộ kho tra cứu</option>
-                  <option value="core">Kho nhanh</option>
-                  <option value="expanded">Kho mở rộng</option>
+                  <option value="">Tất cả tình trạng hiệu lực</option>
+                  <option value="active">Còn hiệu lực</option>
+                  <option value="expired">Hết hiệu lực</option>
+                  <option value="expiring_30">Sắp hết hiệu lực trong 30 ngày</option>
                 </select>
-              </div>
-              <div className="grid gap-3 sm:grid-cols-3">
-                <label className="space-y-1 text-xs font-medium text-muted-foreground">
-                  Mốc thời gian
-                  <select
-                    value={dateField}
-                    onChange={(event) => {
-                      setDateField(event.target.value as DateField)
-                      setPage(1)
-                    }}
-                    className="block h-9 w-full rounded-md border border-input bg-background px-3 text-sm font-normal text-foreground outline-none focus:ring-2 focus:ring-ring"
-                    aria-label="Chọn loại ngày"
-                  >
-                    <option value="effective">Ngày hiệu lực</option>
-                    <option value="issued">Ngày ban hành</option>
-                    <option value="expired">Ngày hết hiệu lực</option>
-                  </select>
-                </label>
-                <label className="space-y-1 text-xs font-medium text-muted-foreground">
-                  Từ ngày
-                  <Input
-                    type="date"
-                    value={dateFrom}
-                    onChange={(event) => {
-                      setDateFrom(event.target.value)
-                      setPage(1)
-                    }}
-                    aria-label="Từ ngày"
-                    className="block font-normal text-foreground"
-                  />
-                </label>
-                <label className="space-y-1 text-xs font-medium text-muted-foreground">
-                  Đến ngày
-                  <Input
-                    type="date"
-                    value={dateTo}
-                    onChange={(event) => {
-                      setDateTo(event.target.value)
-                      setPage(1)
-                    }}
-                    aria-label="Đến ngày"
-                    className="block font-normal text-foreground"
-                  />
-                </label>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={clearFilters}
+                  disabled={!hasFilters}
+                  className="justify-self-start xl:justify-self-stretch"
+                >
+                  Xóa bộ lọc
+                </Button>
               </div>
             </section>
 
             <div ref={listTopRef} className="scroll-mt-4 flex flex-wrap items-center justify-between gap-2 text-sm">
               <div className="flex flex-wrap items-center gap-2">
                 <Badge variant="secondary">{total.toLocaleString('vi-VN')} văn bản</Badge>
+                {selectedDepartment && <Badge variant="outline">{selectedDepartment.name}</Badge>}
                 {selectedDomainName && <Badge variant="outline">{selectedDomainName}</Badge>}
+                {validityStatus && <Badge variant="outline">{VALIDITY_LABELS[validityStatus]}</Badge>}
                 {asOf && (
                   <span className="flex items-center gap-1 text-muted-foreground">
                     <CalendarDays className="h-4 w-4" />
@@ -334,9 +348,7 @@ export default function SourcesPage() {
                   </span>
                 )}
               </div>
-              <span className="text-muted-foreground">
-                Kho nhanh phục vụ câu hỏi phổ biến; kho mở rộng bổ sung căn cứ khi cần.
-              </span>
+              <span className="text-muted-foreground">Số liệu dùng cùng nguồn với Kho văn bản pháp luật.</span>
             </div>
 
             {error && (
@@ -370,8 +382,8 @@ export default function SourcesPage() {
                         <div className="mb-2 flex flex-wrap items-center gap-2">
                           {document.law_number && <Badge>{document.law_number}</Badge>}
                           {document.document_type && <Badge variant="outline">{document.document_type}</Badge>}
-                          <Badge variant={document.retrieval_tier === 'core' ? 'secondary' : 'outline'}>
-                            {document.retrieval_tier === 'core' ? 'Kho nhanh' : 'Kho mở rộng'}
+                          <Badge variant="outline" className={validityBadgeClass(document.validity_status)}>
+                            {documentValidityLabel(document)}
                           </Badge>
                           {document.domain_name && <Badge variant="outline">{document.domain_name}</Badge>}
                         </div>

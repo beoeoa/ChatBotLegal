@@ -1,0 +1,143 @@
+[
+  {
+    "code": "tu_phap_ho_tich",
+    "name": "Tư pháp - Hộ tịch & Chứng thực",
+    "department": "Công chức Tư pháp - Hộ tịch",
+    "domains": [
+      "ho_tich_chung_thuc"
+    ],
+    "field_names": [
+      "Hộ tịch - Chứng thực",
+      "Tư pháp",
+      "Hộ tịch"
+    ],
+    "field_code": "ho_tich_chung_thuc"
+  },
+  {
+    "code": "dia_chinh_xay_dung",
+    "name": "Đất đai - Xây dựng - Môi trường",
+    "department": "Công chức Địa chính - Xây dựng - Đô thị & Môi trường",
+    "domains": [
+      "dat_dai_xay_dung"
+    ],
+    "field_names": [
+      "Đất đai - Xây dựng - Đô thị",
+      "Xây dựng",
+      "Môi trường",
+      "Đất đai"
+    ],
+    "field_code": "dat_dai_xay_dung"
+  },
+  {
+    "code": "kinh_te",
+    "name": "Kinh tế",
+    "department": "Phòng Kinh tế - Hạ tầng - Đô thị",
+    "domains": [
+      "kinh_te"
+    ],
+    "field_names": [
+      "Kinh tế xây dựng"
+    ],
+    "field_code": "kinh_te"
+  },
+  {
+    "code": "an_sinh",
+    "name": "Lao động - An sinh xã hội",
+    "department": "Công chức Văn hóa - Xã hội (LĐ-TB&XH)",
+    "domains": [
+      "an_sinh_y_te_giao_duc"
+    ],
+    "field_names": [
+      "Lao động - Thương binh và Xã hội",
+      "Bảo trợ xã hội"
+    ],
+    "field_code": "an_sinh_y_te_giao_duc"
+  },
+  {
+    "code": "van_hoa_xa_hoi",
+    "name": "Văn hóa - Giáo dục - Y tế",
+    "department": "Công chức Văn hóa - Xã hội",
+    "domains": [
+      "an_sinh_y_te_giao_duc"
+    ],
+    "field_names": [
+      "Văn hóa - Thông tin",
+      "Giáo dục và đào tạo"
+    ],
+    "field_code": "van_hoa_giao_duc_y_te"
+  },
+  {
+    "code": "cong_an",
+    "name": "Cư trú - Căn cước - ANTT",
+    "department": "Công an phường/xã",
+    "domains": [
+      "cu_tru_an_ninh"
+    ],
+    "field_names": [
+      "An ninh trật tự",
+      "Đăng ký, quản lý cư trú"
+    ],
+    "field_code": "cu_tru_an_ninh"
+  },
+  {
+    "code": "trat_tu_do_thi",
+    "name": "Trật tự đô thị - Hè phố",
+    "department": "Tổ Quản lý TTĐT / Công chức Địa chính & Công an",
+    "domains": [
+      "trat_tu_do_thi"
+    ],
+    "field_names": [
+      "Đất đai - Xây dựng - Đô thị"
+    ],
+    "field_code": "trat_tu_do_thi"
+  },
+  {
+    "code": "quan_su",
+    "name": "Quốc phòng - Nghĩa vụ quân sự",
+    "department": "Ban Chỉ huy Quân sự cấp xã",
+    "domains": [
+      "quoc_phong_quan_su"
+    ],
+    "field_names": [
+      "Quốc phòng"
+    ],
+    "field_code": "quoc_phong_quan_su"
+  },
+  {
+    "code": "tiep_cong_dan",
+    "name": "Tiếp dân - Khiếu nại - Tố cáo",
+    "department": "Bộ phận Tiếp công dân / Công chức Tư pháp, Văn phòng",
+    "domains": [
+      "khieu_nai_to_cao_xu_phat"
+    ],
+    "field_names": [
+      "Khiếu nại - Tố cáo"
+    ],
+    "field_code": "khieu_nai_to_cao_xu_phat"
+  },
+  {
+    "code": "hanh_chinh_cong",
+    "name": "Dịch vụ công Một cửa - Văn thư",
+    "department": "Bộ phận Một cửa / Công chức Văn phòng - Thống kê",
+    "domains": [
+      "hanh_chinh_cong"
+    ],
+    "field_names": [
+      "Thủ tục hành chính",
+      "Văn thư và Lưu trữ Nhà nước"
+    ],
+    "field_code": "hanh_chinh_cong"
+  },
+  {
+    "code": "tram_y_te",
+    "name": "Y tế cơ sở",
+    "department": "Trạm Y tế phường/xã",
+    "domains": [
+      "an_sinh_y_te_giao_duc"
+    ],
+    "field_names": [
+      "Y tế"
+    ],
+    "field_code": "y_te_co_so"
+  }
+]

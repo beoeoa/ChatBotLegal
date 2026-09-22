@@ -9,11 +9,10 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Callable
 
-import httpx
 from bs4 import BeautifulSoup
 from loguru import logger
 

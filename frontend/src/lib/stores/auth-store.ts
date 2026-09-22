@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { getApiUrl } from '@/lib/config'
 import { sessionSecurityHeaders } from '@/lib/api/session-security'
+import { formatApiError } from '@/lib/utils/error-handler'
 
 export type UserRole = 'officer' | 'citizen' | 'admin'
 export type MfaChallenge =
@@ -12,6 +13,21 @@ export type TotpSetup = {
   secret: string
   provisioningUri: string
   confirmToken: string
+}
+
+export type FirebaseProfileInput = {
+  gender?: 'male' | 'female' | 'unspecified'
+  fullName?: string
+  phone?: string
+}
+
+export type CitizenRegistrationInput = {
+  username: string
+  email: string
+  password: string
+  fullName?: string
+  phone?: string
+  gender?: 'male' | 'female' | 'unspecified'
 }
 
 interface AuthState {
@@ -34,6 +50,9 @@ interface AuthState {
   setHasHydrated: (state: boolean) => void
   checkAuthRequired: () => Promise<boolean>
   login: (identifier: string, password: string, totpCode?: string) => Promise<boolean>
+  register: (input: CitizenRegistrationInput) => Promise<boolean>
+  exchangeFirebaseToken: (idToken: string, profile?: FirebaseProfileInput) => Promise<boolean>
+  linkFirebaseAccount: (idToken: string, identifier: string, password: string) => Promise<boolean>
   setupTotp: (setupToken: string) => Promise<TotpSetup | null>
   confirmTotp: (confirmToken: string, code: string) => Promise<boolean>
   selectRole: (role: UserRole) => void
@@ -42,6 +61,11 @@ interface AuthState {
 }
 
 function clearSessionState() {
+  if (typeof window !== 'undefined') {
+    try {
+      Object.keys(sessionStorage).filter(key => key.startsWith('admin-snapshot:')).forEach(key => sessionStorage.removeItem(key))
+    } catch { /* Storage may be unavailable. */ }
+  }
   return {
     isAuthenticated: false,
     token: null,
@@ -56,30 +80,7 @@ function clearSessionState() {
 }
 
 function apiErrorMessage(detail: unknown, fallback: string): string {
-  if (typeof detail === 'string' && detail.trim()) {
-    return detail
-  }
-
-  if (Array.isArray(detail)) {
-    const messages = detail
-      .map((item) => apiErrorMessage(item, ''))
-      .filter((message) => message.trim())
-    return messages.length > 0 ? messages.join('; ') : fallback
-  }
-
-  if (detail && typeof detail === 'object') {
-    const record = detail as Record<string, unknown>
-    const message = record.message ?? record.msg ?? record.detail
-    const normalized = apiErrorMessage(message, '')
-    if (normalized) {
-      const location = Array.isArray(record.loc)
-        ? record.loc.filter((part) => typeof part === 'string' || typeof part === 'number').join('.')
-        : ''
-      return location ? `${normalized} (${location})` : normalized
-    }
-  }
-
-  return fallback
+  return formatApiError({ detail }, fallback)
 }
 
 export const useAuthStore = create<AuthState>()(
@@ -134,7 +135,7 @@ export const useAuthStore = create<AuthState>()(
           console.error('Failed to check auth status:', error)
           if (error instanceof TypeError && error.message.includes('Failed to fetch')) {
             set({
-              error: 'Không kết nối được backend. Hãy kiểm tra API đã bật chưa.',
+              error: 'Không kết nối được hệ thống. Vui lòng kiểm tra mạng rồi thử lại.',
               authRequired: null,
             })
           } else {
@@ -239,7 +240,7 @@ export const useAuthStore = create<AuthState>()(
           } else {
             errorMessage = apiErrorMessage(
               responseBody?.detail ?? responseBody?.message,
-              `Đăng nhập thất bại (${response.status})`,
+              'Đăng nhập không thành công. Vui lòng kiểm tra thông tin và thử lại.',
             )
           }
 
@@ -253,9 +254,9 @@ export const useAuthStore = create<AuthState>()(
           console.error('Network error during auth:', error)
           let errorMessage = 'Đăng nhập thất bại'
           if (error instanceof TypeError && error.message.includes('Failed to fetch')) {
-            errorMessage = 'Không kết nối được backend. Hãy kiểm tra API đã bật chưa.'
+            errorMessage = 'Không kết nối được hệ thống. Vui lòng kiểm tra mạng rồi thử lại.'
           } else if (error instanceof Error) {
-            errorMessage = `Lỗi kết nối: ${error.message}`
+            errorMessage = formatApiError(error, 'Không thể đăng nhập. Vui lòng thử lại.')
           } else {
             errorMessage = 'Có lỗi không xác định khi đăng nhập'
           }
@@ -264,6 +265,160 @@ export const useAuthStore = create<AuthState>()(
             ...clearSessionState(),
             error: errorMessage,
             isLoading: false,
+          })
+          return false
+        }
+      },
+
+      register: async (input: CitizenRegistrationInput) => {
+        set({ isLoading: true, error: null })
+        try {
+          const apiUrl = await getApiUrl()
+          const response = await fetch(`${apiUrl}/api/auth/register`, {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              username: input.username.trim(),
+              email: input.email.trim(),
+              password: input.password,
+              ...(input.fullName?.trim() ? { full_name: input.fullName.trim() } : {}),
+              ...(input.phone?.trim() ? { phone: input.phone.trim() } : {}),
+              gender: input.gender || 'unspecified',
+            }),
+          })
+          const data = await response.json().catch(() => ({})) as Record<string, unknown>
+          if (!response.ok) {
+            set({
+              ...clearSessionState(),
+              isLoading: false,
+              error: apiErrorMessage(
+                data.detail ?? data.message,
+                'Không thể tạo tài khoản. Vui lòng kiểm tra thông tin và thử lại.',
+              ),
+            })
+            return false
+          }
+          set({
+            isAuthenticated: true,
+            token: typeof data.token === 'string' ? data.token : null,
+            role: (data.role as UserRole) || 'citizen',
+            userId: typeof data.user_id === 'string' ? data.user_id : null,
+            username: typeof data.username === 'string' ? data.username : input.username.trim(),
+            email: typeof data.email === 'string' ? data.email : input.email.trim(),
+            authMode: (data.auth_mode as AuthState['authMode']) || 'cookie_session',
+            mustChangePassword: false,
+            mfaChallenge: null,
+            isLoading: false,
+            lastAuthCheck: Date.now(),
+            error: null,
+          })
+          return true
+        } catch (error) {
+          set({
+            ...clearSessionState(),
+            isLoading: false,
+            error: formatApiError(
+              error,
+              'Không kết nối được hệ thống đăng ký. Vui lòng thử lại.',
+            ),
+          })
+          return false
+        }
+      },
+
+      exchangeFirebaseToken: async (idToken: string, profile?: FirebaseProfileInput) => {
+        set({ isLoading: true, error: null })
+        try {
+          const apiUrl = await getApiUrl()
+          const response = await fetch(`${apiUrl}/api/auth/firebase/session`, {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              id_token: idToken,
+              ...(profile?.gender ? { gender: profile.gender } : {}),
+              ...(profile?.fullName?.trim() ? { full_name: profile.fullName.trim() } : {}),
+              ...(profile?.phone?.trim() ? { phone: profile.phone.trim() } : {}),
+            }),
+          })
+          const data = await response.json().catch(() => ({})) as Record<string, unknown>
+          if (!response.ok) {
+            set({
+              ...clearSessionState(),
+              isLoading: false,
+              error: apiErrorMessage(data.detail ?? data.message, 'Không thể xác thực tài khoản.'),
+            })
+            return false
+          }
+          set({
+            isAuthenticated: true,
+            token: typeof data.token === 'string' ? data.token : null,
+            role: data.role as UserRole,
+            userId: typeof data.user_id === 'string' ? data.user_id : null,
+            username: typeof data.username === 'string' ? data.username : null,
+            email: typeof data.email === 'string' ? data.email : null,
+            authMode: (data.auth_mode as AuthState['authMode']) || 'cookie_session',
+            mustChangePassword: false,
+            mfaChallenge: null,
+            isLoading: false,
+            lastAuthCheck: Date.now(),
+            error: null,
+          })
+          return true
+        } catch {
+          set({
+            ...clearSessionState(),
+            isLoading: false,
+            error: 'Không kết nối được dịch vụ đăng nhập Google.',
+          })
+          return false
+        }
+      },
+
+      linkFirebaseAccount: async (idToken: string, identifier: string, password: string) => {
+        set({ isLoading: true, error: null })
+        try {
+          const apiUrl = await getApiUrl()
+          const response = await fetch(`${apiUrl}/api/auth/firebase/link`, {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              id_token: idToken,
+              identifier: identifier.trim(),
+              password,
+            }),
+          })
+          const data = await response.json().catch(() => ({})) as Record<string, unknown>
+          if (!response.ok) {
+            set({
+              ...clearSessionState(),
+              isLoading: false,
+              error: apiErrorMessage(data.detail ?? data.message, 'Không thể liên kết tài khoản Google.'),
+            })
+            return false
+          }
+          set({
+            isAuthenticated: true,
+            token: typeof data.token === 'string' ? data.token : null,
+            role: data.role as UserRole,
+            userId: typeof data.user_id === 'string' ? data.user_id : null,
+            username: typeof data.username === 'string' ? data.username : null,
+            email: typeof data.email === 'string' ? data.email : null,
+            authMode: (data.auth_mode as AuthState['authMode']) || 'cookie_session',
+            mustChangePassword: Boolean(data.must_change_password),
+            mfaChallenge: null,
+            isLoading: false,
+            lastAuthCheck: Date.now(),
+            error: null,
+          })
+          return true
+        } catch (error) {
+          set({
+            ...clearSessionState(),
+            isLoading: false,
+            error: formatApiError(error, 'Không kết nối được dịch vụ liên kết Google.'),
           })
           return false
         }
@@ -363,6 +518,15 @@ export const useAuthStore = create<AuthState>()(
           // Local session state must still be cleared when the server is
           // temporarily unreachable.
         } finally {
+          try {
+            const { firebaseEnabled, getFirebaseAuth } = await import('@/lib/firebase/client')
+            if (firebaseEnabled) {
+              const { signOut } = await import('@firebase/auth')
+              await signOut(getFirebaseAuth())
+            }
+          } catch {
+            // Firebase may not have an active browser session.
+          }
           window.clearTimeout(timeout)
           set({
             ...clearSessionState(),
@@ -445,7 +609,8 @@ export const useAuthStore = create<AuthState>()(
     {
       name: 'auth-storage',
       partialize: (state) => ({
-        token: state.token,
+        // P0 Security: do not persist bearer token in localStorage (XSS).
+        // cookie_session relies on HttpOnly cookie + withCredentials.
         isAuthenticated: state.isAuthenticated,
         role: state.role,
         userId: state.userId,

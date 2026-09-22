@@ -24,6 +24,15 @@ describe('getAuthRedirect', () => {
     })).toBe('/search')
   })
 
+  it('keeps Admin out of the retired shared legal Q&A surface', () => {
+    expect(getAuthRedirect({
+      isAuthenticated: true,
+      role: 'admin',
+      mustChangePassword: false,
+      pathname: '/search',
+    })).toBe('/admin')
+  })
+
   it('keeps a temporary-password officer on the change-password page', () => {
     expect(getAuthRedirect({
       isAuthenticated: true,
@@ -91,6 +100,15 @@ describe('getAuthRedirect', () => {
     expect(getAuthRedirect({
       isAuthenticated: true,
       role: 'officer',
+      mustChangePassword: false,
+      pathname: '/sources',
+    })).toBeNull()
+  })
+
+  it('allows admins to follow the established shared catalog URL', () => {
+    expect(getAuthRedirect({
+      isAuthenticated: true,
+      role: 'admin',
       mustChangePassword: false,
       pathname: '/sources',
     })).toBeNull()

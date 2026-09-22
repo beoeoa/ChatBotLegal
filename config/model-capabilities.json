@@ -1,0 +1,475 @@
+{
+  "version": "model-capabilities-v2",
+  "provider_defaults": {
+    "deepseek": {
+      "transport": "openai_chat",
+      "streaming": true,
+      "structured_output": false,
+      "reasoning_control": "none"
+    },
+    "openrouter": {
+      "transport": "openai_chat",
+      "streaming": true,
+      "structured_output": false,
+      "reasoning_control": "none"
+    },
+    "ollama": {
+      "transport": "ollama_chat",
+      "streaming": true,
+      "structured_output": true,
+      "reasoning_control": "none"
+    }
+  },
+  "models": {
+    "openrouter::deepseek/deepseek-v4.1-flash": {
+      "streaming": true,
+      "structured_output": true,
+      "supported_parameters": [
+        "frequency_penalty",
+        "include_reasoning",
+        "logit_bias",
+        "logprobs",
+        "max_tokens",
+        "min_p",
+        "presence_penalty",
+        "reasoning",
+        "reasoning_effort",
+        "repetition_penalty",
+        "response_format",
+        "seed",
+        "stop",
+        "structured_outputs",
+        "temperature",
+        "tool_choice",
+        "tools",
+        "top_k",
+        "top_logprobs",
+        "top_p"
+      ],
+      "reasoning": {
+        "mandatory": false,
+        "default_enabled": true,
+        "supported_efforts": [
+          "max",
+          "high",
+          "low"
+        ],
+        "default_effort": "high"
+      },
+      "reasoning_control": "effort",
+      "context_limit": 1048576,
+      "output_limit": 384000,
+      "profile_source": "endpoint_catalog",
+      "verified_at": "2026-09-12",
+      "endpoint_host": "openrouter.ai"
+    },
+    "openrouter::openai/gpt-5.6-luna": {
+      "streaming": true,
+      "structured_output": true,
+      "supported_parameters": [
+        "include_reasoning",
+        "max_completion_tokens",
+        "max_tokens",
+        "reasoning",
+        "reasoning_effort",
+        "response_format",
+        "seed",
+        "structured_outputs",
+        "tool_choice",
+        "tools"
+      ],
+      "reasoning": {
+        "mandatory": false,
+        "default_enabled": true,
+        "supported_efforts": [
+          "max",
+          "xhigh",
+          "high",
+          "medium",
+          "low",
+          "none"
+        ],
+        "default_effort": "medium"
+      },
+      "reasoning_control": "effort",
+      "context_limit": 1050000,
+      "output_limit": 128000,
+      "profile_source": "endpoint_catalog",
+      "verified_at": "2026-09-12",
+      "endpoint_host": "openrouter.ai"
+    },
+    "openrouter::anthropic/claude-haiku-4.5": {
+      "streaming": true,
+      "structured_output": true,
+      "supported_parameters": [
+        "include_reasoning",
+        "max_completion_tokens",
+        "max_tokens",
+        "reasoning",
+        "response_format",
+        "stop",
+        "structured_outputs",
+        "temperature",
+        "tool_choice",
+        "tools",
+        "top_k",
+        "top_p"
+      ],
+      "reasoning": {
+        "mandatory": false
+      },
+      "reasoning_control": "none",
+      "context_limit": 200000,
+      "output_limit": 64000,
+      "profile_source": "endpoint_catalog",
+      "verified_at": "2026-09-12",
+      "endpoint_host": "openrouter.ai"
+    },
+    "openrouter::moonshotai/kimi-k3": {
+      "streaming": true,
+      "structured_output": true,
+      "supported_parameters": [
+        "frequency_penalty",
+        "include_reasoning",
+        "logit_bias",
+        "logprobs",
+        "max_tokens",
+        "min_p",
+        "presence_penalty",
+        "reasoning",
+        "reasoning_effort",
+        "repetition_penalty",
+        "response_format",
+        "seed",
+        "stop",
+        "structured_outputs",
+        "temperature",
+        "tool_choice",
+        "tools",
+        "top_k",
+        "top_logprobs",
+        "top_p"
+      ],
+      "reasoning": {
+        "mandatory": false,
+        "default_enabled": true,
+        "supported_efforts": [
+          "max",
+          "high",
+          "low"
+        ],
+        "default_effort": "max"
+      },
+      "reasoning_control": "effort",
+      "context_limit": 1048576,
+      "output_limit": 943718,
+      "profile_source": "endpoint_catalog",
+      "verified_at": "2026-09-12",
+      "endpoint_host": "openrouter.ai"
+    },
+    "openrouter::meta-llama/llama-3.3-70b-instruct": {
+      "streaming": true,
+      "structured_output": true,
+      "supported_parameters": [
+        "frequency_penalty",
+        "logit_bias",
+        "logprobs",
+        "max_tokens",
+        "min_p",
+        "presence_penalty",
+        "repetition_penalty",
+        "response_format",
+        "seed",
+        "stop",
+        "structured_outputs",
+        "temperature",
+        "tool_choice",
+        "tools",
+        "top_k",
+        "top_logprobs",
+        "top_p"
+      ],
+      "reasoning": {},
+      "reasoning_control": "none",
+      "context_limit": 131072,
+      "output_limit": 16384,
+      "profile_source": "endpoint_catalog",
+      "verified_at": "2026-09-12",
+      "endpoint_host": "openrouter.ai"
+    },
+    "openrouter::google/gemini-3.8-flash": {
+      "streaming": true,
+      "structured_output": true,
+      "supported_parameters": [
+        "include_reasoning",
+        "max_tokens",
+        "reasoning",
+        "reasoning_effort",
+        "response_format",
+        "seed",
+        "stop",
+        "structured_outputs",
+        "temperature",
+        "tool_choice",
+        "tools",
+        "top_p"
+      ],
+      "reasoning": {
+        "mandatory": true,
+        "default_enabled": true,
+        "supported_efforts": [
+          "high",
+          "medium",
+          "low"
+        ],
+        "default_effort": "medium"
+      },
+      "reasoning_control": "effort",
+      "context_limit": 1048576,
+      "output_limit": 65536,
+      "profile_source": "endpoint_catalog",
+      "verified_at": "2026-09-12",
+      "endpoint_host": "openrouter.ai"
+    },
+    "openrouter::mistralai/mistral-small-2603": {
+      "streaming": true,
+      "structured_output": true,
+      "supported_parameters": [
+        "frequency_penalty",
+        "include_reasoning",
+        "max_tokens",
+        "presence_penalty",
+        "reasoning",
+        "reasoning_effort",
+        "response_format",
+        "seed",
+        "stop",
+        "structured_outputs",
+        "temperature",
+        "tool_choice",
+        "tools",
+        "top_k",
+        "top_p"
+      ],
+      "reasoning": {
+        "mandatory": false,
+        "default_enabled": false,
+        "supported_efforts": [
+          "high",
+          "none"
+        ],
+        "default_effort": "high"
+      },
+      "reasoning_control": "effort",
+      "context_limit": 262144,
+      "output_limit": 209715,
+      "profile_source": "endpoint_catalog",
+      "verified_at": "2026-09-12",
+      "endpoint_host": "openrouter.ai"
+    },
+    "openrouter::google/gemini-2.5-flash": {
+      "streaming": true,
+      "structured_output": true,
+      "supported_parameters": [
+        "include_reasoning",
+        "max_tokens",
+        "reasoning",
+        "response_format",
+        "seed",
+        "stop",
+        "structured_outputs",
+        "temperature",
+        "tool_choice",
+        "tools",
+        "top_p"
+      ],
+      "reasoning": {
+        "mandatory": false
+      },
+      "reasoning_control": "none",
+      "context_limit": 1048576,
+      "output_limit": 65535,
+      "profile_source": "endpoint_catalog",
+      "verified_at": "2026-09-12",
+      "endpoint_host": "openrouter.ai"
+    },
+    "openrouter::z-ai/glm-5.3-flash": {
+      "streaming": true,
+      "structured_output": true,
+      "supported_parameters": [
+        "frequency_penalty",
+        "include_reasoning",
+        "logit_bias",
+        "logprobs",
+        "max_tokens",
+        "min_p",
+        "presence_penalty",
+        "reasoning",
+        "reasoning_effort",
+        "repetition_penalty",
+        "response_format",
+        "seed",
+        "stop",
+        "structured_outputs",
+        "temperature",
+        "tool_choice",
+        "tools",
+        "top_k",
+        "top_logprobs",
+        "top_p"
+      ],
+      "reasoning": {
+        "mandatory": true,
+        "default_enabled": true,
+        "supported_efforts": [
+          "max",
+          "high",
+          "low"
+        ],
+        "default_effort": "max"
+      },
+      "reasoning_control": "effort",
+      "context_limit": 1310720,
+      "output_limit": 131072,
+      "profile_source": "endpoint_catalog",
+      "verified_at": "2026-09-12",
+      "endpoint_host": "openrouter.ai"
+    },
+    "openrouter::qwen/qwen3.8-flash": {
+      "streaming": true,
+      "structured_output": true,
+      "supported_parameters": [
+        "frequency_penalty",
+        "include_reasoning",
+        "logit_bias",
+        "logprobs",
+        "max_tokens",
+        "min_p",
+        "presence_penalty",
+        "reasoning",
+        "repetition_penalty",
+        "response_format",
+        "seed",
+        "stop",
+        "structured_outputs",
+        "temperature",
+        "tool_choice",
+        "tools",
+        "top_k",
+        "top_logprobs",
+        "top_p"
+      ],
+      "reasoning": {
+        "mandatory": false,
+        "default_enabled": true,
+        "supports_max_tokens": true
+      },
+      "reasoning_control": "max_tokens",
+      "context_limit": 1000000,
+      "output_limit": 131072,
+      "profile_source": "endpoint_catalog",
+      "verified_at": "2026-09-12",
+      "endpoint_host": "openrouter.ai"
+    },
+    "openrouter::minimax/minimax-m3": {
+      "streaming": true,
+      "structured_output": true,
+      "supported_parameters": [
+        "frequency_penalty",
+        "include_reasoning",
+        "logit_bias",
+        "logprobs",
+        "max_tokens",
+        "min_p",
+        "presence_penalty",
+        "reasoning",
+        "repetition_penalty",
+        "response_format",
+        "seed",
+        "stop",
+        "structured_outputs",
+        "temperature",
+        "tool_choice",
+        "tools",
+        "top_k",
+        "top_logprobs",
+        "top_p"
+      ],
+      "reasoning": {
+        "mandatory": false
+      },
+      "reasoning_control": "none",
+      "context_limit": 1048576,
+      "output_limit": 512000,
+      "profile_source": "endpoint_catalog",
+      "verified_at": "2026-09-12",
+      "endpoint_host": "openrouter.ai"
+    },
+    "deepseek::deepseek-v4-pro": {
+      "streaming": true,
+      "reasoning_control": "effort",
+      "reasoning": {
+        "mandatory": false,
+        "default_enabled": true,
+        "supported_efforts": [
+          "max",
+          "high",
+          "low"
+        ],
+        "default_effort": "high"
+      },
+      "profile_source": "provider_documentation",
+      "verified_at": "2026-09-12",
+      "endpoint_host": "api.deepseek.com",
+      "reference": "https://api-docs.deepseek.com/api/create-chat-completion/"
+    },
+    "deepseek::deepseek-v4-flash": {
+      "streaming": true,
+      "reasoning_control": "effort",
+      "reasoning": {
+        "mandatory": false,
+        "default_enabled": true,
+        "supported_efforts": [
+          "max",
+          "high",
+          "low"
+        ],
+        "default_effort": "high"
+      },
+      "profile_source": "provider_documentation",
+      "verified_at": "2026-09-12",
+      "endpoint_host": "api.deepseek.com",
+      "reference": "https://api-docs.deepseek.com/api/create-chat-completion/"
+    },
+    "deepseek::deepseek-v4-flash-vision-exp": {
+      "streaming": true,
+      "reasoning_control": "effort",
+      "reasoning": {
+        "mandatory": false,
+        "default_enabled": true,
+        "supported_efforts": [
+          "max",
+          "high",
+          "low"
+        ],
+        "default_effort": "high"
+      },
+      "profile_source": "provider_documentation",
+      "verified_at": "2026-09-12",
+      "endpoint_host": "api.deepseek.com",
+      "reference": "https://api-docs.deepseek.com/api/create-chat-completion/"
+    },
+    "ollama::qwen2.5:3b": {
+      "streaming": true,
+      "structured_output": true
+    },
+    "ollama::qwen3.5:4b": {
+      "streaming": true,
+      "structured_output": true
+    },
+    "ollama::qwen2.5:0.5b": {
+      "streaming": true,
+      "structured_output": true
+    }
+  }
+}

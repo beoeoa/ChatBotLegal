@@ -4,7 +4,7 @@ The module has no database side effects.  It validates the initial and final
 URL, removes presentation chrome without rewriting legal wording, extracts only
 evidenced metadata, and records explainable matches to the five canonical
 Officer domains.  Optional browser rendering is isolated behind a graceful
-verified-HTTP fallback.
+shared Crawl4AI adapter.
 """
 
 from __future__ import annotations
@@ -19,12 +19,9 @@ from datetime import date
 from typing import Any, Mapping, Sequence
 from urllib.parse import urljoin, urlparse
 
-import httpx
 from bs4 import BeautifulSoup, Tag
 
 from api.legal_form_catalog import OFFICIAL_HOST_SUFFIXES
-from api.official_http import build_verified_ssl_context
-
 
 CANONICAL_DOMAINS = (
     "ho_tich_chung_thuc",
@@ -227,54 +224,14 @@ def _parse_vbpl_server_action_payload(payload: str) -> dict[str, Any]:
     }
 
 
-async def _fetch_vbpl_server_action_detail(
-    client: httpx.AsyncClient,
-    source_url: str,
-    page_html: str,
-) -> dict[str, Any]:
-    """Fetch the same official detail payload used by the public VBPL page."""
-
-    document_id = urlparse(source_url).path.rstrip("/").split("/")[-1]
-    document_id = document_id.split("--")[-1]
-    if not re.fullmatch(r"[0-9a-fA-F-]{16,64}", document_id):
-        raise ValueError("URL VBPL không chứa định danh văn bản hợp lệ.")
-    soup = BeautifulSoup(page_html, "html.parser")
-    script_urls = []
-    for script in soup.select("script[src]"):
-        script_url = urljoin(source_url, str(script.get("src") or ""))
-        parsed = urlparse(script_url)
-        if parsed.scheme == "https" and (parsed.hostname or "").lower().endswith("vbpl.vn"):
-            script_urls.append(script_url)
-    javascript_sources: list[str] = []
-    for script_url in dict.fromkeys(script_urls):
-        response = await client.get(script_url)
-        if response.status_code == 200 and len(response.text) <= 2_000_000:
-            javascript_sources.append(response.text)
-    action = _discover_vbpl_detail_action_hash(javascript_sources)
-    if not action:
-        raise ValueError("Không tìm thấy contract chi tiết của phiên bản VBPL hiện tại.")
-    response = await client.post(
-        source_url,
-        headers={
-            "Next-Action": action,
-            "Accept": "text/x-component",
-            "Origin": "https://vbpl.vn",
-            "Referer": source_url,
-        },
-        content=json.dumps([document_id], ensure_ascii=False),
-    )
-    response.raise_for_status()
-    return _parse_vbpl_server_action_payload(response.text)
-
-
 def validate_official_public_url(url: str) -> str:
     """Validate one official HTTPS URL and reject local/private destinations."""
 
     value = str(url or "").strip()
     parsed = urlparse(value)
     hostname = (parsed.hostname or "").lower().rstrip(".")
-    if parsed.scheme != "https" or not hostname:
-        raise ValueError("Nguồn pháp luật phải là URL HTTPS hợp lệ.")
+    if parsed.scheme not in {"http", "https"} or not hostname or parsed.username or parsed.password:
+        raise ValueError("Nguồn phải là liên kết HTTP hoặc HTTPS hợp lệ, không chứa thông tin đăng nhập.")
     if hostname == "localhost":
         raise ValueError("Không được crawl địa chỉ nội bộ hoặc localhost.")
     try:
@@ -297,6 +254,54 @@ def validate_official_public_url(url: str) -> str:
     if not official:
         raise ValueError("URL không thuộc danh sách nguồn chính thức đã cho phép.")
     return value
+
+
+async def _fetch_static_official_page(url: str, timeout_seconds: float) -> dict[str, Any]:
+    """Bounded fallback when the optional renderer cannot run; honor robots."""
+    import asyncio
+    import socket
+    import httpx
+    from urllib.robotparser import RobotFileParser
+
+    async def get(client, target):
+        for _ in range(5):
+            target = validate_official_public_url(target)
+            parsed = urlparse(target)
+            addresses = await asyncio.to_thread(socket.getaddrinfo, parsed.hostname, parsed.port or (443 if parsed.scheme == 'https' else 80))
+            if not addresses or any(not ipaddress.ip_address(item[4][0]).is_global for item in addresses):
+                raise ValueError('Nguồn trỏ đến địa chỉ mạng không công khai.')
+            async with client.stream('GET', target) as response:
+                if response.is_redirect:
+                    target = urljoin(target, response.headers['location'])
+                    continue
+                if response.status_code in {401, 403, 429}:
+                    return response.status_code, '', target
+                response.raise_for_status()
+                data = bytearray()
+                async for chunk in response.aiter_bytes():
+                    data.extend(chunk)
+                    if len(data) > 8 * 1024 * 1024:
+                        raise ValueError('Trang nguồn vượt giới hạn đọc; hãy tải tệp gốc.')
+                return response.status_code, bytes(data).decode(response.encoding or 'utf-8', errors='replace'), target
+        raise ValueError('Nguồn chuyển hướng quá nhiều lần.')
+
+    async with httpx.AsyncClient(timeout=timeout_seconds, follow_redirects=False) as client:
+        parsed = urlparse(url)
+        robots_url = f'{parsed.scheme}://{parsed.netloc}/robots.txt'
+        try:
+            status, robots_text, _ = await get(client, robots_url)
+            if status in {401, 403, 429}:
+                return {'status':'error','reason':'source_access_denied'}
+            robots = RobotFileParser()
+            robots.parse(robots_text.splitlines())
+            if not robots.can_fetch('*', url):
+                return {'status':'error','reason':'robots_disallowed'}
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                raise
+        status, html, final_url = await get(client, url)
+        return {'status':'ok' if status == 200 else 'error', 'html':html,
+                'final_url':final_url, 'reason':f'source_http_{status}', 'method':'http_static'}
 
 
 def _compact_text(value: Any) -> str:
@@ -694,6 +699,34 @@ def _labelled_date(text: str, *labels: str) -> str | None:
     return None
 
 
+def _signed_header_date(text: str, law_number: str | None) -> str | None:
+    """Read the signed date beside the document number from the legal body.
+
+    Some client-rendered portals expose the page's update timestamp as
+    ``dc.date``/JSON-LD ``legislationDate``.  The signed heading is stronger
+    evidence for the issue date, but only inside a short window following the
+    exact document number so dates cited later in the instrument cannot win.
+    """
+
+    value = str(text or "")
+    if not value or not law_number:
+        return None
+    match = re.search(re.escape(str(law_number)), value, re.IGNORECASE)
+    if not match:
+        return None
+    signed_window = value[match.end() : match.end() + 500]
+    for date_match in _VI_DATE_RE.finditer(signed_window):
+        line_start = signed_window.rfind("\n", 0, date_match.start()) + 1
+        line_end = signed_window.find("\n", date_match.end())
+        if line_end < 0:
+            line_end = len(signed_window)
+        line = _plain_text(signed_window[line_start:line_end])
+        if "hieu luc" in line or "het hieu luc" in line:
+            continue
+        return _iso_date(date_match.group(0))
+    return None
+
+
 def classify_legal_domains(*values: str) -> tuple[list[str], dict[str, list[str]]]:
     """Return deterministic multi-domain matches and their exact rule evidence."""
 
@@ -759,7 +792,7 @@ def normalize_legal_document(
             re.IGNORECASE,
         )
         issuing_agency = _compact_text(match.group(1)) if match else ""
-    issued_date = _iso_date(str(legislation.get("legislationDate") or "")) or _iso_date(
+    issued_date = _signed_header_date(markdown, law_number) or _iso_date(str(legislation.get("legislationDate") or "")) or _iso_date(
         _meta_content(soup, "issued-date", "dc.date")
     ) or _labelled_date(
         soup.get_text("\n", strip=True), "Ngày ban hành"
@@ -843,115 +876,28 @@ async def fetch_normalized_legal_document(
     *,
     scope: str,
     timeout_seconds: float = 30,
+    compatibility_mode: str = "standard",
 ) -> dict[str, Any]:
-    """Fetch with optional browser rendering and a verified HTTP fallback."""
+    """Fetch an official legal page through the required Crawl4AI adapter.
 
+    This path is deliberately fail-closed: if browser rendering is unavailable,
+    ingestion remains in review instead of silently switching to plain HTTP and
+    producing a different or incomplete document body.
+    """
     source_url = validate_official_public_url(url)
-    browser_reason = ""
-    if (urlparse(source_url).hostname or "").lower().endswith("vbpl.vn"):
-        try:
-            async with httpx.AsyncClient(
-                timeout=timeout_seconds,
-                follow_redirects=True,
-                verify=build_verified_ssl_context(),
-                headers={"User-Agent": "HaiPhongLegalAssistant/1.0 (+candidate-first)"},
-            ) as client:
-                metadata_response = await client.get(source_url)
-                metadata_response.raise_for_status()
-                final_url = validate_official_public_url(str(metadata_response.url))
-                server_detail = await _fetch_vbpl_server_action_detail(
-                    client,
-                    final_url,
-                    metadata_response.text,
-                )
-            normalized_server_detail = normalize_legal_document(
-                source_url=source_url,
-                final_url=final_url,
-                html=str(server_detail["html"]),
-                scope=scope,
-                method="vbpl_server_action",
-            )
-            for field in (
-                "title",
-                "law_number",
-                "document_type",
-                "issuing_agency",
-                "issued_date",
-                "effective_date",
-                "expired_date",
-            ):
-                if server_detail.get(field):
-                    normalized_server_detail[field] = server_detail[field]
-            normalized_server_detail["extraction"]["vbpl_document_id"] = server_detail.get(
-                "vbpl_document_id"
-            )
-            normalized_server_detail["extraction"]["official_payload"] = "next_server_action"
-            normalized_server_detail["status"] = (
-                "ok"
-                if normalized_server_detail.get("clean_markdown")
-                and all(
-                    normalized_server_detail.get(field)
-                    for field in (
-                        "law_number",
-                        "document_type",
-                        "issuing_agency",
-                        "issued_date",
-                        "effective_date",
-                    )
-                )
-                else "needs_review"
-            )
-            if normalized_server_detail["status"] == "ok":
-                normalized_server_detail["extraction"]["reason"] = ""
-            if normalized_server_detail.get("clean_markdown"):
-                return normalized_server_detail
-
-            from open_notebook.utils.vbpl_crawler import crawl_vbpl_url
-
-            vbpl_result = await crawl_vbpl_url(final_url)
-            metadata_soup = BeautifulSoup(metadata_response.text, "html.parser")
-            legislation = _legislation_json_ld(metadata_soup)
-            legislation_script = (
-                '<script type="application/ld+json">'
-                + json.dumps(legislation, ensure_ascii=False).replace("</", "<\\/")
-                + "</script>"
-                if legislation
-                else ""
-            )
-            combined_html = (
-                "<html>"
-                + str(metadata_soup.head or "")
-                + legislation_script
-                + '<body><main id="normalized-legal-content">'
-                + str(vbpl_result.get("html") or "")
-                + "</main></body></html>"
-            )
-            normalized_vbpl = normalize_legal_document(
-                source_url=source_url,
-                final_url=validate_official_public_url(
-                    str(vbpl_result.get("final_url") or final_url)
-                ),
-                html=combined_html,
-                scope=scope,
-                method="vbpl_playwright",
-            )
-            if normalized_vbpl.get("status") != "rejected" and normalized_vbpl.get(
-                "clean_markdown"
-            ):
-                return normalized_vbpl
-            browser_reason = str(
-                (normalized_vbpl.get("extraction") or {}).get("reason")
-                or "vbpl_render_incomplete"
-            )
-        except Exception as exc:  # optional VBPL browser adapter boundary
-            browser_reason = f"vbpl_playwright:{exc.__class__.__name__}"
-
     try:
         from api.crawlers.crawl4ai_fetcher import fetch_rendered
 
-        rendered = await fetch_rendered(source_url, timeout_ms=int(timeout_seconds * 1000))
-    except Exception as exc:  # optional adapter boundary
+        fetch_options: dict[str, Any] = {
+            "timeout_ms": int(timeout_seconds * 1000),
+            "check_robots_txt": True,
+        }
+        if str(compatibility_mode or "standard").lower() == "high":
+            fetch_options["compatibility_mode"] = "high"
+        rendered = await fetch_rendered(source_url, **fetch_options)
+    except Exception as exc:
         rendered = {"status": "unavailable", "reason": exc.__class__.__name__}
+
     if rendered.get("status") == "ok" and rendered.get("html"):
         final_url = validate_official_public_url(str(rendered.get("final_url") or source_url))
         normalized_rendered = normalize_legal_document(
@@ -965,54 +911,83 @@ async def fetch_normalized_legal_document(
             "clean_markdown"
         ):
             return normalized_rendered
-        rendered_reason = str(
+        failure_reason = str(
             (normalized_rendered.get("extraction") or {}).get("reason")
             or "render_incomplete"
         )
-        browser_reason = "|".join(filter(None, (browser_reason, rendered_reason)))
     else:
-        rendered_reason = str(rendered.get("reason") or rendered.get("status") or "unavailable")
-        browser_reason = "|".join(filter(None, (browser_reason, rendered_reason)))
+        failure_reason = str(rendered.get("reason") or rendered.get("status") or "unavailable")
 
-    try:
-        async with httpx.AsyncClient(
-            timeout=timeout_seconds,
-            follow_redirects=True,
-            verify=build_verified_ssl_context(),
-            headers={"User-Agent": "HaiPhongLegalAssistant/1.0 (+candidate-first)"},
-        ) as client:
-            response = await client.get(source_url)
-        response.raise_for_status()
-        final_url = validate_official_public_url(str(response.url))
-        result = normalize_legal_document(
-            source_url=source_url,
-            final_url=final_url,
-            html=response.text,
-            scope=scope,
-            method="verified_http",
+    # VBPL detail pages are client-rendered and can intermittently return a
+    # successful HTTP shell before the document body is mounted. Retry once
+    # with the existing compatibility profile; never retry access denials or
+    # create a separate parser/transport for this source.
+    parsed_source = urlparse(source_url)
+    retry_vbpl_detail = (
+        str(compatibility_mode or "standard").lower() == "standard"
+        and (parsed_source.hostname or "").lower() in {"vbpl.vn", "www.vbpl.vn"}
+        and parsed_source.path.rstrip("/").startswith("/van-ban/chi-tiet/")
+        and rendered.get("status") != "unavailable"
+        and int(rendered.get("status_code") or 0) not in {401, 403, 429}
+    )
+    if retry_vbpl_detail:
+        retry = await fetch_rendered(
+            source_url,
+            timeout_ms=int(timeout_seconds * 1000),
+            check_robots_txt=True,
+            compatibility_mode="high",
         )
-        if browser_reason:
-            result["extraction"]["browser_fallback_reason"] = browser_reason[:500]
-        return result
-    except Exception as exc:
-        return {
-            "status": "rejected",
-            "source_url": source_url,
-            "final_url": source_url,
-            "title": "",
-            "clean_markdown": "",
-            "characters": 0,
-            "content_hash": "",
-            "primary_domain": None,
-            "matched_domains": [],
-            "domain_evidence": {},
-            "scope": scope,
-            "extraction": {
-                "method": "verified_http",
-                "complete": False,
-                "preview": "",
-                "removed_noise": [],
-                "reason": f"fetch_failed:{exc.__class__.__name__}",
-                "browser_fallback_reason": browser_reason[:500],
-            },
-        }
+        if retry.get("status") == "ok" and retry.get("html"):
+            retry_final_url = validate_official_public_url(
+                str(retry.get("final_url") or source_url)
+            )
+            normalized_retry = normalize_legal_document(
+                source_url=source_url,
+                final_url=retry_final_url,
+                html=str(retry.get("html") or ""),
+                scope=scope,
+                method="crawl4ai_compatibility_retry",
+            )
+            if normalized_retry.get("status") != "rejected" and normalized_retry.get(
+                "clean_markdown"
+            ):
+                normalized_retry["extraction"]["fallback_reason"] = failure_reason
+                return normalized_retry
+        retry_reason = str(retry.get("reason") or retry.get("status") or "incomplete")
+        failure_reason = f"{failure_reason}|compatibility_retry:{retry_reason}"[:500]
+
+    # A missing local rendering dependency is not a reason to discard a normal
+    # HTML source. Never retry an explicit access/robots denial through this path.
+    if rendered.get('status') == 'unavailable':
+        try:
+            static = await _fetch_static_official_page(source_url, timeout_seconds)
+            if static.get('status') == 'ok':
+                result = normalize_legal_document(source_url=source_url, final_url=static['final_url'],
+                    html=static['html'], scope=scope, method='http_static')
+                if result.get('clean_markdown') and result.get('status') != 'rejected':
+                    result['extraction']['fallback_reason'] = failure_reason
+                    return result
+            failure_reason = static.get('reason') or failure_reason
+        except Exception as exc:
+            failure_reason = f'static_fetch_failed:{type(exc).__name__}'
+
+    return {
+        "status": "rejected",
+        "source_url": source_url,
+        "final_url": source_url,
+        "title": "",
+        "clean_markdown": "",
+        "characters": 0,
+        "content_hash": "",
+        "primary_domain": None,
+        "matched_domains": [],
+        "domain_evidence": {},
+        "scope": scope,
+        "extraction": {
+            "method": "crawl4ai",
+            "complete": False,
+            "preview": "",
+            "removed_noise": [],
+            "reason": f"crawl4ai_required:{failure_reason}"[:500],
+        },
+    }

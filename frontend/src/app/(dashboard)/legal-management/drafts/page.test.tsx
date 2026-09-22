@@ -3,13 +3,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const api = vi.hoisted(() => ({
   capabilities: vi.fn(), list: vi.fn(), detail: vi.fn(), create: vi.fn(),
-  update: vi.fn(), transition: vi.fn(), review: vi.fn(), activationPreview: vi.fn(),
+  update: vi.fn(), transition: vi.fn(), review: vi.fn(), activate: vi.fn(), activationPreview: vi.fn(),
 }))
 
 vi.mock('@/lib/api/legal-lifecycle', () => ({
   legalLifecycleApi: api,
   lifecycleIdempotencyKey: (action: string) => `${action}:test-idempotency`,
 }))
+vi.mock('@/lib/hooks/use-settings', () => ({ useSettings: () => ({ data: { organization_units: [] } }) }))
+vi.mock('@/lib/api/legal-import', () => ({ legalImportApi: { fields: async () => [] } }))
 vi.mock('@/components/layout/AppShell', () => ({
   AppShell: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }))
@@ -36,8 +38,9 @@ describe('LegalLifecycleDraftPage', () => {
       editor: false, reviewer: false, activation_enabled: false,
     })
     render(<LegalLifecycleDraftPage />)
-    expect(await screen.findByText('Cổng ghi Phase 2 đang đóng')).toBeInTheDocument()
-    expect(screen.getByText('Tài khoản chưa được ánh xạ')).toBeInTheDocument()
+    expect(await screen.findByText('Chức năng biên tập đang tạm khóa')).toBeInTheDocument()
+    expect(screen.getByText('Tài khoản chưa được phân quyền')).toBeInTheDocument()
+    expect(screen.queryByText(/Phase 2|workflow|migration|editor\/reviewer/i)).not.toBeInTheDocument()
     expect(api.list).not.toHaveBeenCalled()
     expect(screen.queryByRole('button', { name: /kích hoạt/i })).not.toBeInTheDocument()
   })
@@ -53,14 +56,14 @@ describe('LegalLifecycleDraftPage', () => {
     fireEvent.change(screen.getByLabelText('Tiêu đề bản nháp'), { target: { value: 'Văn bản thử nghiệm' } })
     fireEvent.change(screen.getByLabelText('Số ký hiệu bản nháp'), { target: { value: '01/2026/QĐ-TEST' } })
     fireEvent.change(screen.getByLabelText('URL nguồn chính thức'), { target: { value: 'https://vbpl.vn/example' } })
-    fireEvent.change(screen.getByLabelText('Nội dung staging'), { target: { value: 'Điều 1. Nội dung thử nghiệm.' } })
+    fireEvent.change(screen.getByLabelText('Nội dung bản nháp'), { target: { value: 'Điều 1. Nội dung thử nghiệm.' } })
     fireEvent.change(screen.getByLabelText('Lý do thay đổi'), { target: { value: 'Tạo bản nháp thử nghiệm để rà soát.' } })
     fireEvent.click(screen.getByRole('button', { name: 'Lưu bản nháp' }))
     await waitFor(() => expect(api.create).toHaveBeenCalledWith(
       expect.objectContaining({ title: 'Văn bản thử nghiệm', reason: 'Tạo bản nháp thử nghiệm để rà soát.' }),
       'create:test-idempotency',
     ))
-    expect(await screen.findByText('Đã tạo bản nháp trong khu vực staging.')).toBeInTheDocument()
+    expect(await screen.findByText('Đã tạo bản nháp trong khu vực chuẩn bị.')).toBeInTheDocument()
   })
 
   it('disables same-actor approval in the UI', async () => {

@@ -19,6 +19,8 @@ from enum import Enum
 from typing import Any, Awaitable, Callable, Protocol
 from urllib.parse import urlparse
 
+from api.legal_source_input import valid_source_reference
+
 IDEMPOTENCY_RE = re.compile(r"^[A-Za-z0-9._:-]{8,200}$")
 DRAFT_ID_RE = re.compile(r"^legal_document_draft:[A-Za-z0-9_-]{1,160}$")
 EDITABLE_STATES = {"draft", "duplicate_review", "changes_requested"}
@@ -29,7 +31,8 @@ MUTATION_RESPONSE_FIELDS = {
     "id", "logical_document_id", "state", "title", "law_number",
     "document_type", "issuing_agency", "scope", "sector", "source_url",
     "revision", "validation", "created_by", "submitted_by", "reviewed_by",
-    "created", "updated", "version", "manifest", "activation_state",
+    "created", "updated", "version", "manifest", "activation_state", "activation_error",
+    "field_id", "domain_slug", "primary_organization_unit_id",
 }
 
 
@@ -314,12 +317,13 @@ def normalized_draft_payload(payload: dict[str, Any], *, existing: dict[str, Any
         "logical_document_id", "base_fingerprint", "title", "law_number",
         "document_type", "issuing_agency", "scope", "sector", "issued_date",
         "effective_date", "expired_date", "source_url", "source_asset", "content",
+        "field_id", "domain_slug", "primary_organization_unit_id",
     }
     result = {key: deepcopy(value) for key, value in (existing or {}).items() if key in allowed}
     for key, value in payload.items():
         if key not in allowed:
             continue
-        if key == "logical_document_id":
+        if key in {"logical_document_id", "field_id"}:
             result[key] = int(value) if value not in (None, "") else None
         elif key == "content":
             text = normalize_text(value)
@@ -349,9 +353,13 @@ def validate_draft_payload(draft: dict[str, Any], duplicates: list[dict[str, Any
     for field in ("title", "law_number", "document_type", "issuing_agency"):
         if not str(draft.get(field) or "").strip():
             blocking.append(f"missing_{field}")
-    if not _official_source(draft.get("source_url")):
-        blocking.append("missing_official_source")
-    if not draft.get("content") and not draft.get("source_asset"):
+    has_source_reference = valid_source_reference(str(draft.get("source_url") or ""))
+    has_source_asset = bool(draft.get("source_asset"))
+    if not has_source_reference and not has_source_asset:
+        blocking.append("missing_source_reference_or_asset")
+    elif has_source_reference and not _official_source(draft.get("source_url")):
+        warnings.append("source_requires_human_verification")
+    if not draft.get("content") and not has_source_asset:
         blocking.append("missing_content_or_source_asset")
     parsed_dates: dict[str, date] = {}
     for field in ("issued_date", "effective_date", "expired_date"):
@@ -567,6 +575,7 @@ class LifecycleService:
         self.audit_writer = audit_writer
         self.base_fingerprint_reader = base_fingerprint_reader
         self.activation_adapter = activation_adapter
+        self.incremental_adapter = None
         self._mutation_lock = asyncio.Lock()
 
     async def _audit(self, *, action: str, actor: str, role: str, entity_id: str, reason: str, details: dict[str, Any] | None = None) -> None:
@@ -649,6 +658,11 @@ class LifecycleService:
         self._require(caps, "editor", writes=True)
         reason = self._validate_reason(reason)
         normalized = normalized_draft_payload(payload)
+        if normalized.get("logical_document_id") and self.base_fingerprint_reader:
+            current = await self.base_fingerprint_reader(normalized["logical_document_id"])
+            if normalized.get("base_fingerprint") and normalized["base_fingerprint"] != current:
+                raise LifecycleError("lifecycle_base_fingerprint_conflict", "Văn bản gốc đã thay đổi, hãy tải lại.", status_code=409)
+            normalized["base_fingerprint"] = current
         now = datetime.now(timezone.utc).isoformat()
 
         async def operation() -> dict[str, Any]:
@@ -803,16 +817,18 @@ class LifecycleService:
         else:
             base_match = True
         manifest_ready = bool(manifest.get("ready"))
+        incremental_indexing = self.incremental_adapter is not None and bool(version.get("version_key"))
         return {
             "draft_id": draft_id, "logical_document_id": logical_document_id,
             "version_key": version.get("version_key"), "base_fingerprint": base_fingerprint,
             "current_base_fingerprint": current_base_fingerprint, "base_match": base_match,
             "manifest_ready": manifest_ready,
+            "indexing_required": incremental_indexing and not manifest_ready,
             "provision_count": len(manifest.get("provision_ids") or []),
             "chunk_count": len(manifest.get("chunk_ids") or []),
             "required_collections": manifest.get("required_collections") or [],
             "live_activation_enabled": caps["activation_enabled"],
-            "status": "ready" if caps["activation_enabled"] and manifest_ready and base_match is True else "blocked",
+            "status": "ready" if caps["activation_enabled"] and (manifest_ready or incremental_indexing) and base_match is True else "blocked",
         }
 
     async def activate_draft(self, draft_id: str, *, actor: str, role: str, expected_revision: int, reason: str, idempotency_key: str) -> dict[str, Any]:
@@ -827,6 +843,28 @@ class LifecycleService:
                 raise LifecycleError("lifecycle_self_review_forbidden", "Người gửi không được tự kích hoạt hồ sơ của mình.", status_code=403)
             if not caps["activation_enabled"]:
                 raise LifecycleError("lifecycle_live_activation_unconfigured", "Kích hoạt corpus/vector thật chưa được cấu hình cho Phase 2.", status_code=503)
+            if self.incremental_adapter is not None:
+                if draft.get("state") != "approved" or not draft.get("version"):
+                    raise LifecycleError("lifecycle_version_not_approved", "Chỉ nhập kho phiên bản đã duyệt.", status_code=409)
+                await self._audit(action="draft.activate.intent", actor=actor, role=role, entity_id=draft_id, reason=reason,
+                                  details={"version_key": draft["version"].get("version_key")})
+                try:
+                    receipt = await self.incremental_adapter(draft)
+                    if not receipt.get("sql_verified") or not receipt.get("collections_verified") or not (receipt.get("retrieval_smoke") or {}).get("passed"):
+                        raise LifecycleError("lifecycle_activation_verification_failed", "Không đạt kiểm tra kho tra cứu.", status_code=409)
+                except LifecycleError as exc:
+                    await self.repository.update_draft(draft_id, {
+                        "activation_state": "pending_retry", "activation_error": exc.message,
+                        "updated": datetime.now(timezone.utc).isoformat(),
+                    })
+                    raise
+                return await self.repository.update_draft(draft_id, {
+                    "activation_state": "active", "activation_error": None, "revision": expected_revision + 1,
+                    "manifest": {"ready": True, "version_key": draft["version"].get("version_key"),
+                                 "document_id": receipt.get("document_id"), "chunk_count": receipt.get("chunk_count"),
+                                 "required_collections": receipt["collections_verified"], "receipt": receipt},
+                    "updated": datetime.now(timezone.utc).isoformat(),
+                })
             if self.activation_adapter is None:
                 raise LifecycleError("lifecycle_activation_adapter_unavailable", "Chưa có activation adapter được phê duyệt.", status_code=503)
             preview = await self.activation_preview(draft_id, actor=actor, role=role)
@@ -862,3 +900,15 @@ class LifecycleService:
 
 
 default_lifecycle_service = LifecycleService(SurrealLifecycleRepository())
+
+async def _activate_incremental(draft):
+    from api.legal_draft_activation import activate_incremental_draft
+    return await activate_incremental_draft(draft)
+
+default_lifecycle_service.incremental_adapter = _activate_incremental
+
+async def _read_incremental_base(document_id):
+    from api.legal_draft_activation import read_base_fingerprint
+    return await read_base_fingerprint(document_id)
+
+default_lifecycle_service.base_fingerprint_reader = _read_incremental_base

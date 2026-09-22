@@ -34,9 +34,15 @@ class LegalSearchClient:
             configured_urls = tuple(base_urls)
         else:
             replica_urls = str(os.getenv("LEGAL_SEARCH_URLS") or "").strip()
-            configured_urls = tuple(replica_urls.split(",")) if replica_urls else (
-                os.getenv("LEGAL_SEARCH_URL", "http://127.0.0.1:8765"),
-            )
+            if replica_urls:
+                configured_urls = tuple(replica_urls.split(","))
+            else:
+                # Use the frozen R28 reconciled-v2 local serving route. A
+                # legacy endpoint is selected only by explicit LEGAL_SEARCH_URL.
+                configured_urls = (
+                    os.getenv("LEGAL_SEARCH_URL")
+                    or os.getenv("LEGAL_RETRIEVAL_V2_URL", "http://127.0.0.1:8766"),
+                )
         normalized_urls = tuple(
             str(value or "").strip().rstrip("/")
             for value in configured_urls
@@ -177,10 +183,33 @@ class LegalSearchClient:
             return self._apply_validity(data, payload)
 
     async def search_batch(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Post one bounded multi-issue retrieval request."""
+        """Read fresh serving decisions, even when the query is unchanged.
 
+        Caching complete evidence here bypasses the retrieval service's SQL
+        revocation check after an admin excludes/replaces a document. The
+        service may cache embeddings/candidates, but must recheck serving state
+        on every request before returning evidence.
+        """
         async with self._semaphore:
             response, _ = await self._post_read("/search/batch", payload)
+            response.raise_for_status()
+            data = response.json()
+            if not isinstance(data, dict) or not isinstance(data.get("issues"), list):
+                raise httpx.DecodingError("Legal batch retrieval returned an invalid object")
+            return self._apply_validity(data, payload)
+
+    async def search_batch_once(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Perform exactly one physical R28 batch request.
+
+        The general retrieval client supports replica failover. Direct RAG's
+        public contract deliberately does not retry retrieval, so it uses this
+        method and surfaces a typed transient failure instead.
+        """
+
+        async with self._semaphore:
+            client = await self._http()
+            base_url = self._ordered_base_urls()[0]
+            response = await client.post(f"{base_url}/search/batch", json=payload)
             response.raise_for_status()
             data = response.json()
             if not isinstance(data, dict) or not isinstance(data.get("issues"), list):

@@ -34,6 +34,7 @@ export interface SourceListResponse {
   file_available?: boolean
   source_scope?: string
   review_status?: string
+  legal_document_id?: string
   // ADD: Async processing fields from Python API
   command_id?: string
   status?: string
@@ -60,6 +61,58 @@ export interface SettingsResponse {
   default_embedding_option?: string
   auto_delete_files?: string
   youtube_preferred_languages?: string[]
+  system_name?: string
+  organization_name?: string
+  system_prompt_addendum?: string
+  active_prompt_revision?: number
+  config_revision?: number
+  expected_config_revision?: number
+  legal_domains?: LegalDomainConfig[]
+  organization_units?: OrganizationUnitConfig[]
+  organization_routing_mode?: OrganizationRoutingMode
+  chat_model_policy?: ChatModelPolicyConfig[]
+}
+
+export interface LegalDomainConfig {
+  code: string
+  name: string
+  aliases: string[]
+  is_active: boolean
+  sort_order: number
+}
+
+export type OrganizationRoutingMode =
+  | 'legacy'
+  | 'shadow'
+  | 'hybrid'
+  | 'unit_primary'
+
+export interface OrganizationUnitDomainConfig {
+  domain_code: string
+  responsibility: 'primary' | 'support'
+}
+
+export interface OrganizationUnitConfig {
+  id: string
+  code: string
+  name: string
+  short_name?: string | null
+  aliases?: string[]
+  parent_id?: string | null
+  domain_codes: string[]
+  domain_assignments?: OrganizationUnitDomainConfig[]
+  support_enabled: boolean
+  is_active: boolean
+  sort_order: number
+}
+
+export interface ChatModelPolicyConfig {
+  option_id: string
+  model_id: string
+  display_name: string
+  audiences: Array<'citizen' | 'officer'>
+  default_for: Array<'citizen' | 'officer'>
+  is_active: boolean
 }
 
 export interface CreateNotebookRequest {
@@ -222,6 +275,7 @@ export interface SendNotebookChatMessageRequest {
     notes: Array<Record<string, unknown>>
   }
   model_override?: string
+  full_text_requested?: boolean
 }
 
 export interface BuildContextRequest {
@@ -230,6 +284,8 @@ export interface BuildContextRequest {
     sources: Record<string, string>
     notes: Record<string, string>
   }
+  query?: string
+  full_text_requested?: boolean
 }
 
 export interface BuildContextResponse {

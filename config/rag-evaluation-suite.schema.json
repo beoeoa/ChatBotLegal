@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://chatbotlegal.local/schemas/rag-evaluation-case-v1.json",
+  "title": "ChatBotLegal RAG evaluation case",
+  "type": "object",
+  "required": ["case_id", "dataset", "role", "domain", "question", "expected_behavior", "sensitivity"],
+  "properties": {
+    "case_id": {"type": "string", "minLength": 1},
+    "dataset": {"type": "string", "minLength": 1},
+    "role": {"enum": ["citizen", "officer", "admin"]},
+    "account": {"type": ["string", "null"]},
+    "domain": {"type": ["string", "null"]},
+    "scenario": {"type": ["string", "null"]},
+    "question": {"type": "string", "minLength": 1},
+    "legal_as_of": {"type": ["string", "null"], "format": "date"},
+    "event_date": {"type": ["string", "null"], "format": "date"},
+    "expected_behavior": {
+      "enum": ["grounded_answer", "refusal", "clarification_required", "out_of_domain"]
+    },
+    "expected_laws": {"type": "array", "items": {"type": "string"}},
+    "expected_articles": {"type": "array", "items": {"type": "string"}},
+    "expected_forms": {"type": "array", "items": {"type": "string"}},
+    "expected_issue_count": {"type": "integer", "minimum": 1},
+    "required_claims": {"type": "array", "items": {"type": "string"}},
+    "forbidden_sources": {"type": "array", "items": {"type": "string"}},
+    "sensitivity": {"enum": ["public", "private", "security"]}
+  },
+  "additionalProperties": true
+}

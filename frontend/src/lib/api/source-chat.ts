@@ -1,4 +1,5 @@
 import apiClient from './client'
+import { useAuthStore } from '@/lib/stores/auth-store'
 import { sessionSecurityHeaders } from './session-security'
 import {
   SourceChatSession,
@@ -49,22 +50,8 @@ export const sourceChatApi = {
   // Messaging with streaming
   sendMessage: (sourceId: string, sessionId: string, data: SendMessageRequest) => {
     // Get auth token using the same logic as apiClient interceptor
-    let token = null
-    let currentRole = 'citizen'
-    if (typeof window !== 'undefined') {
-      const authStorage = localStorage.getItem('auth-storage')
-      if (authStorage) {
-        try {
-          const { state } = JSON.parse(authStorage)
-          if (state?.token) {
-            token = state.token
-          }
-          currentRole = state?.role || 'citizen'
-        } catch (error) {
-          console.error('Error parsing auth storage:', error)
-        }
-      }
-    }
+    const { token, role } = useAuthStore.getState()
+    const currentRole = role || 'citizen'
 
     // Use relative URL to leverage Next.js rewrites
     // This works both in dev (Next.js proxy) and production (Docker network)

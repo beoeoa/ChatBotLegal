@@ -67,4 +67,13 @@ export interface ModelTestResult {
   success: boolean
   message: string
   details?: string
+  latency_ms?: number
+  checks?: {
+    provider_connectivity?: boolean
+    text_generation?: boolean
+    markdown_output?: boolean
+    citation_marker?: boolean
+    json_mode_required?: boolean
+    latency_ms?: number
+  }
 }

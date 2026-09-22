@@ -32,6 +32,8 @@ class FormGovernanceRepository(Protocol):
     def get_release(self, release_id: str) -> dict[str, Any] | None: ...
     def set_active_release(self, release_id: str, *, actor_id: str) -> dict[str, Any]: ...
     def active_release(self) -> dict[str, Any] | None: ...
+    def latest_pending_release(self) -> dict[str, Any] | None: ...
+    def latest_release_version(self) -> int: ...
     def enqueue_notification(self, notification: dict[str, Any]) -> None: ...
     def save_verified_gap(self, gap: dict[str, Any]) -> dict[str, Any]: ...
     def list_verified_gaps(self) -> list[dict[str, Any]]: ...
@@ -120,6 +122,16 @@ class InMemoryFormGovernanceRepository:
     def active_release(self) -> dict[str, Any] | None:
         return self.get_release(self._active_release_id) if self._active_release_id else None
 
+    def latest_pending_release(self) -> dict[str, Any] | None:
+        pending = [
+            item for item in self._releases.values()
+            if item.get("status") in {"candidate", "validated", "blocked"}
+        ]
+        return deepcopy(max(pending, key=lambda item: int(item.get("version") or 0))) if pending else None
+
+    def latest_release_version(self) -> int:
+        return max((int(item.get("version") or 0) for item in self._releases.values()), default=0)
+
     def enqueue_notification(self, notification: dict[str, Any]) -> None:
         self.notifications.append(deepcopy(notification))
 
@@ -154,6 +166,12 @@ class ReadOnlyJsonCompatibilityRepository:
     def active_release(self):
         return None
 
+    def latest_pending_release(self):
+        return None
+
+    def latest_release_version(self) -> int:
+        return 0
+
     def list_verified_gaps(self): return []
 
 
@@ -174,6 +192,32 @@ class PostgresFormGovernanceRepository:
         from sqlalchemy import create_engine
 
         self.engine = create_engine(url, future=True, pool_pre_ping=True)
+
+    def _require_shared_faq_release_database(self) -> None:
+        """Fail closed when production FAQ and form pointers cannot be atomic."""
+
+        if str(os.getenv("FAQ_GOVERNANCE_MODE") or "disabled").casefold() != "postgres_active":
+            return
+        faq_url = str(
+            os.getenv("FAQ_GOVERNANCE_DATABASE_URL")
+            or os.getenv("FEATURE018_DATABASE_URL")
+            or ""
+        ).strip()
+        if not faq_url:
+            raise RuntimeError("CATALOG_RELEASE_DATABASE_NOT_SHARED")
+        from sqlalchemy.engine import make_url
+
+        def identity(value) -> tuple[Any, ...]:
+            url = make_url(str(value))
+            return (
+                url.host or "",
+                int(url.port or 5432),
+                url.database or "",
+                url.username or "",
+            )
+
+        if identity(self.engine.url) != identity(faq_url):
+            raise RuntimeError("CATALOG_RELEASE_DATABASE_NOT_SHARED")
 
     @staticmethod
     def _case_params(case: FormReviewCase) -> dict[str, Any]:
@@ -230,12 +274,14 @@ class PostgresFormGovernanceRepository:
         from sqlalchemy import text
         with self.engine.begin() as c:
             result = c.execute(text("""UPDATE form_review_case SET status=:status,current_revision=:revision,
+              title=:title,domain=:domain,proposed_procedure_id=:procedure_id,
               source_reviewed_by=:source_reviewed_by,source_reviewed_at=:source_reviewed_at,
               legal_metadata=CAST(:legal_metadata AS JSONB),attestation_sha256=:attestation,
               attested_by=:attested_by,attested_at=:attested_at,
               updated_at=:updated_at,version=version+1
               WHERE case_id=:case_id AND version=:expected"""), {
                   "status": case.status.value,
+                  "title": case.title, "domain": case.domain, "procedure_id": case.procedure_id,
                   "revision": case.revision,
                   "source_reviewed_by": case.source_reviewed_by,
                   "source_reviewed_at": case.source_reviewed_at,
@@ -313,9 +359,11 @@ class PostgresFormGovernanceRepository:
             connection.execute(text("""INSERT INTO legal_procedure
               (id,release_ref,procedure_id,procedure_code,canonical_name,domain,authority,jurisdiction,
                official_source_url,official_source_sha256,effective_from,effective_to,legal_as_of,
-               coverage_status,coverage_reason)
+               coverage_status,coverage_reason,primary_organization_unit_id,
+              supporting_organization_unit_ids)
               VALUES (:id,:release,:procedure_id,:code,:name,:domain,:authority,:jurisdiction,
-               :url,:checksum,:effective_from,:effective_to,:legal_as_of,:coverage,:reason)
+               :url,:checksum,:effective_from,:effective_to,:legal_as_of,:coverage,:reason,
+               :primary_unit,CAST(:supporting_units AS JSONB))
               ON CONFLICT (release_ref,procedure_id) DO NOTHING"""), {
                 "id": row_id,
                 "release": release_id,
@@ -332,6 +380,11 @@ class PostgresFormGovernanceRepository:
                 "legal_as_of": manifest["legal_as_of"],
                 "coverage": item.get("coverage_status") or "unresolved",
                 "reason": item.get("coverage_reason"),
+                "primary_unit": item.get("primary_organization_unit_id"),
+                "supporting_units": json.dumps(
+                    item.get("supporting_organization_unit_ids") or [],
+                    ensure_ascii=False,
+                ),
             })
 
         asset_refs: dict[str, str] = {}
@@ -429,13 +482,265 @@ class PostgresFormGovernanceRepository:
             if observed != count:
                 raise ValueError(f"FORM_RELEASE_PROJECTION_MISMATCH:{table}")
 
+    @staticmethod
+    def _republish_active_faq_for_form_release(
+        connection,
+        *,
+        form_release_id: str,
+        form_manifest: dict[str, Any],
+        actor_id: str,
+    ) -> str | None:
+        """Rebind the public FAQ catalog inside the form pointer transaction.
+
+        FAQ content remains immutable. This creates a new FAQ release carrying
+        the active revisions, validates them against the candidate form
+        manifest and swaps both pointers in the same PostgreSQL transaction.
+        """
+
+        import hashlib
+        import json
+        import uuid
+        from datetime import date
+
+        from sqlalchemy import text
+
+        required_tables = (
+            "faq_release",
+            "faq_release_item",
+            "faq_active_release",
+            "faq_revision",
+        )
+        available = all(
+            connection.execute(
+                text("SELECT to_regclass(:name) IS NOT NULL"), {"name": table}
+            ).scalar_one()
+            for table in required_tables
+        )
+        if not available:
+            if str(os.getenv("FAQ_GOVERNANCE_MODE") or "disabled").casefold() == "postgres_active":
+                raise RuntimeError("CATALOG_RELEASE_DATABASE_NOT_SHARED")
+            return None
+
+        pointer = connection.execute(text("""
+            SELECT release_ref, pointer_version FROM faq_active_release
+            WHERE pointer_key='faq-catalog' FOR UPDATE
+        """)).mappings().first()
+        if not pointer:
+            return None
+        current = connection.execute(
+            text("SELECT * FROM faq_release WHERE id=:id FOR UPDATE"),
+            {"id": pointer["release_ref"]},
+        ).mappings().one()
+        if str(current.get("form_release_id") or "") == form_release_id:
+            return str(current["release_id"])
+
+        revisions = connection.execute(text("""
+            SELECT revision.* FROM faq_release_item item
+            JOIN faq_revision revision ON revision.id=item.faq_revision_ref
+            WHERE item.release_ref=:release
+            ORDER BY item.display_order, item.id
+            FOR UPDATE OF revision
+        """), {"release": current["id"]}).mappings().all()
+        procedures = {
+            str(item.get("procedure_id") or ""): item
+            for item in form_manifest.get("procedures") or []
+        }
+        errors: list[str] = []
+        projections: list[dict[str, Any]] = []
+        eligible_revisions: list[Any] = []
+        excluded_revisions: list[dict[str, str]] = []
+        legal_as_of = date.fromisoformat(str(form_manifest["legal_as_of"])[:10])
+        from api.form_router_v3 import resolve_forms
+
+        for revision in revisions:
+            revision_id = str(revision["id"])
+            procedure_id = str(revision.get("confirmed_procedure_id") or "")
+            if revision.get("public_state") not in {"confirmed", "released"}:
+                errors.append(f"FAQ_REVISION_NOT_CONFIRMED:{revision_id}")
+                continue
+            if procedure_id not in procedures:
+                excluded_revisions.append({
+                    "revision_id": revision_id,
+                    "confirmed_procedure_id": procedure_id,
+                    "reason_code": "FAQ_PROCEDURE_NOT_IN_FORM_RELEASE",
+                })
+                continue
+            evidence = revision.get("evidence") or {}
+            if isinstance(evidence, str):
+                evidence = json.loads(evidence)
+            form_fingerprints: list[str] = []
+            if bool(evidence.get("requires_forms")):
+                projected = resolve_forms(
+                    question=procedure_id,
+                    manifest=form_manifest,
+                    audience="citizen",
+                    legal_as_of=legal_as_of,
+                )
+                if projected.get("status") != "resolved":
+                    errors.append(f"FAQ_FORMS_UNAVAILABLE:{revision_id}")
+                form_fingerprints = [
+                    canonical_sha256({
+                        "form_id": item.get("form_id"),
+                        "checksum": item.get("source_checksum"),
+                        "source_url": item.get("source_url"),
+                    })
+                    for item in projected.get("recommended_forms") or []
+                ]
+            projections.append({
+                "revision_id": revision_id,
+                "procedure_id": procedure_id,
+                "primary_organization_unit_id": procedures[procedure_id].get(
+                    "primary_organization_unit_id"
+                ),
+                "form_fingerprints": form_fingerprints,
+            })
+            eligible_revisions.append(revision)
+        if errors:
+            raise ValueError("CATALOG_RELEASE_FAQ_GATE_FAILED:" + ",".join(errors))
+        if revisions and not eligible_revisions:
+            raise ValueError(
+                "CATALOG_RELEASE_FAQ_GATE_FAILED:FAQ_NO_ELIGIBLE_REVISION"
+            )
+
+        version = int(connection.execute(
+            text("SELECT COALESCE(MAX(version),0)+1 FROM faq_release")
+        ).scalar_one())
+        faq_release_id = f"faq-release-v{version}-{uuid.uuid4().hex[:8]}"
+        manifest = {
+            "schema_version": "faq-release-v1",
+            "release_id": faq_release_id,
+            "version": version,
+            "form_release_id": form_release_id,
+            "items": [{
+                "revision_id": str(revision["id"]),
+                "faq_ref": str(revision["faq_ref"]),
+                "source_sha256": str(revision["source_sha256"]),
+                "confirmed_procedure_id": str(
+                    revision["confirmed_procedure_id"]
+                ),
+            } for revision in eligible_revisions],
+            "gate_report": {
+                "passed": True,
+                "errors": [],
+                "form_release_id": form_release_id,
+                "projections": projections,
+                "excluded_revisions": excluded_revisions,
+                "excluded_revision_count": len(excluded_revisions),
+                "activation_mode": "atomic_form_republish",
+            },
+        }
+        canonical = json.dumps(
+            manifest,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        manifest_sha256 = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        connection.execute(text("""
+            INSERT INTO faq_release
+                (id,release_id,version,status,manifest,manifest_sha256,
+                 previous_release_id,form_release_id,created_by,activated_by,
+                 activated_at)
+            VALUES (:id,:id,:version,'active',CAST(:manifest AS JSONB),:sha,
+                    :previous,:form_release,:actor,:actor,CURRENT_TIMESTAMP)
+        """), {
+            "id": faq_release_id,
+            "version": version,
+            "manifest": canonical,
+            "sha": manifest_sha256,
+            "previous": current["release_id"],
+            "form_release": form_release_id,
+            "actor": actor_id,
+        })
+        for index, revision in enumerate(eligible_revisions):
+            connection.execute(text("""
+                INSERT INTO faq_release_item
+                    (id,release_ref,faq_revision_ref,display_order)
+                VALUES (:id,:release,:revision,:position)
+            """), {
+                "id": f"{faq_release_id}:item:{index}",
+                "release": faq_release_id,
+                "revision": revision["id"],
+                "position": index,
+            })
+        connection.execute(
+            text("UPDATE faq_release SET status='retired' WHERE id=:id"),
+            {"id": current["id"]},
+        )
+        connection.execute(text("""
+            UPDATE faq_active_release SET release_ref=:release,
+                pointer_version=:version,updated_by=:actor,
+                updated_at=CURRENT_TIMESTAMP
+            WHERE pointer_key='faq-catalog'
+        """), {
+            "release": faq_release_id,
+            "version": int(pointer["pointer_version"]) + 1,
+            "actor": actor_id,
+        })
+        if eligible_revisions:
+            connection.execute(text("""
+                UPDATE faq_revision SET public_state='released',reviewed_by=:actor,
+                    reviewed_at=COALESCE(reviewed_at,CURRENT_TIMESTAMP)
+                WHERE id = ANY(:revision_ids)
+            """), {
+                "actor": actor_id,
+                "revision_ids": [str(row["id"]) for row in eligible_revisions],
+            })
+        if excluded_revisions:
+            connection.execute(text("""
+                UPDATE faq_revision SET public_state='needs_review',
+                    reviewed_by=:actor,reviewed_at=CURRENT_TIMESTAMP
+                WHERE id = ANY(:revision_ids)
+            """), {
+                "actor": actor_id,
+                "revision_ids": [
+                    row["revision_id"] for row in excluded_revisions
+                ],
+            })
+        return faq_release_id
+
     def set_active_release(self, release_id: str, *, actor_id: str) -> dict[str, Any]:
         from sqlalchemy import text
+        self._require_shared_faq_release_database()
         with self.engine.begin() as c:
             release=c.execute(text("SELECT id,status,manifest FROM form_release WHERE release_id=:id FOR UPDATE"),{"id":release_id}).mappings().first()
             if not release: raise ValueError("FORM_RELEASE_NOT_FOUND")
             if release["status"] != "validated": raise ValueError("FORM_RELEASE_GATE_FAILED")
+            # Serialize publication before checking its base and case versions.
+            # Service checks alone cannot prevent two concurrent admins publishing.
+            c.execute(text("SELECT pg_advisory_xact_lock(17092026)"))
+            current_row = c.execute(text("""
+                SELECT r.release_id, r.manifest
+                FROM form_active_release p
+                JOIN form_release r ON r.id=p.release_ref
+                WHERE p.pointer_key='forms-catalog'
+                FOR UPDATE OF p
+            """)).mappings().first()
+            current_id = current_row["release_id"] if current_row else None
+            manifest = dict(release["manifest"])
+            # Normal publication advances from the active pointer.  A rollback
+            # is allowed only to that pointer's immediate previous release;
+            # this mirrors the in-memory repository and prevents an older,
+            # non-adjacent release from bypassing the release chain.
+            rolling_back = bool(
+                current_row
+                and (current_row.get("manifest") or {}).get("previous_release_id") == release_id
+            )
+            if manifest.get("previous_release_id") != current_id and not rolling_back:
+                raise ValueError("FORM_RELEASE_BASE_STALE")
+            expected_versions = manifest.get("build", {}).get("case_versions", {})
+            for case_id in manifest.get("build", {}).get("case_ids") or []:
+                case = c.execute(text("SELECT status,version,attestation_sha256 FROM form_review_case WHERE case_id=:id FOR UPDATE"), {"id": case_id}).mappings().first()
+                if not case or case["status"] != "release_candidate" or not case["attestation_sha256"] or (case_id in expected_versions and case["version"] != expected_versions[case_id]):
+                    raise ValueError("FORM_ATTESTATION_STALE")
             self._materialize_release_catalog(c, release_id, dict(release["manifest"]), actor_id)
+            faq_release_id = self._republish_active_faq_for_form_release(
+                c,
+                form_release_id=release_id,
+                form_manifest=dict(release["manifest"]),
+                actor_id=actor_id,
+            )
             pointer=c.execute(text("SELECT release_ref,pointer_version FROM form_active_release WHERE pointer_key='forms-catalog' FOR UPDATE")).mappings().first()
             previous=pointer["release_ref"] if pointer else None; version=int(pointer["pointer_version"])+1 if pointer else 1
             if previous: c.execute(text("UPDATE form_release SET status='retired' WHERE id=:id"),{"id":previous})
@@ -448,13 +753,31 @@ class PostgresFormGovernanceRepository:
             c.execute(text("""INSERT INTO form_active_release(pointer_key,release_ref,pointer_version,updated_by)
               VALUES ('forms-catalog',:release,:version,:by) ON CONFLICT(pointer_key) DO UPDATE SET
               release_ref=EXCLUDED.release_ref,pointer_version=EXCLUDED.pointer_version,updated_by=EXCLUDED.updated_by,updated_at=CURRENT_TIMESTAMP"""),{"release":release["id"],"version":version,"by":actor_id})
-        return {"release_id":release_id,"previous_release_id":previous,"updated_by":actor_id,"pointer_version":version}
+        return {"release_id":release_id,"previous_release_id":previous,"updated_by":actor_id,"pointer_version":version,"faq_release_id":faq_release_id,"activation_mode":"atomic_catalog_bundle" if faq_release_id else "forms_only"}
 
     def active_release(self) -> dict[str, Any] | None:
         from sqlalchemy import text
         with self.engine.connect() as c: row=c.execute(text("""SELECT r.* FROM form_active_release p JOIN form_release r ON r.id=p.release_ref WHERE p.pointer_key='forms-catalog'""")).mappings().first()
         if not row: return None
         return {**dict(row), **dict(row["manifest"]), "manifest":dict(row["manifest"])}
+
+    def latest_pending_release(self) -> dict[str, Any] | None:
+        from sqlalchemy import text
+        with self.engine.connect() as c:
+            row = c.execute(text("""
+                SELECT * FROM form_release
+                WHERE status IN ('candidate', 'validated', 'blocked')
+                ORDER BY version DESC LIMIT 1
+            """)).mappings().first()
+        if not row:
+            return None
+        return {**dict(row), **dict(row["manifest"]), "manifest": dict(row["manifest"])}
+
+    def latest_release_version(self) -> int:
+        from sqlalchemy import text
+        with self.engine.connect() as c:
+            value = c.execute(text("SELECT COALESCE(MAX(version), 0) FROM form_release")).scalar_one()
+        return int(value or 0)
 
     def enqueue_notification(self, notification: dict[str, Any]) -> None:
         import json, uuid

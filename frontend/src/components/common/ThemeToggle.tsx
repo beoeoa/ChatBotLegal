@@ -10,29 +10,36 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { Sun, Moon, Monitor } from 'lucide-react'
 import { useTranslation } from '@/lib/hooks/use-translation'
+import { cn } from '@/lib/utils'
 
 interface ThemeToggleProps {
   iconOnly?: boolean
+  className?: string
 }
 
-export function ThemeToggle({ iconOnly = false }: ThemeToggleProps) {
+export function ThemeToggle({ iconOnly = false, className }: ThemeToggleProps) {
   const { theme, setTheme } = useTheme()
   const { t } = useTranslation()
 
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button 
-          variant={iconOnly ? "ghost" : "outline"} 
+        <Button
+          variant={iconOnly ? "ghost" : "ghost"}
           size={iconOnly ? "icon" : "default"} 
-          className={iconOnly ? "h-9 w-full sidebar-menu-item" : "w-full justify-start gap-2 sidebar-menu-item"}
+          className={cn(
+            iconOnly
+              ? "h-9 w-full sidebar-menu-item"
+              : "w-full justify-start gap-2 rounded-none border-0 bg-transparent text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground sidebar-menu-item",
+            className,
+          )}
+          aria-label={t('navigation.theme')}
         >
           <div className="relative h-[1.2rem] w-[1.2rem]">
-            <Sun className="absolute inset-0 h-[1.2rem] w-[1.2rem] rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />
-            <Moon className="absolute inset-0 h-[1.2rem] w-[1.2rem] rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100" />
+            <Sun aria-hidden="true" className="absolute inset-0 h-[1.2rem] w-[1.2rem] rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />
+            <Moon aria-hidden="true" className="absolute inset-0 h-[1.2rem] w-[1.2rem] rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100" />
           </div>
           {!iconOnly && <span>{t('common.theme')}</span>}
-          <span className="sr-only">{t('navigation.theme')}</span>
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">

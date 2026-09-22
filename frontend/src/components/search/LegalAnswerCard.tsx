@@ -1,11 +1,12 @@
 'use client'
 
-import { AlertCircle, BookOpen, CheckCircle2, FileText, ListChecks, Scale } from 'lucide-react'
+import { AlertCircle, Download, FileText, ListChecks, Sparkles } from 'lucide-react'
+import { useRouter } from 'next/navigation'
 import type { AskResponse, LegalAnswerPresentationSections } from '@/lib/types/search'
-import { Badge } from '@/components/ui/badge'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { remarkLegalBreaks } from '@/lib/utils/remark-legal-breaks'
+import { enrichMarkdownWithArticleLinks } from '@/lib/utils/legal-article-parser'
 
 type Role = 'citizen' | 'officer' | 'admin'
 
@@ -45,56 +46,95 @@ function formUrl(form: Record<string, unknown>): string {
   return /^(?:https?:\/\/|\/)/i.test(value) ? value : ''
 }
 
-const STATUS_LABELS: Record<string, string> = {
-  grounded: 'Đã xác minh',
-  partial_grounded: 'Đã xác minh một phần',
-  broad_grounded: 'Đã xác minh quy định khung',
-  clarifying: 'Cần làm rõ',
-  source_gap: 'Cần bổ sung nguồn',
-  provider_error: 'Tạm thời chưa thể tổng hợp',
+function sourcePage(value: Record<string, unknown>): string | number | null {
+  const page = value.page_number ?? value.source_page ?? value.pageNumber ?? value.page
+  return typeof page === 'string' || typeof page === 'number' ? page : null
 }
 
-function citationLabel(citation: LegalAnswerPresentationSections['legal_bases'][number]): string {
-  const identity = citation.law_number || citation.document_title || 'Nguồn pháp lý'
-  const provision = [
-    citation.article_number ? `Điều ${citation.article_number}` : '',
-    citation.clause_number ? `Khoản ${citation.clause_number}` : '',
-    citation.point_number ? `Điểm ${citation.point_number}` : '',
-  ].filter(Boolean).join(', ')
-  return [identity, provision].filter(Boolean).join(' · ')
-}
-
-function FormattedMarkdown({ content, className = '' }: { content: string; className?: string }) {
+function FormattedMarkdown({
+  content,
+  citations,
+  className = '',
+}: {
+  content: string
+  citations?: LegalAnswerPresentationSections['legal_bases']
+  className?: string
+}) {
+  const router = useRouter()
   if (!content) return null
+
+  const enriched = enrichMarkdownWithArticleLinks(
+    content,
+    citations as Parameters<typeof enrichMarkdownWithArticleLinks>[1]
+  )
+
   return (
-    <div className={`prose prose-sm max-w-none dark:prose-invert break-words prose-p:leading-relaxed prose-p:my-1 prose-headings:my-2 ${className}`}>
+    <div className={`prose max-w-none text-foreground dark:prose-invert break-words text-pretty ${className}`}>
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={[remarkGfm, remarkLegalBreaks]}
         components={{
-          a: ({ href, children, ...props }) => (
-            <a href={href} target="_blank" rel="noopener noreferrer" {...props} className="font-medium text-primary hover:underline">
+          a: ({ href, children, ...props }) => {
+            const isInternal = href?.startsWith('/legal-documents/')
+            if (isInternal && href) {
+              return (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.preventDefault()
+                    e.stopPropagation()
+                    router.push(href)
+                  }}
+                  className="inline font-semibold text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 underline underline-offset-4 decoration-blue-500/50 hover:decoration-blue-700 transition-colors cursor-pointer text-left"
+                >
+                  {children}
+                </button>
+              )
+            }
+            return (
+              <a
+                href={href}
+                target="_blank"
+                rel="noopener noreferrer"
+                {...props}
+                className="inline font-semibold text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 underline underline-offset-4 decoration-blue-500/50 hover:decoration-blue-700 transition-colors"
+              >
+                {children}
+              </a>
+            )
+          },
+          h3: ({ children }) => (
+            <h3 className="text-lg font-bold text-foreground mt-6 mb-3 flex items-center gap-2 border-b pb-1.5 border-border/40">
               {children}
-            </a>
+            </h3>
           ),
-          p: ({ children }) => <p className="leading-relaxed">{children}</p>,
+          h4: ({ children }) => (
+            <h4 className="text-base font-semibold text-foreground mt-4 mb-2">
+              {children}
+            </h4>
+          ),
+          p: ({ children }) => <p className="leading-relaxed my-3 text-[16px] text-foreground/90">{children}</p>,
+          ul: ({ children }) => <ul className="my-3 space-y-2 list-disc pl-5 text-[15.5px] leading-relaxed">{children}</ul>,
+          ol: ({ children }) => <ol className="my-3 space-y-2 list-decimal pl-5 text-[15.5px] leading-relaxed">{children}</ol>,
+          li: ({ children }) => <li className="my-1 text-foreground/90">{children}</li>,
+          strong: ({ children }) => <strong className="font-semibold text-foreground">{children}</strong>,
         }}
       >
-        {content}
+        {enriched}
       </ReactMarkdown>
     </div>
   )
 }
 
-function TextList({ items }: { items: string[] }) {
+function TextList({ items, citations }: { items: string[]; citations?: LegalAnswerPresentationSections['legal_bases'] }) {
   const uniqueItems = Array.from(new Set(items.map(item => text(item)).filter(Boolean)))
   if (!uniqueItems.length) return null
   return (
-    <ul className="space-y-2 text-sm leading-6">
+    <ul className="space-y-2.5 text-[15.5px] leading-relaxed">
       {uniqueItems.map((item, index) => (
-        <li key={`${item.slice(0, 32)}-${index}`} className="flex gap-2 items-start">
-          <span aria-hidden="true" className="mt-1 text-muted-foreground">•</span>
+        <li key={`${item.slice(0, 32)}-${index}`} className="flex gap-2.5 items-start">
+          <span aria-hidden="true" className="mt-2 h-1.5 w-1.5 rounded-full bg-primary flex-shrink-0" />
           <div className="flex-1 min-w-0">
-            <FormattedMarkdown content={item} />
+            <FormattedMarkdown content={item} citations={citations} />
           </div>
         </li>
       ))}
@@ -104,16 +144,9 @@ function TextList({ items }: { items: string[] }) {
 
 export function LegalAnswerCard({
   sections,
-  answerStatus,
-  answerRoute,
-  evidenceCount,
-  verificationLabel,
-  historicalLabel,
-  role = 'citizen',
 }: LegalAnswerCardProps) {
   const procedure = procedureLines(sections.procedure)
-  const verified = Boolean(verificationLabel && (evidenceCount || 0) > 0)
-  const title = role === 'officer' ? 'Tra cứu nghiệp vụ' : role === 'admin' ? 'Kết quả kiểm chứng' : 'Trợ lý pháp luật'
+  const unverifiedExplanations = sections.unverified_explanations || []
 
   const combinedCaveats = Array.from(
     new Set([...(sections.caveats || []), ...(sections.clarifying_questions || [])].map(item => text(item)).filter(Boolean))
@@ -124,47 +157,126 @@ export function LegalAnswerCard({
       index === self.findIndex(f => (f.form_id && f.form_id === form.form_id) || formLabel(f) === formLabel(form))
   )
 
-  const uniqueLegalBases = (sections.legal_bases || []).filter(
-    (citation, index, self) =>
-      index === self.findIndex(c => citationLabel(c) === citationLabel(citation))
-  )
-
   return (
-    <Card className="overflow-hidden border-primary/25 shadow-sm" data-testid="legal-answer-card">
-      <CardHeader className="border-b bg-primary/[0.035]">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <CardTitle className="flex items-center gap-2 text-base"><Scale className="h-4 w-4 text-primary" />{title}</CardTitle>
-          <div className="flex flex-wrap gap-2">
-            {verified && <Badge data-testid="verified-label"><CheckCircle2 className="mr-1 h-3 w-3" />{verificationLabel}</Badge>}
-            {answerRoute === 'historical' && historicalLabel && <Badge variant="outline" data-testid="historical-label">{historicalLabel}</Badge>}
-            {answerStatus && <Badge variant="secondary">{STATUS_LABELS[answerStatus] || answerStatus}</Badge>}
-          </div>
-        </div>
-      </CardHeader>
-      <CardContent className="divide-y p-0">
+    <div className="space-y-6 py-2" data-testid="legal-answer-card">
+      <div className="space-y-6">
         {sections.short_answer && (
-          <section className="space-y-2 px-4 py-5 sm:px-6" data-testid="legal-answer-short">
-            <h3 className="font-semibold text-foreground">Trả lời ngắn</h3>
-            <FormattedMarkdown content={sections.short_answer} className="text-sm leading-6" />
+          <section className="space-y-2" data-testid="legal-answer-short">
+            <span className="sr-only">Trả lời ngắn</span>
+            <div className="prose-content">
+              <FormattedMarkdown
+                content={sections.short_answer}
+                citations={sections.legal_bases}
+                className="text-[16px] leading-8 text-foreground"
+              />
+            </div>
           </section>
         )}
-        {sections.actions.length > 0 && <section className="space-y-3 px-4 py-5 sm:px-6"><h3 className="flex items-center gap-2 font-semibold"><ListChecks className="h-4 w-4" />Việc cần làm</h3><TextList items={sections.actions} /></section>}
-        {sections.dossier.length > 0 && <section className="space-y-3 px-4 py-5 sm:px-6"><h3 className="flex items-center gap-2 font-semibold"><FileText className="h-4 w-4" />Hồ sơ, giấy tờ</h3><TextList items={sections.dossier} /></section>}
-        {procedure.length > 0 && <section className="space-y-3 px-4 py-5 sm:px-6"><h3 className="font-semibold">Thủ tục thực hiện</h3><TextList items={procedure} /></section>}
+        {sections.actions.length > 0 && (
+          <section className="space-y-3 pt-2">
+            <h3 className="flex items-center gap-2 font-bold text-base text-foreground">
+              <ListChecks className="h-4 w-4 text-primary" />
+              Việc cần làm
+            </h3>
+            <TextList items={sections.actions} citations={sections.legal_bases} />
+          </section>
+        )}
+        {sections.dossier.length > 0 && (
+          <section className="space-y-3 pt-2">
+            <h3 className="flex items-center gap-2 font-bold text-base text-foreground">
+              <FileText className="h-4 w-4 text-primary" />
+              Hồ sơ, giấy tờ
+            </h3>
+            <TextList items={sections.dossier} citations={sections.legal_bases} />
+          </section>
+        )}
+        {procedure.length > 0 && (
+          <section className="space-y-3 pt-2">
+            <h3 className="font-bold text-base text-foreground">Thủ tục thực hiện</h3>
+            <TextList items={procedure} citations={sections.legal_bases} />
+          </section>
+        )}
         {uniqueForms.length > 0 && (
-          <section className="space-y-3 px-4 py-5 sm:px-6" data-testid="legal-answer-forms"><h3 className="font-semibold">Biểu mẫu chính thức</h3>
-            <ul className="space-y-2 text-sm">{uniqueForms.map((form, index) => { const url = formUrl(form); const label = formLabel(form); return <li key={`${text(form.form_id)}-${index}`}>{url ? <a href={url} target="_blank" rel="noopener noreferrer" className="font-medium text-primary hover:underline">{label}</a> : <span>{label}</span>}</li> })}</ul>
+          <section className="space-y-3 pt-4 border-t border-border/40" data-testid="legal-answer-forms">
+            <h3 className="flex items-center gap-2 font-bold text-base text-foreground">
+              <Sparkles className="h-4 w-4 text-primary" />
+              Biểu mẫu chính thức
+            </h3>
+            <div className="grid gap-3 sm:grid-cols-2">
+              {uniqueForms.map((form, index) => {
+                let url = formUrl(form) || ''
+                const pageNum = sourcePage(form)
+                if (url && url.toLowerCase().endsWith('.pdf') && pageNum) {
+                  url += `#page=${pageNum}`
+                }
+                const label = formLabel(form)
+                return (
+                  <div
+                    key={`${text(form.form_id)}-${index}`}
+                    className="flex items-center justify-between p-3.5 rounded-lg border border-border/80 bg-muted/20 hover:bg-muted/40 transition-colors"
+                  >
+                    <div className="flex items-start gap-2.5 min-w-0">
+                      <FileText className="h-4 w-4 text-primary mt-0.5 flex-shrink-0" />
+                      {url ? (
+                        <a
+                          href={url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-sm font-medium text-foreground hover:text-primary hover:underline truncate"
+                        >
+                          {label}
+                        </a>
+                      ) : (
+                        <span className="text-sm font-medium text-foreground truncate">{label}</span>
+                      )}
+                    </div>
+                    {url ? (
+                      <a
+                        href={url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 text-xs font-semibold text-primary bg-primary/10 hover:bg-primary/20 px-2.5 py-1 rounded-md transition-colors flex-shrink-0 ml-2"
+                      >
+                        <Download className="h-3 w-3" />
+                        Tải về / Điền
+                      </a>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">Chưa có file</span>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
           </section>
         )}
-        {uniqueLegalBases.length > 0 && (
-          <section className="space-y-3 px-4 py-5 sm:px-6" data-testid="legal-answer-bases"><h3 className="flex items-center gap-2 font-semibold"><BookOpen className="h-4 w-4" />Căn cứ pháp lý</h3>
-            <ul className="space-y-2 text-sm">{uniqueLegalBases.map((citation, index) => <li key={`${citation.law_number || citation.document_title}-${index}`}>{citation.source_url ? <a href={citation.source_url} target="_blank" rel="noopener noreferrer" className="font-medium text-primary hover:underline">{citationLabel(citation)}</a> : citationLabel(citation)}</li>)}</ul>
+        {unverifiedExplanations.length > 0 && (
+          <section
+            className="space-y-2 rounded-lg border border-amber-300 bg-amber-50 p-4 text-amber-950 dark:border-amber-700 dark:bg-amber-950/30 dark:text-amber-100"
+            aria-label="Diễn giải chưa xác minh"
+            data-testid="legal-answer-unverified"
+          >
+            <h3 className="flex items-center gap-2 font-bold text-base">
+              <AlertCircle className="h-4 w-4 shrink-0" aria-hidden="true" />
+              Diễn giải tham khảo — chưa xác minh
+            </h3>
+            <ul className="list-disc space-y-1 pl-5 text-sm leading-6">
+              {unverifiedExplanations.map((item, index) => {
+                const value = text(item.content || item.claim || item.original)
+                return value ? <li key={`${value}-${index}`}>{value}</li> : null
+              })}
+            </ul>
           </section>
         )}
         {combinedCaveats.length > 0 && (
-          <section className="space-y-3 bg-amber-50/40 px-4 py-5 sm:px-6 dark:bg-amber-950/10" data-testid="legal-answer-caveats"><h3 className="flex items-center gap-2 font-semibold"><AlertCircle className="h-4 w-4" />Lưu ý và phần cần làm rõ</h3><TextList items={combinedCaveats} /></section>
+          <section className="space-y-3 bg-amber-500/5 p-4 rounded-lg border-l-4 border-amber-500" data-testid="legal-answer-caveats">
+            <h3 className="flex items-center gap-2 font-bold text-base text-amber-800 dark:text-amber-200">
+              <AlertCircle className="h-4 w-4 text-amber-600 dark:text-amber-400" />
+              Lưu ý và phần cần làm rõ
+            </h3>
+            <TextList items={combinedCaveats} citations={sections.legal_bases} />
+          </section>
         )}
-      </CardContent>
-    </Card>
+      </div>
+    </div>
   )
 }

@@ -89,6 +89,15 @@ def _handle_value_error(e: ValueError, status_code: int = 400) -> HTTPException:
     return HTTPException(status_code=status_code, detail=str(e))
 
 
+def _invalidate_dashboard_model_cache() -> None:
+    """Refresh the read-only dashboard projection after credential changes."""
+    try:
+        from api.routers.admin_control import invalidate_dashboard_cache
+        invalidate_dashboard_cache()
+    except Exception:
+        logger.debug("dashboard_cache_invalidation_skipped", exc_info=True)
+
+
 # =============================================================================
 # Status endpoints
 # =============================================================================
@@ -202,6 +211,7 @@ async def create_credential(request: CreateCredentialRequest, raw_request: Reque
             raw_request, "admin.credential.create", str(cred.id or "credential"),
             provider=cred.provider,
         )
+        _invalidate_dashboard_model_cache()
         return credential_to_response(cred, 0)
 
     except Exception as e:
@@ -279,6 +289,7 @@ async def update_credential(credential_id: str, request: UpdateCredentialRequest
             raw_request, "admin.credential.update", credential_id,
             updated_fields=sorted(request.model_fields_set),
         )
+        _invalidate_dashboard_model_cache()
         return credential_to_response(cred, len(models))
 
     except HTTPException:
@@ -349,6 +360,7 @@ async def delete_credential(
                 raw_request, "admin.credential.delete", credential_id,
                 deleted_models=deleted_models,
             )
+            _invalidate_dashboard_model_cache()
 
             return CredentialDeleteResponse(
                 message="Credential deleted successfully",
@@ -379,6 +391,7 @@ async def delete_credential(
             raw_request, "admin.credential.delete", credential_id,
             deleted_models=deleted_models,
         )
+        _invalidate_dashboard_model_cache()
 
         return CredentialDeleteResponse(
             message="Credential deleted successfully",
@@ -420,6 +433,7 @@ async def discover_models_for_credential(credential_id: str):
                 DiscoveredModelResponse(
                     name=d["name"],
                     provider=d["provider"],
+                    model_type=d.get("model_type"),
                     description=d.get("description"),
                 )
                 for d in discovered

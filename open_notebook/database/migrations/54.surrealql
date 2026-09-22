@@ -1,0 +1,13 @@
+-- Durable assignment state for imported legal documents. A separate record is
+-- required because a shared or unassigned document has no unit relation row.
+DEFINE TABLE IF NOT EXISTS document_organization_assignment SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS document_id ON TABLE document_organization_assignment TYPE string;
+DEFINE FIELD IF NOT EXISTS assignment_state ON TABLE document_organization_assignment TYPE string ASSERT $value IN ['assigned', 'shared', 'unassigned'];
+DEFINE FIELD IF NOT EXISTS primary_organization_unit_id ON TABLE document_organization_assignment TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS assignment_source ON TABLE document_organization_assignment TYPE string DEFAULT 'admin';
+DEFINE FIELD IF NOT EXISTS confidence ON TABLE document_organization_assignment TYPE number DEFAULT 1;
+DEFINE FIELD IF NOT EXISTS confirmation_status ON TABLE document_organization_assignment TYPE string DEFAULT 'confirmed';
+DEFINE FIELD IF NOT EXISTS created ON TABLE document_organization_assignment TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS updated ON TABLE document_organization_assignment TYPE option<datetime>;
+DEFINE INDEX IF NOT EXISTS idx_document_organization_assignment_document ON TABLE document_organization_assignment COLUMNS document_id UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_document_organization_assignment_state ON TABLE document_organization_assignment COLUMNS assignment_state, confirmation_status;

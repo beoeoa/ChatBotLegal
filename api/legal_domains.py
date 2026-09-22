@@ -20,6 +20,7 @@ CANONICAL_DOMAIN_ALIASES: dict[str, tuple[str, ...]] = {
         "ho_tich",
         "chung_thuc",
         "tu_phap_ho_tich",
+        "civil_status",
     ),
     "dat_dai_xay_dung": (
         "dat_dai_xay_dung",
@@ -27,6 +28,11 @@ CANONICAL_DOMAIN_ALIASES: dict[str, tuple[str, ...]] = {
         "xay_dung",
         "dat_dai_moi_truong",
         "xay_dung_do_thi",
+        # UI/router labels historically included the full grouped display
+        # name.  Keep those labels in the same canonical bucket as corpus
+        # slugs such as ``dat_dai_moi_truong``.
+        "dat_dai_xay_dung_moi_truong",
+        "land",
     ),
     "an_sinh_y_te_giao_duc": (
         "an_sinh_y_te_giao_duc",
@@ -36,26 +42,52 @@ CANONICAL_DOMAIN_ALIASES: dict[str, tuple[str, ...]] = {
         "giao_duc",
         "giao_duc_van_hoa",
         "lao_dong",
+        "social_welfare",
+        "health",
+        "education",
+        "van_hoa_giao_duc_y_te",
+        "y_te_co_so",
     ),
     "cu_tru_an_ninh": (
         "cu_tru_an_ninh",
         "cu_tru",
         "an_ninh",
+        "cu_tru_can_cuoc_an_ninh",
+        "residence",
     ),
     "khieu_nai_to_cao_xu_phat": (
         "khieu_nai_to_cao_xu_phat",
         "khieu_nai",
         "to_cao",
         "xu_phat",
+        "khieu_nai_to_cao_tiep_cong_dan_xu_phat",
+        "complaint",
+        "denunciation",
+        "sanction",
     ),
     "hanh_chinh_cong": (
         "hanh_chinh_cong",
         "hanh_chinh",
         "noi_vu_hanh_chinh",
+        "public_administration",
     ),
+    # ``kinh_te`` is an active locality routing domain.  Older reviewed rows
+    # used the more specific ``kinh_te_tai_chinh`` slug; treating it as an
+    # unknown value made valid records disappear from the dashboard's
+    # classification coverage and prevented the configured Kinh tế filter
+    # from matching them.
+    "kinh_te": (
+        "kinh_te",
+        "kinh_te_tai_chinh",
+        "tai_chinh",
+        "economy",
+        "economic",
+    ),
+    "quoc_phong_quan_su": ("quoc_phong_quan_su", "quoc_phong", "nghia_vu_quan_su"),
     "trat_tu_do_thi": (
         "trat_tu_do_thi",
         "trat_tu",
+        "urban_order",
     ),
 }
 
@@ -99,4 +131,3 @@ def legal_domain_values(value: Any) -> tuple[str, ...]:
     if not canonical:
         return ()
     return CANONICAL_DOMAIN_ALIASES.get(canonical, (canonical,))
-

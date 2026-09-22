@@ -10,9 +10,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from threading import get_ident
 from typing import Any, Awaitable, Callable, Iterable, Mapping
 
 from api.data_paths import notebook_data_dir
@@ -172,10 +174,12 @@ class LegalValidityRegistry:
         if existing:
             return {"created": False, "observation": existing[0], "event": None}
 
-        previous_rows = await self.query(
-            "SELECT * FROM legal_validity_observation WHERE law_number = $law_number ORDER BY observed_at DESC LIMIT 1;",
-            {"law_number": observation.law_number},
-        )
+        previous_rows = []
+        if observation.document_id:
+            previous_rows = await self.query(
+                "SELECT * FROM legal_validity_observation WHERE document_id = $document_id ORDER BY observed_at DESC LIMIT 1;",
+                {"document_id": observation.document_id},
+            )
         previous = previous_rows[0] if previous_rows else None
         payload = observation.to_dict()
         payload.update(
@@ -208,7 +212,7 @@ class LegalValidityRegistry:
         if needs_event:
             previous_fingerprint = str((previous or {}).get("fingerprint") or "none")
             event_key = hashlib.sha256(
-                f"{observation.law_number}|{previous_fingerprint}|{observation.fingerprint}".encode("utf-8")
+                f"{observation.document_id}|{previous_fingerprint}|{observation.fingerprint}".encode("utf-8")
             ).hexdigest()
             prior_event = await self.query(
                 "SELECT * FROM legal_validity_event WHERE event_key = $event_key LIMIT 1;",
@@ -297,17 +301,25 @@ class LegalValidityRegistry:
             if len(page) < requested:
                 break
 
-        seen: set[str] = set()
+        # A law number is not a stable document identity: the official corpus
+        # may contain two instruments with the same number (for example a
+        # Law and a National Assembly Resolution), and imported source rows
+        # may be duplicated under different internal ids.  Keep the latest
+        # observation per (law_number, document_id) so one row cannot
+        # silently overwrite another in the serving projection.
+        seen: set[tuple[str, str]] = set()
         result: list[LegalValidityObservation] = []
         for row in rows:
             law_number = str(row.get("law_number") or "")
-            if law_number in seen:
+            document_id = str(row.get("document_id") or "")
+            identity = (law_number, document_id)
+            if identity in seen:
                 continue
             try:
                 observation = LegalValidityObservation.from_dict(row)
             except (TypeError, ValueError):
                 continue
-            seen.add(law_number)
+            seen.add(identity)
             result.append(observation)
         return result
 
@@ -327,6 +339,7 @@ class LegalValidityRegistry:
         page_size: int = 2000,
         max_records: int = 100_000,
         limit: int | None = None,
+        document_ids: Iterable[str] | None = None,
     ) -> list[LegalValidityObservation]:
         observations = await self.latest_observations(
             page_size=page_size,
@@ -334,7 +347,33 @@ class LegalValidityRegistry:
             limit=limit,
         )
         rejected = await self.rejected_fingerprints()
-        return [item for item in observations if item.fingerprint not in rejected]
+        allowed_ids = {str(value).strip() for value in (document_ids or ()) if str(value).strip()}
+        return [
+            item for item in observations
+            if item.fingerprint not in rejected
+            and (not allowed_ids or str(item.document_id or "").strip() in allowed_ids)
+        ]
+
+    async def serving_action_overrides(self) -> dict[str, str]:
+        """Return the latest audited Admin serving choice per legal instrument."""
+
+        rows = await self.query(
+            "SELECT document_id, review_status, updated_at, created_at "
+            "FROM legal_validity_event WHERE review_status IN "
+            "['historical_release_pending', 'quarantine_release_pending'] "
+            "ORDER BY updated_at DESC, created_at DESC;"
+        )
+        overrides: dict[str, str] = {}
+        for row in rows or []:
+            document_id = str(row.get("document_id") or "").strip()
+            if not document_id or document_id in overrides:
+                continue
+            overrides[document_id] = (
+                "block"
+                if row.get("review_status") == "quarantine_release_pending"
+                else "historical_only"
+            )
+        return overrides
 
     def write_snapshot(
         self,
@@ -343,46 +382,90 @@ class LegalValidityRegistry:
         last_success_at: datetime,
         eligible_count: int,
         mode: str,
+        eligible_document_ids: Iterable[str] | None = None,
+        release_id: str | None = None,
+        manifest_sha256: str | None = None,
+        serving_action_overrides: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         now = datetime.now(timezone.utc)
         mode = mode if mode in {"observe", "protect", "strict"} else "protect"
+        allowed_ids = {
+            str(value).strip()
+            for value in (eligible_document_ids or ())
+            if str(value).strip()
+        }
         latest: dict[str, LegalValidityObservation] = {}
         for observation in observations:
-            current = latest.get(observation.law_number)
+            document_id = str(observation.document_id or "").strip()
+            if allowed_ids and document_id not in allowed_ids:
+                continue
+            identity = document_id or f"unmapped:{observation.fingerprint}"
+            current = latest.get(identity)
             if current is None or observation.observed_at > current.observed_at:
-                latest[observation.law_number] = observation
+                latest[identity] = observation
+
         documents: dict[str, dict[str, Any]] = {}
         document_ids: dict[str, str] = {}
-        for law_number, observation in sorted(latest.items()):
-            action = _serving_action(observation, vietnam_legal_date(last_success_at), mode)
+        legacy_number_keys: dict[str, list[str]] = {}
+        for _identity, observation in sorted(latest.items()):
+            document_id = str(observation.document_id or "").strip()
+            entry_key = (
+                f"document:{document_id}"
+                if document_id
+                else f"unmapped:{observation.fingerprint[:16]}"
+            )
+            action = _serving_action(
+                observation, vietnam_legal_date(last_success_at), mode
+            )
+            override = (serving_action_overrides or {}).get(document_id)
+            if override in {"historical_only", "block"}:
+                action = override
             base_decision = serving_decision(
                 observation, as_of=vietnam_legal_date(last_success_at), mode=mode
             )
-            documents[law_number] = {
+            documents[entry_key] = {
                 "document_id": observation.document_id,
-                "normalized_status": observation.normalized_status.value,
-                "serving_action": action,
-                "source_url": observation.source_url,
-                "verified_at": observation.observed_at.isoformat(),
-                "effective_from": observation.effective_from,
-                "effective_to": observation.effective_to,
-                "affected_provisions": [
-                    item.to_dict() for item in observation.affected_provisions
-                ],
-                "identity_status": observation.identity_status.value,
-                "evidence_status": observation.evidence_status.value,
-                "warning_code": base_decision.warning_code,
-                "reason_code": base_decision.reason_code,
-                "fingerprint": observation.fingerprint,
+                "law_number": observation.law_number,
+                    "normalized_status": observation.normalized_status.value,
+                    "serving_action": action,
+                    "source_url": observation.source_url,
+                    "verified_at": (
+                        observation.verified_at or observation.observed_at
+                    ).isoformat(),
+                    "verified_by": observation.verified_by,
+                    "source_kind": observation.source_kind,
+                    "raw_status": observation.raw_status,
+                    "effective_from": observation.effective_from,
+                    "effective_to": observation.effective_to,
+                    "affected_provisions": [
+                        item.to_dict() for item in observation.affected_provisions
+                    ],
+                    "identity_status": observation.identity_status.value,
+                    "evidence_status": observation.evidence_status.value,
+                    "warning_code": base_decision.warning_code,
+                    "reason_code": base_decision.reason_code,
+                    "fingerprint": observation.fingerprint,
             }
-            if observation.document_id:
-                document_ids[str(observation.document_id)] = law_number
-        observed_count = len(documents)
+            if document_id:
+                document_ids[document_id] = entry_key
+            legacy_number_keys.setdefault(observation.law_number, []).append(entry_key)
+        # Read compatibility only. Canonical projections use document_ids;
+        # ambiguous numbers intentionally receive no alias.
+        for law_number, keys in legacy_number_keys.items():
+            if law_number and len(keys) == 1:
+                documents[law_number] = {
+                    **documents[keys[0]],
+                    "compatibility_alias": True,
+                }
+        observed_count = len(latest)
         payload = {
             "schema_version": SNAPSHOT_SCHEMA,
             "generated_at": now.isoformat(),
             "last_success_at": last_success_at.astimezone(timezone.utc).isoformat(),
             "mode": mode,
+            "release_id": release_id,
+            "manifest_sha256": manifest_sha256,
+            "eligible_document_ids": sorted(allowed_ids) if allowed_ids else None,
             "coverage": {
                 "eligible": max(0, int(eligible_count)),
                 "observed": observed_count,
@@ -392,14 +475,36 @@ class LegalValidityRegistry:
             "document_ids": document_ids,
         }
         self.snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.snapshot_path.with_name(self.snapshot_path.name + ".tmp")
-        temporary.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        temporary = self.snapshot_path.with_name(
+            f"{self.snapshot_path.name}.{os.getpid()}.{get_ident()}.tmp"
         )
-        os.replace(temporary, self.snapshot_path)
+        try:
+            temporary.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            # Windows can briefly deny a replace while another process is
+            # reading the previous snapshot.  Keep the atomic same-directory
+            # replace, but tolerate that short sharing-window contention.
+            for attempt in range(4):
+                try:
+                    os.replace(temporary, self.snapshot_path)
+                    break
+                except PermissionError:
+                    if attempt == 3:
+                        raise
+                    time.sleep(0.025 * (attempt + 1))
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
         return payload
 
-    async def refresh_snapshot_projection(self) -> dict[str, Any] | None:
+    async def refresh_snapshot_projection(
+        self,
+        *,
+        additional_document_ids: Iterable[str] | None = None,
+    ) -> dict[str, Any] | None:
         """Rebuild the serving projection after an Admin mapping decision."""
 
         try:
@@ -412,12 +517,33 @@ class LegalValidityRegistry:
         if last_success_at is None:
             return None
         coverage = snapshot.get("coverage") if isinstance(snapshot.get("coverage"), Mapping) else {}
-        observations = await self.latest_serving_observations()
+        eligible_document_ids = {
+            str(value or "").strip()
+            for value in (snapshot.get("eligible_document_ids") or ())
+            if str(value or "").strip()
+        }
+        eligible_document_ids.update(
+            str(value or "").strip()
+            for value in (additional_document_ids or ())
+            if str(value or "").strip()
+        )
+        observations = await self.latest_serving_observations(
+            document_ids=sorted(eligible_document_ids) or None
+        )
+        overrides = await self.serving_action_overrides()
         return self.write_snapshot(
             observations=observations,
             last_success_at=last_success_at,
-            eligible_count=int(coverage.get("eligible") or len(observations)),
+            eligible_count=(
+                len(eligible_document_ids)
+                if eligible_document_ids
+                else int(coverage.get("eligible") or len(observations))
+            ),
             mode=str(snapshot.get("mode") or "protect"),
+            eligible_document_ids=sorted(eligible_document_ids) or None,
+            release_id=str(snapshot.get("release_id") or "") or None,
+            manifest_sha256=str(snapshot.get("manifest_sha256") or "") or None,
+            serving_action_overrides=overrides,
         )
 
     @staticmethod
@@ -495,11 +621,16 @@ class LegalValidityRegistry:
         action: str,
         reason: str,
         actor_user_id: str,
+        serving_confirmation: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         status_by_action = {
             "confirm_mapping": "confirmed",
             "reject_match": "rejected_match",
             "request_recheck": "recheck_requested",
+            # Legacy callers without a SQL receipt only request a future
+            # serving decision. The active API supplies confirmation below.
+            "mark_historical": "historical_release_pending",
+            "quarantine": "quarantine_release_pending",
         }
         if action not in status_by_action:
             raise ValueError("invalid_validity_decision")
@@ -522,6 +653,20 @@ class LegalValidityRegistry:
             raise LookupError("legal_validity_event_not_found")
         event = events[0]
         event_record_id = event.get("id") or event_ref
+        confirmed_action = None
+        if serving_confirmation is not None:
+            from api.legal_document_serving_state import document_id
+            confirmed_action = {"mark_historical": "historical_only", "quarantine": "block"}.get(action)
+            if (
+                confirmed_action is None
+                or serving_confirmation.get("serving_action") != confirmed_action
+                or serving_confirmation.get("search_included") is not False
+                or document_id(serving_confirmation.get("document_id")) != document_id(event.get("document_id"))
+            ):
+                raise ValueError("invalid_serving_confirmation")
+            # Reuse the existing confirmed status/schema. It means the SQL
+            # serving choice was applied, not a new assertion of legal expiry.
+            status_by_action[action] = "confirmed"
         replay_key = hashlib.sha256(
             f"{event_id}|{action}|{clean_reason}|{actor_user_id}".encode("utf-8")
         ).hexdigest()
@@ -530,7 +675,12 @@ class LegalValidityRegistry:
             {"replay_key": replay_key},
         )
         if replay:
-            if action in {"confirm_mapping", "reject_match"}:
+            if confirmed_action:
+                await self.update("legal_validity_event", event_record_id, {
+                    "review_status": "confirmed", "serving_action": confirmed_action,
+                    "updated_at": datetime.now(timezone.utc),
+                })
+            if action in {"confirm_mapping", "reject_match", "mark_historical", "quarantine"}:
                 await self.refresh_snapshot_projection()
             return self._decision_projection(replay[0])
         now = datetime.now(timezone.utc)
@@ -555,9 +705,16 @@ class LegalValidityRegistry:
         await self.update(
             "legal_validity_event",
             event_record_id,
-            {"review_status": new_status, "updated_at": now},
+            {"review_status": new_status, "updated_at": now,
+             **({"serving_action": confirmed_action} if confirmed_action else {})},
         )
-        if action in {"confirm_mapping", "reject_match"}:
+        if action == "confirm_mapping" and event.get("current_observation"):
+            await self.update(
+                "legal_validity_observation",
+                event["current_observation"],
+                {"verified_by": actor_user_id, "verified_at": now},
+            )
+        if action in {"confirm_mapping", "reject_match", "mark_historical", "quarantine"}:
             await self.refresh_snapshot_projection()
         return self._decision_projection(decision)
 
@@ -685,11 +842,15 @@ class LegalValidityRegistry:
         review_status: str | None = None,
         severity: str | None = None,
         scope: str | None = None,
+        expired_within_days: int | None = None,
+        document_ids: Iterable[str] | None = None,
+        latest_per_document: bool = False,
         limit: int = 50,
         cursor: str | None = None,
     ) -> dict[str, Any]:
         predicates: list[str] = []
-        params: dict[str, Any] = {"limit": min(max(int(limit), 1), 100) + 1}
+        page_limit = min(max(int(limit), 1), 100)
+        params: dict[str, Any] = {"limit": page_limit + 1}
         if review_status:
             predicates.append("review_status = $review_status")
             params["review_status"] = review_status
@@ -699,6 +860,29 @@ class LegalValidityRegistry:
         if scope:
             predicates.append("scope = $scope")
             params["scope"] = scope
+        if expired_within_days is not None:
+            bounded_days = min(max(int(expired_within_days), 1), 365)
+            expired_to = vietnam_legal_date()
+            expired_from = expired_to - timedelta(days=bounded_days)
+            predicates.extend(
+                (
+                    "normalized_status IN ['expired', 'expired_partial']",
+                    "effective_to >= $expired_from",
+                    "effective_to <= $expired_to",
+                )
+            )
+            params["expired_from"] = expired_from.isoformat()
+            params["expired_to"] = expired_to.isoformat()
+        normalized_document_ids = sorted(
+            {
+                str(value or "").strip()
+                for value in (document_ids or ())
+                if str(value or "").strip()
+            }
+        )
+        if document_ids is not None:
+            predicates.append("document_id IN $document_ids")
+            params["document_ids"] = normalized_document_ids or ["__none__"]
         if cursor:
             parsed_cursor = _as_datetime(cursor)
             if parsed_cursor is None:
@@ -706,13 +890,28 @@ class LegalValidityRegistry:
             predicates.append("created_at < $cursor")
             params["cursor"] = parsed_cursor
         where = f" WHERE {' AND '.join(predicates)}" if predicates else ""
+        if latest_per_document:
+            # The canonical worklist normally contains only a handful of
+            # current adverse documents. Read enough matching history to
+            # collapse repeated observations before applying the UI page size.
+            params["limit"] = min(max(page_limit * 20, 200), 2000) + 1
         rows = await self.query(
             f"SELECT * FROM legal_validity_event{where} ORDER BY created_at DESC LIMIT $limit;",
             params,
         )
-        page_limit = params["limit"] - 1
-        has_more = len(rows or []) > page_limit
-        page = list(rows or [])[:page_limit]
+        candidates = list(rows or [])
+        if latest_per_document:
+            seen_documents: set[str] = set()
+            unique_rows: list[Mapping[str, Any]] = []
+            for row in candidates:
+                document_id = _record_identifier(row.get("document_id"))
+                if not document_id or document_id in seen_documents:
+                    continue
+                seen_documents.add(document_id)
+                unique_rows.append(row)
+            candidates = unique_rows
+        has_more = len(candidates) > page_limit
+        page = candidates[:page_limit]
         next_cursor = None
         if has_more and page:
             created_at = page[-1].get("created_at")
@@ -795,7 +994,7 @@ def _snapshot_observation(
             issuing_agency=None,
             issued_date=None,
             source_url=str(entry.get("source_url") or ""),
-            source_kind="vbpl",
+            source_kind=str(entry.get("source_kind") or "vbpl"),
             raw_status=str(entry.get("normalized_status") or "") or None,
             normalized_status=NormalizedValidityStatus(
                 str(entry.get("normalized_status") or "unknown")
@@ -830,6 +1029,8 @@ def _public_validity_metadata(
         "status": status,
         "serving_action": action,
         "verified_at": (entry or {}).get("verified_at"),
+        "verified_by": (entry or {}).get("verified_by"),
+        "source_kind": (entry or {}).get("source_kind"),
         "source_url": (entry or {}).get("source_url"),
         "effective_from": (entry or {}).get("effective_from"),
         "effective_to": (entry or {}).get("effective_to"),
@@ -905,6 +1106,23 @@ def project_validity_for_row(
     if effective_mode not in {"observe", "protect", "strict"}:
         effective_mode = "protect"
     legal_as_of = as_of or vietnam_legal_date()
+    stored_status = str(
+        row.get("stored_status") or row.get("document_status") or row.get("status") or ""
+    ).strip().casefold()
+    if stored_status == "blocked":
+        # Admin search exclusion is independent from the effectivity snapshot.
+        # An older snapshot must never project an excluded document as current.
+        return _public_validity_metadata(
+            entry=None,
+            status="blocked",
+            action="block_document",
+            warning_code=None,
+            reason_code="admin_excluded_from_search",
+            would_block=True,
+            current_answer_eligible=False,
+            historical_lookup_allowed=False,
+            display_label="Đã loại khỏi tìm kiếm hiện hành",
+        )
     documents = (
         snapshot.get("documents")
         if isinstance(snapshot, Mapping)
@@ -919,9 +1137,39 @@ def project_validity_for_row(
     )
     law_number = str(row.get("law_number") or "").strip()
     document_id = str(row.get("document_id") or row.get("doc_id") or "").strip()
-    if not law_number and document_id:
-        law_number = str(document_ids.get(document_id) or "")
-    entry = documents.get(law_number) if law_number else None
+    # Exact document-id mapping wins over the legacy law-number lookup.  This
+    # prevents a same-number Law/Resolution pair (or duplicate import) from
+    # inheriting the other instrument's validity status.
+    entry_key = str(document_ids.get(document_id) or "") if document_id else ""
+    if document_id and not entry_key:
+        # Older snapshots did not yet materialize the ``document_ids`` index,
+        # but their entries already carried canonical document_id values.
+        # Recover by exact identity only; never transfer validity by number.
+        entry_key = next(
+            (
+                str(key)
+                for key, candidate in documents.items()
+                if isinstance(candidate, Mapping)
+                and str(candidate.get("document_id") or "") == document_id
+            ),
+            "",
+        )
+    # Rows with a canonical document ID never inherit a same-number record.
+    # Law-number lookup remains read-only compatibility for legacy rows that
+    # genuinely have no identity mapping.
+    entry = (
+        documents.get(entry_key)
+        if document_id
+        else documents.get(law_number) if law_number else None
+    )
+    if (
+        isinstance(entry, Mapping)
+        and entry.get("source_kind") == "admin_confirmed_stored_metadata"
+        and (not document_id or str(entry.get("document_id") or "") != document_id)
+    ):
+        # A manual record confirmation must not transfer to another document
+        # merely because its number matches.
+        entry = None
 
     if not isinstance(entry, Mapping):
         warning = (
@@ -997,7 +1245,15 @@ def apply_validity_overlay(
     as_of: date | None = None,
     mode: str | None = None,
 ) -> dict[str, Any]:
-    """Return a copied search/batch payload with deterministic validity guards."""
+    """Return a copied search/batch payload with deterministic validity guards.
+
+    ``partial_scope_unresolved`` is deliberately a warning/pass-through
+    condition.  A snapshot that says a document changed in part but does not
+    identify the affected provisions cannot prove that the matched provision
+    is invalid, so it must not remove the retrieval hit.  Fully adverse
+    statuses (expired, replaced, repealed and suspended) and explicitly
+    matched partial provisions remain hard blocks.
+    """
 
     result = deepcopy(dict(payload))
     effective_mode = str(

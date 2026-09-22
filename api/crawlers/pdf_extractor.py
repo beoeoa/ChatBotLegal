@@ -43,11 +43,32 @@ def _text_fingerprint(text: str) -> str | None:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest() if normalized else None
 
 
+def _native_text_is_usable(text: str) -> bool:
+    """Reject an empty/near-empty page layer without judging the whole PDF."""
+
+    normalized = _normalize_pdf_text(text)
+    if len(normalized) < 20:
+        return False
+    meaningful = sum(character.isalnum() for character in normalized)
+    return meaningful >= 10 and meaningful / max(1, len(normalized)) >= 0.35
+
+
+def _join_page_texts(page_texts: dict[int, str], *, add_page_markers: bool) -> str:
+    if add_page_markers:
+        return "\n\n".join(
+            f"--- Trang {page} ---\n{page_texts[page]}"
+            for page in sorted(page_texts)
+            if page_texts[page]
+        ).strip()
+    return _normalize_pdf_text("\n\n".join(page_texts[page] for page in sorted(page_texts)))
+
+
 def extract_pdf_bytes_for_review(
     pdf_bytes: bytes,
     *,
     filename: str = "document.pdf",
     max_pages: int | None = None,
+    perform_ocr: bool = True,
 ) -> dict[str, Any]:
     """Extract a PDF byte stream and optionally OCR a probable scan.
 
@@ -78,6 +99,13 @@ def extract_pdf_bytes_for_review(
         "extraction_blocks": [],
         "layout_status": "unavailable",
         "layout_reason": "PDF_LAYOUT_NOT_EXTRACTED",
+        "native_text_pages": [],
+        "ocr_requested_pages": [],
+        "ocr_pages": [],
+        "page_extractors": {},
+        "coverage_percent": 0,
+        "table_count": 0,
+        "table_extracted_count": 0,
     }
     if not pdf_bytes:
         result["reason"] = "PDF rỗng."
@@ -103,26 +131,54 @@ def extract_pdf_bytes_for_review(
             document.load_page(index).get_text("text")
             for index in range(pages_to_read)
         ]
+        normalized_pages = [_normalize_pdf_text(part) for part in parts]
+        native_text_pages = [
+            index + 1
+            for index, part in enumerate(normalized_pages)
+            if _native_text_is_usable(part)
+        ]
+        weak_pages = [
+            index + 1
+            for index in range(pages_to_read)
+            if index + 1 not in native_text_pages
+        ]
+        result["native_text_pages"] = native_text_pages
+        result["ocr_requested_pages"] = weak_pages
+        result["pages_without_text"] = weak_pages
+        # Table geometry is reported independently from text completeness.
+        # Scanned tables may not be detected; the original PDF remains necessary.
+        table_count = 0
+        native_table_pages: list[int] = []
+        for page_number in native_text_pages:
+            try:
+                page_tables = document.load_page(page_number - 1).find_tables().tables
+                table_count += len(page_tables)
+                if page_tables:
+                    native_table_pages.append(page_number)
+            except Exception:
+                continue
+        result["table_count"] = table_count
         document.close()
     except Exception as exc:
         logger.warning("PDF extraction failure for {}: {}", filename, exc)
         result["reason"] = f"Không thể đọc PDF: {exc.__class__.__name__}."
         return result
 
-    text = _normalize_pdf_text("\n\n".join(parts))
-    normalized_pages = [_normalize_pdf_text(part) for part in parts]
+    native_page_texts = {
+        page: normalized_pages[page - 1]
+        for page in native_text_pages
+    }
+    text = _join_page_texts(native_page_texts, add_page_markers=False)
     extraction_blocks = build_pdf_text_blocks(
         normalized_pages,
         source_asset_sha256=str(result["file_fingerprint"]),
         extractor="pymupdf",
         extractor_version=str(getattr(fitz, "VersionBind", "unknown")),
     )
-    average_chars = len(text) / max(1, result["page_count"])
-    # A real text layer can be short (for example a one-page decision title),
-    # but is still text-based. OCR is reserved for empty or nearly empty layers.
-    if text and average_chars >= 20 and result["complete"]:
+    if not weak_pages:
+        complete = pages_to_read == total_pages
         result.update({
-            "status": "ok",
+            "status": "ok" if complete else "review_required",
             "text": text,
             "preview": text[:2000],
             "text_fingerprint": _text_fingerprint(text),
@@ -131,56 +187,141 @@ def extract_pdf_bytes_for_review(
             "ocr_status": "not_required",
             "title": _extract_title(text),
             "extraction_blocks": extraction_blocks,
+            "complete": complete,
+            "failed_pages": [],
+            "page_extractors": {page: "pymupdf" for page in native_text_pages},
+            "coverage_percent": 100 if complete else round(pages_to_read / max(1, total_pages) * 100),
             "layout_status": "available" if extraction_blocks else "fallback",
             "layout_reason": "" if extraction_blocks else "PDF_TEXT_BLOCKS_UNAVAILABLE",
+            "reason": "" if complete else "PDF_PAGE_LIMIT_REACHED",
         })
+        # Native tables and columns keep PyMuPDF's physical blocks. Do not OCR
+        # an already-readable page or load a second engine just for review.
+        if native_table_pages:
+            result["layout_reason"] = "PDF_NATIVE_TABLE_GEOMETRY"
         return result
 
     result.update({
-        "pdf_kind": "scan",
-        "ocr_status": "pending",
-        "reason": "PDF có rất ít hoặc không có lớp văn bản; đã chuyển sang OCR tùy chọn.",
+        "pdf_kind": "hybrid" if native_text_pages else "scan",
+        "ocr_status": "pending" if perform_ocr else "queued",
+        "reason": (
+            "Một số trang thiếu lớp chữ; hệ thống chỉ nhận dạng các trang đó."
+            if perform_ocr
+            else "Đã đọc nhanh lớp chữ. Các trang ảnh sẽ được OCR trong tác vụ nền sau khi gửi duyệt."
+        ),
     })
+    if not perform_ocr:
+        native_text = _join_page_texts(native_page_texts, add_page_markers=True)
+        result.update({
+            "status": "review_required" if native_text else "processing",
+            "text": native_text,
+            "preview": native_text[:2000],
+            "text_fingerprint": _text_fingerprint(native_text),
+            "title": _extract_title(native_text),
+            "processed_pages": len(native_text_pages),
+            "complete": False,
+            "failed_pages": [],
+            "pages_without_text": weak_pages,
+            "page_extractors": {page: "pymupdf" for page in native_text_pages},
+            "coverage_percent": round(len(native_text_pages) / max(1, total_pages) * 100),
+            "extraction_blocks": extraction_blocks,
+            "layout_status": "available" if extraction_blocks else "fallback",
+            "layout_reason": "" if extraction_blocks else "PDF_TEXT_BLOCKS_UNAVAILABLE",
+            "deferred_ocr": True,
+        })
+        return result
     try:
-        from api.crawlers.ocr_extractor import extract_ocr_from_pdf_bytes
+        from api.crawlers.ocr_extractor import extract_ocr_pages_with_fallback
 
-        ocr = extract_ocr_from_pdf_bytes(pdf_bytes, max_pages=max_pages)
+        ocr = extract_ocr_pages_with_fallback(pdf_bytes, weak_pages)
     except Exception as exc:  # pragma: no cover - defensive adapter boundary
         ocr = {
-            "status": "failed", "text": "", "page_count": 0,
-            "ocr_confidence": None, "language": "vie+eng",
+            "status": "failed",
+            "page_texts": {},
+            "ocr_confidence": None,
+            "language": "vie",
             "reason": f"Không thể gọi OCR: {exc.__class__.__name__}.",
+            "failed_pages": weak_pages,
+            "extraction_blocks": [],
+            "page_extractors": {},
         }
-    ocr_text = _normalize_pdf_text(str(ocr.get("text") or "")) if ocr.get("status") == "ok" else ""
+    ocr_page_texts = {
+        int(page): _normalize_pdf_text(str(value))
+        for page, value in dict(ocr.get("page_texts") or {}).items()
+        if _normalize_pdf_text(str(value))
+    }
+    merged_page_texts = {**native_page_texts, **ocr_page_texts}
+    merged_text = _join_page_texts(merged_page_texts, add_page_markers=True)
+    failed_pages = [page for page in weak_pages if page not in ocr_page_texts]
+    covered_pages = sorted(merged_page_texts)
+    complete = (
+        pages_to_read == total_pages
+        and len(covered_pages) == pages_to_read
+        and not failed_pages
+    )
+    page_extractors = {
+        **{page: "pymupdf" for page in native_text_pages},
+        **{
+            int(page): str(engine)
+            for page, engine in dict(ocr.get("page_extractors") or {}).items()
+        },
+    }
+    merged_blocks = extraction_blocks + [
+        dict(block)
+        for block in (ocr.get("extraction_blocks") or [])
+        if isinstance(block, dict)
+    ]
+    ocr_table_count = int(ocr.get("table_count") or 0)
     result.update({
         "ocr_status": str(ocr.get("status") or "failed"),
         "ocr_confidence": ocr.get("ocr_confidence"),
-        "language": ocr.get("language") or "vie+eng",
-        "page_count": int(ocr.get("page_count") or result["page_count"]),
-        "processed_pages": int(ocr.get("processed_pages") or 0),
-        "total_pages": int(ocr.get("total_pages") or result["total_pages"]),
-        "failed_pages": list(ocr.get("failed_pages") or []),
-        "complete": bool(ocr.get("complete")),
-        "truncated": bool(ocr.get("truncated")),
-        "extractor_used": "pymupdf+ocr" if ocr_text else "pymupdf",
-        "reason": str(ocr.get("reason") or result["reason"]),
-        "extraction_blocks": list(ocr.get("extraction_blocks") or []),
+        "language": ocr.get("language") or "vie",
+        "page_count": pages_to_read,
+        "processed_pages": pages_to_read,
+        "total_pages": total_pages,
+        "failed_pages": failed_pages,
+        "complete": complete,
+        "truncated": pages_to_read < total_pages,
+        "extractor_used": (
+            "pymupdf+" + str(ocr.get("extractor_used") or "ocr")
+            if ocr_page_texts
+            else "pymupdf"
+        ),
+        "reason": "" if complete else str(ocr.get("reason") or result["reason"]),
+        "extraction_blocks": merged_blocks,
         "layout_status": str(ocr.get("layout_status") or "fallback"),
         "layout_reason": str(
             ocr.get("layout_reason") or "OCR_LAYOUT_DATA_MISSING"
         ),
+        "ocr_pages": sorted(ocr_page_texts),
+        "pages_without_text": failed_pages,
+        "page_extractors": page_extractors,
+        "coverage_percent": round(len(covered_pages) / max(1, total_pages) * 100),
+        "table_count": max(table_count, ocr_table_count),
+        "table_extracted_count": int(ocr.get("table_extracted_count") or 0),
     })
-    if ocr_text:
+    if merged_text:
         result.update({
-            "status": "ok",
-            "text": ocr_text,
-            "preview": ocr_text[:2000],
-            "text_fingerprint": _text_fingerprint(ocr_text),
-            "title": _extract_title(ocr_text),
+            "status": "ok" if complete else "review_required",
+            "text": merged_text,
+            "preview": merged_text[:2000],
+            "text_fingerprint": _text_fingerprint(merged_text),
+            "title": _extract_title(merged_text),
         })
     else:
         # Do not return a fabricated placeholder or adapter error as candidate text.
-        result["status"] = "review_required"
+        result.update({
+            "status": "review_required",
+            "text": "",
+            "preview": "",
+            "text_fingerprint": None,
+            "title": None,
+            "complete": False,
+            "processed_pages": pages_to_read,
+            "truncated": pages_to_read < total_pages,
+            "layout_status": "unavailable",
+            "reason": f"{result['reason']} Cần đối chiếu các trang còn thiếu với PDF gốc.",
+        })
     return result
 
 
@@ -190,7 +331,11 @@ async def extract_pdf(
     timeout_ms: int = 30000,
     max_pages: int | None = None,
 ) -> dict[str, Any]:
-    """Download an allowed PDF and return the same review extraction schema."""
+    """Download an allowed PDF asset and extract it for review.
+
+    This is a binary asset transfer, not an HTML crawl. HTML pages that
+    discover the asset are rendered by Crawl4AI before this helper is called.
+    """
     if not url.startswith(("http://", "https://")):
         return {"status": "error", "text": "", "page_count": 0, "reason": "URL PDF không hợp lệ."}
     try:

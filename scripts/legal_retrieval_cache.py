@@ -44,18 +44,22 @@ def exact_rows_cache_key(
     domain: str | None,
     legal_as_of: str,
     retrieval_tier: str,
+    temporal_scope: str = "current",
+    corpus_revision: str = "",
 ) -> str:
     """Return an opaque key for one deterministic metadata lookup."""
 
     identity = "\0".join(
         (
-            "exact-rows-v1",
+            "exact-rows-v2",
             ",".join(sorted(str(value).strip().casefold() for value in law_numbers)),
             ",".join(sorted(str(value).strip().casefold() for value in article_numbers)),
             str(clause_number or "").strip().casefold(),
             str(domain or "").strip().casefold(),
             str(legal_as_of),
             str(retrieval_tier),
+            str(temporal_scope),
+            str(corpus_revision),
         )
     )
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()

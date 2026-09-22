@@ -7,12 +7,9 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import {
   AlertCircle,
   ArrowRight,
-  BookOpen,
-  CheckCircle,
   ChevronDown,
   CircleHelp,
   Clock3,
-  ExternalLink,
   FileCheck2,
   FileText,
   Landmark,
@@ -24,17 +21,19 @@ import {
   WalletCards,
 } from 'lucide-react'
 import { useState } from 'react'
-import Link from 'next/link'
-import { useRouter } from 'next/navigation'
+import { useLegalPreview } from '@/components/legal/LegalPreviewProvider'
 import type React from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { remarkLegalBreaks } from '@/lib/utils/remark-legal-breaks'
 import { convertReferencesToMarkdownLinks } from '@/lib/utils/source-references'
+import { buildOfficialArticleUrl, enrichMarkdownWithArticleLinks, formatLegalCitationLabel } from '@/lib/utils/legal-article-parser'
+import { answerAlreadyHasSalutation } from '@/lib/utils/chat-address'
 import { useModalManager } from '@/lib/hooks/use-modal-manager'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import { toast } from 'sonner'
+import { formatApiError } from '@/lib/utils/error-handler'
 import type { AskResponse, RagTrace } from '@/lib/types/search'
-import { FAQAccordion } from './FAQAccordion'
 import { LegalAnswerCard } from './LegalAnswerCard'
 
 type ProcedureDetail = NonNullable<AskResponse['procedure_detail']>
@@ -44,11 +43,62 @@ type DisplayForm = ProcedureForm | RecommendedForm
 type LegalCitation = NonNullable<AskResponse['citations']>[number]
 type LegalAnswerSection = NonNullable<AskResponse['answer_sections']>[number]
 
-export function sanitizeDisplayAnswer(content: string, citations?: LegalCitation[]): string {
-  // Keep answer clean for citizens/officers: no internal ids or technical bracket citations.
-  // Backend still retains structured citations/rag_trace for audit.
+export function sanitizeDisplayAnswer(content: string, citations?: LegalCitation[], compact = false): string {
+  // Resolve request-local evidence markers before removing any technical syntax.
+  // This preserves the exact source attached by the backend citation validator.
   let text = content || ''
 
+  const citationUrl = (citation: LegalCitation): string => {
+    const candidate = String(citation.viewer_url || citation.internal_url || citation.source_url || '').trim()
+    if (compact && citation.article_number !== '0' && !citation.viewer_url && !citation.internal_url && /^https?:\/\//i.test(candidate)) {
+      return buildOfficialArticleUrl(candidate, String(citation.article_number || '').trim())
+    }
+    return /^(?:https?:\/\/|\/)/i.test(candidate) ? candidate : ''
+  }
+
+  const markdownCitation = (citation: LegalCitation): string => {
+    const fullLabel = formatLegalCitationLabel(citation).replace(/[\[\]]/g, '')
+    const compactUnits = [
+      citation.point_number ? `điểm ${citation.point_number}` : '',
+      citation.clause_number ? `khoản ${citation.clause_number}` : '',
+      citation.article_number && citation.article_number !== '0' ? `Điều ${citation.article_number}` : '',
+      citation.law_number || '',
+    ].filter(Boolean).join(', ')
+    const label = compact && compactUnits ? compactUnits : fullLabel
+    const url = citationUrl(citation).replace(/[<>]/g, '')
+    return url ? `[${label}](<${url}>)` : label
+  }
+
+  const citationsByEvidenceId = new Map<string, LegalCitation>()
+  for (const citation of citations || []) {
+    for (const evidenceId of citation.evidence_ids || []) {
+      const normalized = String(evidenceId || '').trim().toUpperCase()
+      if (/^E\d{1,3}$/.test(normalized)) citationsByEvidenceId.set(normalized, citation)
+    }
+  }
+  // Protect code and explicit links before resolving evidence markers. The
+  // legacy cleaner below must not rewrite the direct backend answer.
+  text = text.split(/(```[\s\S]*?```|`[^`\n]+`|\[[^\]\n]+\]\((?:<[^>]+>|[^\s]+)\))/g).map((part, index) => index % 2 ? part : part.replace(/^#\s+(.+)$/gm, '## $1').replace(/(?:\[[ \t]*E\d{1,3}[ \t]*\])(?:[ \t]*[,;]?[ \t]*\[[ \t]*E\d{1,3}[ \t]*\])*/gi, (full, offset: number, source: string) => {
+    const rendered = [...String(full).matchAll(/\[\s*(E\d{1,3})\s*\]/gi)].map((match) => {
+      const evidenceId = String(match[1] || '').toUpperCase()
+      const citation = citationsByEvidenceId.get(evidenceId)
+      // Keep the defect local and readable. Internal request-scoped IDs such
+      // as [E4] are never useful to citizens, and guessing another source
+      // would be worse than stating that this one link could not be resolved.
+      return citation ? markdownCitation(citation) : 'nguồn chưa liên kết'
+    })
+    const uniqueRendered = [...new Set(rendered)]
+    const citationText = uniqueRendered.join(', ')
+    const before = String(source || '').slice(Math.max(0, Number(offset) - 80), Number(offset))
+    const alreadyConnected = /(?:theo(?:\s+quy định)?(?:\s+tại)?|căn cứ(?:\s+tại)?|quy định(?:\s+tại)?|được quy định(?:\s+tại)?|sửa đổi(?:,\s*bổ sung)?\s+bởi|tại|nguồn\s*:?|\()\s*$/i.test(before)
+    return alreadyConnected ? citationText : `(${citationText})`
+  })).join('')
+  if (citations?.some(citation => citation.evidence_ids?.length) || /\[\s*E\d{1,3}\s*\]/i.test(content)) {
+    return text.trim()
+  }
+
+  const protectedParts = text.split(/(```[\s\S]*?```|`[^`\n]+`|\[[^\]\n]+\]\((?:<[^>]+>|[^\s]+)\))/g)
+  const cleanLegacyProse = (text: string): string => {
   const toNaturalCitation = (raw: string): string => {
     const body = (raw || '').trim()
     if (!body) return ''
@@ -81,7 +131,7 @@ export function sanitizeDisplayAnswer(content: string, citations?: LegalCitation
     } else {
       head = cleaned
     }
-    if (art) return `${head}, Điều ${art}`
+    if (art) return `Điều ${art} ${head}`.trim()
     return head
   }
 
@@ -91,18 +141,21 @@ export function sanitizeDisplayAnswer(content: string, citations?: LegalCitation
     const natural = toNaturalCitation(cleanBody)
     if (!natural || /^\d+$/.test(natural.trim())) return ''
 
-    return `**${natural}**`
+    return natural
   })
   // bare legal:123
   text = text.replace(/\blegal\s*:\s*\d+\b/gi, '')
   // bracket law citations like [123/2015/NĐ-CP - Điều 29]
-  text = text.replace(/\[([^\]]{3,120})\]/g, (full, body: string) => {
+  text = text.replace(/\[([^\]]{3,120})\]/g, (full, body: string, offset: number, source: string) => {
     const raw = String(body || '')
+    // Preserve markdown links generated above and links already present in
+    // the model answer. Their label is followed immediately by "(".
+    if (String(source || '').slice(Number(offset) + full.length).startsWith('(')) return full
     if (/^https?:\/\//i.test(raw) || /^(source|note|source_insight)\s*:/i.test(raw)) return full
     if (/\d{1,4}\/\d{4}\//.test(raw) || /(?:điều|dieu)\s*\d+/i.test(raw)) {
       const natural = toNaturalCitation(raw)
       if (natural) {
-        return `**${natural}**`
+        return natural
       }
       return ''
     }
@@ -114,7 +167,7 @@ export function sanitizeDisplayAnswer(content: string, citations?: LegalCitation
     (_m, law: string, art: string) => {
       const prefix = /\/qh/i.test(law) ? 'Luật ' : /\/n[đd]-cp/i.test(law) ? 'Nghị định ' : /\/tt-/i.test(law) ? 'Thông tư ' : ''
       const natural = `${prefix}${law}, Điều ${art}`.replace(/\s+/g, ' ').trim()
-      return `**${natural}**`
+      return natural
     }
   )
   text = text.replace(
@@ -122,12 +175,15 @@ export function sanitizeDisplayAnswer(content: string, citations?: LegalCitation
     (_m, law: string, art: string) => {
       const prefix = /\/qh/i.test(law) ? 'Luật ' : /\/n[đd]-cp/i.test(law) ? 'Nghị định ' : /\/tt-/i.test(law) ? 'Thông tư ' : ''
       const natural = `${prefix}${law}, Điều ${art}`.replace(/\s+/g, ' ').trim()
-      return `**${natural}**`
+      return natural
     }
   )
   // Drop residual long source appendix headers if model still emits them
   text = text.replace(/^##\s*Căn cứ\s*\/\s*Nguồn[^\n]*\n?/gim, '')
   text = text.replace(/^###\s*Liên kết nguồn\s*\n?/gim, '')
+  // The answer lives inside the chat page hierarchy, so a model-emitted H1
+  // is visually demoted without rewriting or hiding any legal content.
+  text = text.replace(/^#\s+(.+)$/gm, '## $1')
 
   // Auto-map any residual raw law numbers from citations to markdown links if not already wrapped
   if (citations && citations.length > 0) {
@@ -142,7 +198,7 @@ export function sanitizeDisplayAnswer(content: string, citations?: LegalCitation
           if (before.includes('#ref-') || before.includes('](') || after.startsWith(')')) {
             return match
           }
-          return `**${match}**`
+          return match
         })
       }
     }
@@ -155,69 +211,33 @@ export function sanitizeDisplayAnswer(content: string, citations?: LegalCitation
     .replace(/\n{3,}/g, '\n\n')
     .replace(/[ ]{2,}/g, ' ')
     .replace(/\(\s*\)/g, '')
-    .trim()
+  }
+  return protectedParts.map((part, index) => index % 2 ? part : cleanLegacyProse(part)).join('').trim()
+}
+
+function traceDomainLabel(value?: string | null): string {
+  const normalized = String(value || '').trim().toLowerCase()
+  const labels: Record<string, string> = {
+    ho_tich: 'Hộ tịch',
+    ho_tich_chung_thuc: 'Hộ tịch - Chứng thực',
+    dat_dai: 'Đất đai',
+    dat_dai_xay_dung: 'Đất đai - Xây dựng',
+    an_sinh: 'An sinh xã hội',
+    an_sinh_y_te_giao_duc: 'An sinh - Y tế - Giáo dục',
+    cu_tru: 'Cư trú',
+    khieu_nai: 'Khiếu nại - Tố cáo',
+  }
+  return labels[normalized] || 'Lĩnh vực chung'
+}
+
+function traceScoreLabel(value: number): string {
+  const percent = value <= 1 ? value * 100 : value
+  return `${Math.max(0, Math.min(100, Math.round(percent)))}%`
 }
 
 function isExternalUrl(value?: string | null): boolean {
   return Boolean(value && /^https?:\/\//i.test(value))
 }
-
-function getAuthToken(): string {
-  if (typeof window === 'undefined') return ''
-  try {
-    const raw = localStorage.getItem('auth-storage')
-    if (!raw) return ''
-    const parsed = JSON.parse(raw)
-    return String(parsed?.state?.token || '')
-  } catch {
-    return ''
-  }
-}
-
-async function downloadLegalPdf(docId: string, article?: string, fileBase?: string) {
-  const token = getAuthToken()
-  if (!token) {
-    toast.error('Bạn cần đăng nhập để tải văn bản pháp lý.')
-    return
-  }
-  const qs = article ? `?article=${encodeURIComponent(article)}` : ''
-  const relativeEndpoint = `/api/legal/docs/${encodeURIComponent(docId)}/download.pdf${qs}`
-  const headers: HeadersInit = { Authorization: `Bearer ${token}` }
-  let response = await fetch(relativeEndpoint, { headers })
-  if (!response.ok) {
-    try {
-      const { getApiUrl } = await import('@/lib/config')
-      const baseUrl = (await getApiUrl()) || ''
-      if (baseUrl) {
-        response = await fetch(`${baseUrl.replace(/\/$/, '')}${relativeEndpoint}`, { headers })
-      }
-    } catch {
-      // ignore fallback errors
-    }
-  }
-  if (!response.ok) {
-    let message = 'Không tải được PDF văn bản nội bộ.'
-    try {
-      const payload = await response.json()
-      if (payload?.detail) message = String(payload.detail)
-    } catch {
-      // ignore
-    }
-    toast.error(message)
-    return
-  }
-  const blob = await response.blob()
-  const objectUrl = window.URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = objectUrl
-  a.download = `${fileBase || docId}.pdf`
-  document.body.appendChild(a)
-  a.click()
-  a.remove()
-  window.URL.revokeObjectURL(objectUrl)
-  toast.success('Đã tải PDF văn bản.')
-}
-
 
 function makeSafeFileName(value: string, fallback = 'bieu-mau'): string {
   const cleaned = (value || fallback)
@@ -329,6 +349,7 @@ interface StreamingResponseProps {
   answerRoute?: AskResponse['answer_route'] | null
   verificationLabel?: string | null
   historicalLabel?: string | null
+  salutation?: string | null
   role?: 'citizen' | 'officer' | 'admin'
   showRagTrace?: boolean
   faqs?: Array<{ id: string; question: string; answer: string; steps?: string[]; form_ids?: string[]; domain?: string; ward_scope?: string | null }> | null
@@ -345,29 +366,24 @@ export function StreamingResponse({
   formsUnavailable = false,
   citations,
   answerSections,
-  groundingStatus,
-  answerCompleteness,
-  answerMode,
   answerStatus,
-  fallbackTier,
   evidenceCount,
-  coverageWarning,
-  blockedReason,
   presentationVersion,
   presentationSections,
   answerRoute,
   verificationLabel,
   historicalLabel,
+  salutation,
   role = 'citizen',
   showRagTrace = false,
-  faqs,
 }: StreamingResponseProps) {
   const [strategyOpen, setStrategyOpen] = useState(false)
   const [answersOpen, setAnswersOpen] = useState(false)
   const [traceOpen, setTraceOpen] = useState(false)
+  const [downloadingForm, setDownloadingForm] = useState<string | null>(null)
   const { openModal } = useModalManager()
   const { t } = useTranslation()
-  const router = useRouter()
+  const openLegalPreview = useLegalPreview()
 
   const handleDownloadForm = async (
     procId: string,
@@ -376,16 +392,21 @@ export function StreamingResponse({
     downloadUrl?: string | null,
     fileType?: string | null,
     canDownload: boolean = true,
+    formId?: string,
   ) => {
     if (!canDownload) {
       toast.error('Biểu mẫu này chưa có file chính thức đã duyệt')
       return
     }
 
+    setDownloadingForm(formId || formName)
     try {
+      if (formId && procId !== 'unknown' && /^(pdf|docx?|xlsx?)$/i.test(fileType || '')) {
+        downloadUrl = `/api/procedures/forms-catalog/canonical/${encodeURIComponent(formId)}/download?procedure_id=${encodeURIComponent(procId)}`
+      }
       if (isExternalUrl(downloadUrl)) {
         window.open(downloadUrl as string, '_blank', 'noopener,noreferrer')
-        toast.success('Đã mở nguồn tải biểu mẫu trong tab mới.')
+        toast.info('Đã mở trang nguồn. Chưa xác nhận tải được tệp biểu mẫu.')
         return
       }
 
@@ -394,16 +415,8 @@ export function StreamingResponse({
         ? (downloadUrl.startsWith('/api/') ? downloadUrl : `/api${downloadUrl}`)
         : `/api/procedures/${procId}/forms/${formIndex}`
 
-      const authStorage = localStorage.getItem('auth-storage')
-      let token = ''
-      if (authStorage) {
-        try {
-          const { state } = JSON.parse(authStorage)
-          token = state?.token || ''
-        } catch {
-          token = ''
-        }
-      }
+      const { useAuthStore } = await import('@/lib/stores/auth-store')
+      const token = useAuthStore.getState().token
 
       const headers: HeadersInit = token ? { Authorization: `Bearer ${token}` } : {}
       let response = await fetch(relativeEndpoint, { headers })
@@ -422,7 +435,7 @@ export function StreamingResponse({
       }
 
       if (!response.ok) {
-        let message = 'Biểu mẫu chưa có file hợp lệ, cần admin cập nhật'
+        let message = 'Biểu mẫu chưa có tệp hợp lệ, cần quản trị viên cập nhật.'
         if (response.status === 401 || response.status === 403) {
           message = 'Hết phiên đăng nhập hoặc không có quyền tải biểu mẫu này.'
         } else {
@@ -439,6 +452,9 @@ export function StreamingResponse({
       }
 
       const blob = await response.blob()
+      if (/text\/html|application\/(?:problem\+)?json/i.test(blob.type)) {
+        throw new Error('Nguồn tải trả về trang thông báo thay vì tệp biểu mẫu. Vui lòng thử lại.')
+      }
       if (!blob.size) {
         toast.error('Biểu mẫu này chưa có file chính thức đã duyệt')
         return
@@ -452,12 +468,14 @@ export function StreamingResponse({
       document.body.appendChild(a)
       a.click()
       a.remove()
-      window.URL.revokeObjectURL(url)
-      toast.success('Đã tải xuống biểu mẫu thành công.')
+      // Give embedded browsers time to consume the blob before revocation.
+      window.setTimeout(() => window.URL.revokeObjectURL(url), 60_000)
+      toast.success('Đã gửi tệp biểu mẫu tới trình tải xuống của trình duyệt.')
     } catch (err) {
       console.error('Form download failed:', err)
-      const errMsg = err instanceof Error ? err.message : String(err)
-      toast.error(`Không thể tải biểu mẫu: ${errMsg}`)
+      toast.error(formatApiError(err, 'Không thể tải biểu mẫu. Vui lòng thử lại.'))
+    } finally {
+      setDownloadingForm(null)
     }
   }
 
@@ -471,7 +489,7 @@ export function StreamingResponse({
       })
       const artNum = matchingCit?.article_number || ''
       const queryStr = artNum ? `?article=${encodeURIComponent(artNum)}` : ''
-      router.push(`/legal-documents/${encodeURIComponent(cleanId)}${queryStr}`)
+      openLegalPreview(`/legal-documents/${encodeURIComponent(cleanId)}${queryStr}`)
       return
     }
 
@@ -490,23 +508,13 @@ export function StreamingResponse({
 
   const hasAnswerSections = Boolean(answerSections?.length)
   const hasPresentation = presentationVersion === 'legal-answer-v1' && Boolean(presentationSections)
-  const effectiveGroundingStatus = evidenceCount === 0 ? 'insufficient_evidence' : groundingStatus
-  const statusCopy = answerStatus ? {
-    grounded: ['Đã xác minh', 'Câu trả lời dựa trên nguồn hiện hành đã duyệt.'],
-    partial_grounded: ['Đã xác minh một phần', coverageWarning || 'Các phần có căn cứ được giữ lại; phần còn thiếu được nêu rõ.'],
-    broad_grounded: ['Quy định khung đã xác minh', 'Hệ thống đã mở rộng tra cứu toàn kho hiện hành; cần xác định thêm thủ tục trước khi gắn biểu mẫu.'],
-    clarifying: ['Cần làm rõ', 'Vui lòng bổ sung lựa chọn hoặc tình huống cụ thể để xác định đúng thủ tục.'],
-    source_gap: ['Cần bổ sung nguồn', 'Chưa đủ căn cứ hiện hành để kết luận; hệ thống không tự suy đoán nội dung pháp luật.'],
-    provider_error: ['Tạm thời chưa thể tổng hợp', 'Nguồn đã được kiểm tra nhưng dịch vụ tạo câu trả lời đang gặp lỗi.'],
-  }[answerStatus] : null
-
   if (!strategy && !answers.length && !finalAnswer && !hasAnswerSections && !hasPresentation && !isStreaming) {
     return null
   }
 
   return (
     <div
-      className="space-y-5 mt-6"
+      className="mt-1 space-y-5 text-base"
       role="region"
       aria-label={t('common.accessibility.askResponse')}
       aria-live="polite"
@@ -584,17 +592,10 @@ export function StreamingResponse({
       )}
 
       {/* Structured sections replace the aggregate prose when available. */}
-      {statusCopy && (
-        <div className="rounded-lg border bg-muted/30 px-4 py-3" data-testid="answer-status-banner">
-          <div className="flex flex-wrap items-center gap-2">
-            <Badge variant={answerStatus === 'grounded' ? 'default' : 'outline'}>{statusCopy[0]}</Badge>
-            {fallbackTier && <span className="text-xs text-muted-foreground">Tầng tra cứu: {fallbackTier}</span>}
-          </div>
-          <p className="mt-2 text-sm text-muted-foreground">{statusCopy[1]}</p>
-          {blockedReason && evidenceCount === 0 && (
-            <p className="mt-1 text-xs text-muted-foreground">Lý do: {blockedReason}</p>
-          )}
-        </div>
+      {(hasPresentation || hasAnswerSections) && salutation && !answerAlreadyHasSalutation(finalAnswer) && (
+        <p className="text-[18px] md:text-[19px] font-medium leading-8 text-foreground" data-testid="answer-salutation">
+          {salutation}
+        </p>
       )}
       {hasPresentation && presentationSections && (
         <LegalAnswerCard
@@ -611,141 +612,37 @@ export function StreamingResponse({
         <StructuredLegalAnswer
           sections={answerSections}
           role={role}
-          groundingStatus={effectiveGroundingStatus}
-          answerCompleteness={answerCompleteness}
-          answerMode={answerMode}
           onReferenceClick={handleReferenceClick}
         />
       )}
 
       {/* Legacy flat Answer Section - Always Open */}
       {!hasPresentation && !hasAnswerSections && finalAnswer && (
-        <Card className="border-primary">
-          <CardHeader className="flex flex-row items-center justify-between gap-3">
-            <CardTitle className="text-base flex items-center gap-2">
-              <CheckCircle className="h-4 w-4 text-primary" />
-              {t('common.finalAnswer')}
-            </CardTitle>
-            <div className="flex flex-wrap justify-end gap-2">
-              {answerMode && answerMode !== 'normal' ? (
-                <Badge variant="outline" data-testid="answer-mode-badge">
-                  {providerFallbackLabel()}
-                </Badge>
-              ) : (
-                <Badge variant="secondary">{answerGroundingLabel(effectiveGroundingStatus)}</Badge>
-              )}
-              <Badge variant={answerCompleteness?.status === 'complete' ? 'default' : 'outline'}>
-                {answerCompletenessLabel(answerCompleteness)}
-              </Badge>
-            </div>
-          </CardHeader>
-          <CardContent className="max-h-[80vh] md:max-h-[85vh] overflow-y-auto pr-4">
-            <FinalAnswerContent
-              content={sanitizeDisplayAnswer(finalAnswer, citations)}
-              onReferenceClick={handleReferenceClick}
-              citations={citations}
-            />
-          </CardContent>
-        </Card>
+        <div className="space-y-4 py-2">
+          {salutation && !answerAlreadyHasSalutation(finalAnswer) && (
+            <p className="text-[18px] md:text-[19px] font-medium leading-8 text-foreground" data-testid="answer-salutation">
+              {salutation}
+            </p>
+          )}
+          <FinalAnswerContent
+            content={sanitizeDisplayAnswer(finalAnswer, citations, role === 'citizen')}
+            onReferenceClick={handleReferenceClick}
+            citations={citations}
+          />
+        </div>
       )}
 
       {/* Widget Thủ tục Hành chính Cấu trúc */}
-
-      {/* Căn cứ pháp lý - compact citation links (internal only) */}
-      {!hasPresentation && !hasAnswerSections && citations && citations.some((citation) => (
-        Boolean(citation.doc_id) || /^https?:\/\//i.test(String(citation.source_url || ''))
-      )) && (
-          <div className="space-y-2">
-            <h4 className="text-sm font-semibold text-muted-foreground flex items-center gap-1.5">
-              <BookOpen className="h-4 w-4" />
-              Căn cứ pháp lý
-            </h4>
-            <div className="flex flex-wrap gap-2">
-              {citations.slice(0, 3).map((cit, idx) => {
-                const lawNum = cit.law_number || ""
-                const artNum = cit.article_number || ""
-                const docTitle = cit.document_title || ""
-
-                // Tạo nhãn tự nhiên dạng: Số hiệu — Điều X
-                const labelParts = []
-                if (lawNum) {
-                  labelParts.push(lawNum)
-                } else if (docTitle) {
-                  labelParts.push(docTitle)
-                }
-                if (artNum) {
-                  labelParts.push("Điều " + artNum)
-                }
-                const displayLabel = labelParts.join(" — ") || cit.label || "Văn bản pháp luật"
-                const docId = cit.doc_id ? String(cit.doc_id).replace(/^legal:/, "").trim() : ""
-
-                const viewerUrl = String(cit.internal_url || '').trim() || (docId
-                  ? `/legal-documents/${encodeURIComponent(docId)}${artNum ? `?article=${encodeURIComponent(artNum)}` : ''}`
-                  : '')
-                const sourceUrl = String(cit.source_url || '').trim()
-                const hasSourceUrl = /^https?:\/\//i.test(sourceUrl)
-
-
-                return (
-                  <div key={idx} className="flex items-center gap-2 flex-wrap rounded-md border border-border/50 bg-card/50 px-3 py-1.5 text-xs transition-colors hover:bg-card">
-                    <span className="font-medium text-foreground">{displayLabel}</span>
-                    <span className="text-muted-foreground/30">|</span>
-                    {docId ? (
-                      <div className="flex items-center gap-2.5">
-                        <Link
-                          href={viewerUrl}
-                          className="text-primary font-semibold hover:underline flex items-center gap-0.5"
-                        >
-                          Xem văn bản
-                        </Link>
-                        {hasSourceUrl && (
-                          <a
-                            href={sourceUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="text-muted-foreground hover:text-foreground hover:underline"
-                          >
-                            Nguồn gốc
-                          </a>
-                        )}
-                        <button
-                          type="button"
-                          onClick={() => void downloadLegalPdf(docId, artNum || undefined, lawNum || docTitle || docId)}
-                          className="text-muted-foreground hover:text-foreground hover:underline flex items-center gap-0.5"
-                        >
-                          Tải PDF
-                        </button>
-                      </div>
-                    ) : hasSourceUrl ? (
-                      <a
-                        href={sourceUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-primary font-semibold hover:underline"
-                      >
-                        Xem nguồn chính thức
-                      </a>
-                    ) : null}
-                  </div>
-                )
-              })}
-            </div>
-          </div>
-        )}
-
-      {faqs && faqs.length > 0 && (
-        <FAQAccordion faqs={faqs} />
-      )}
 
       {!hasPresentation && ((procedureDetail?.forms && procedureDetail.forms.length > 0) || (recommendedForms && recommendedForms.length > 0)) && (
         <Card data-testid="official-forms" className="border-primary/20 bg-primary/5">
           <CardHeader className="pb-3">
             <CardTitle className="text-base flex items-center gap-2 text-primary">
               <Sparkles className="h-4 w-4" />
-              Biểu mẫu liên quan
+              Biểu mẫu gửi kèm
             </CardTitle>
             <p className="text-xs text-muted-foreground">
-              Chỉ tải được biểu mẫu đã có file chính thức đã duyệt. Biểu mẫu thiếu hoặc lỗi file sẽ hiển thị trạng thái &quot;Chưa có file hợp lệ&quot;.
+              Mời anh/chị xem hoặc tải biểu mẫu chính thức phù hợp với thủ tục được nêu trong câu trả lời.
             </p>
           </CardHeader>
           <CardContent>
@@ -798,17 +695,27 @@ export function StreamingResponse({
                       {canDownload ? (
                         <button
                           type="button"
-                          onClick={() => handleDownloadForm(procedureId || procedureDetail?.id || 'unknown', idx, displayName, form.download_url, form.file_type, true)}
-                          className="text-xs font-semibold text-primary hover:underline flex items-center gap-1"
+                          disabled={downloadingForm !== null}
+                          aria-busy={downloadingForm === (('form_id' in form && form.form_id) || displayName)}
+                          onClick={() => handleDownloadForm(
+                            procedureId || procedureDetail?.id || 'unknown',
+                            idx,
+                            displayName,
+                            form.download_url,
+                            form.file_type,
+                            true,
+                            ('form_id' in form ? form.form_id : undefined) || undefined,
+                          )}
+                          className="min-h-11 px-2 text-sm font-semibold text-primary hover:underline flex items-center gap-1 disabled:opacity-60"
                         >
-                          Tải biểu mẫu{form.file_type ? ` (.${form.file_type.replace(/^\./, '')})` : ''}
+                          {downloadingForm === (('form_id' in form && form.form_id) || displayName) ? 'Đang tải…' : `Tải biểu mẫu${form.file_type ? ` (.${form.file_type.replace(/^\./, '')})` : ''}`}
                         </button>
                       ) : (
                         <button
                           type="button"
                           disabled
                           className="text-xs font-medium text-muted-foreground cursor-not-allowed"
-                          title="Biểu mẫu chưa có file hợp lệ, cần admin cập nhật"
+                          title="Biểu mẫu chưa có tệp hợp lệ, cần quản trị viên cập nhật"
                         >
                           Chưa có file hợp lệ</button>
                       )}
@@ -839,7 +746,7 @@ export function StreamingResponse({
               <CollapsibleTrigger className="flex items-center justify-between w-full hover:opacity-80">
                 <CardTitle className="text-base flex items-center gap-2">
                   <Sparkles className="h-4 w-4 text-primary" />
-                  Quy trình RAG
+                  Quy trình tra cứu
                 </CardTitle>
                 <ChevronDown className={`h-4 w-4 transition-transform ${traceOpen ? 'rotate-180' : ''}`} />
               </CollapsibleTrigger>
@@ -851,30 +758,34 @@ export function StreamingResponse({
                 </TraceBlock>
                 <TraceBlock title="Lĩnh vực được chọn/nhận diện">
                   <div className="flex flex-wrap gap-2">
-                    <Badge variant="secondary">Chọn: {ragTrace.selected_domain || 'Tự nhận diện'}</Badge>
+                    <Badge variant="secondary">Đã chọn: {ragTrace.selected_domain ? traceDomainLabel(ragTrace.selected_domain) : 'Tự nhận diện'}</Badge>
                     <Badge variant="outline">
                       Nhận diện: {ragTrace.detected_domain?.name || 'Chưa rõ'}
                     </Badge>
                   </div>
                 </TraceBlock>
                 <TraceBlock title="Mức độ bao phủ nội dung được hỏi">
-                  <pre data-testid="admin-evidence-coverage" className="max-h-56 overflow-auto rounded-md bg-muted p-3 text-xs">
-                    {JSON.stringify(ragTrace.evidence_coverage || {}, null, 2)}
-                  </pre>
+                  <p data-testid="admin-evidence-coverage">
+                    {Object.keys(ragTrace.evidence_coverage || {}).length
+                      ? `${Object.keys(ragTrace.evidence_coverage || {}).length} nhóm nội dung đã được kiểm tra.`
+                      : 'Chưa có kết quả kiểm tra mức độ bao phủ.'}
+                  </p>
                 </TraceBlock>
                 <TraceBlock title="Nguồn gốc và trạng thái biểu mẫu">
-                  <pre data-testid="form-provenance" className="max-h-56 overflow-auto rounded-md bg-muted p-3 text-xs">
-                    {JSON.stringify(ragTrace.form_provenance || { requested: false }, null, 2)}
-                  </pre>
+                  <p data-testid="form-provenance">
+                    {ragTrace.form_provenance?.requested
+                      ? `Đã yêu cầu biểu mẫu; ${ragTrace.form_provenance.accepted?.length || 0} biểu mẫu đạt yêu cầu, ${ragTrace.form_provenance.rejected?.length || 0} biểu mẫu bị loại.`
+                      : 'Câu hỏi không yêu cầu biểu mẫu.'}
+                  </p>
                 </TraceBlock>
-                <TraceBlock title="Chunk được truy xuất">
+                <TraceBlock title="Các đoạn văn bản được tìm thấy">
                   <div className="space-y-2 max-h-80 overflow-y-auto pr-2">
                     {(ragTrace.retrieved_chunks || []).map((chunk) => (
                       <div key={chunk.chunk_id} className="rounded-md border p-3">
                         <div className="mb-1 flex flex-wrap gap-2">
-                          <Badge variant="outline">chunk {chunk.chunk_id}</Badge>
-                          {chunk.score !== undefined && <Badge variant="secondary">score {chunk.score}</Badge>}
-                          {chunk.domain && <Badge>{chunk.domain}</Badge>}
+                          <Badge variant="outline">Đoạn {chunk.chunk_id}</Badge>
+                          {chunk.score !== undefined && <Badge variant="secondary">Mức phù hợp {traceScoreLabel(chunk.score)}</Badge>}
+                          {chunk.domain && <Badge>{traceDomainLabel(chunk.domain)}</Badge>}
                         </div>
                         <p className="font-medium">
                           {chunk.law_number || 'Không rõ số hiệu'} - Điều {chunk.article_number}: {chunk.article_title}
@@ -885,22 +796,18 @@ export function StreamingResponse({
                     ))}
                   </div>
                 </TraceBlock>
-                <TraceBlock title="Văn bản/chunk bị lọc">
+                <TraceBlock title="Nguồn bị loại sau khi kiểm tra">
                   {Array.isArray(ragTrace.filtered_candidates) && ragTrace.filtered_candidates.length > 0 ? (
-                    <pre className="max-h-72 overflow-auto rounded-md bg-muted p-3 text-xs">
-                      {JSON.stringify(ragTrace.filtered_candidates || [], null, 2)}
-                    </pre>
+                    <p>{ragTrace.filtered_candidates.length} nguồn đã bị loại vì không đáp ứng điều kiện tra cứu.</p>
                   ) : (
                     <p className="text-muted-foreground">Không có nguồn nào bị loại ở bước lọc cuối.</p>
                   )}
                 </TraceBlock>
-                <TraceBlock title="Nguồn đưa vào LLM">
+                <TraceBlock title="Nguồn dùng để tạo câu trả lời">
                   {Array.isArray(ragTrace.llm_sources) && ragTrace.llm_sources.length > 0 ? (
-                    <pre className="max-h-72 overflow-auto rounded-md bg-muted p-3 text-xs">
-                      {JSON.stringify(ragTrace.llm_sources || [], null, 2)}
-                    </pre>
+                    <p>{ragTrace.llm_sources.length} nguồn hợp lệ được dùng để tạo câu trả lời.</p>
                   ) : (
-                    <p className="text-muted-foreground">Chưa có nguồn hợp lệ được đưa vào LLM.</p>
+                    <p className="text-muted-foreground">Chưa có nguồn hợp lệ được dùng để tạo câu trả lời.</p>
                   )}
                 </TraceBlock>
               </CardContent>
@@ -959,95 +866,6 @@ const SECTION_ICONS: Record<string, React.ComponentType<{ className?: string }>>
   unknown: CircleHelp,
 }
 
-function sectionStatus(section: LegalAnswerSection) {
-  if (section.status === 'sufficiently_evidenced') {
-    return {
-      label: 'Đã xác minh',
-      className: 'border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-200',
-      icon: CheckCircle,
-    }
-  }
-  if (section.status === 'partially_evidenced') {
-    return {
-      label: 'Kết luận có điều kiện',
-      className: 'border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200',
-      icon: AlertCircle,
-    }
-  }
-  return {
-    label: section.clarifying_question ? 'Cần bổ sung thông tin' : 'Chưa đủ nguồn',
-    className: 'border-slate-200 bg-slate-50 text-slate-700 dark:border-slate-800 dark:bg-slate-900/60 dark:text-slate-200',
-    icon: CircleHelp,
-  }
-}
-
-function answerGroundingLabel(value?: string | null): string {
-  if (value === 'fully_grounded') return 'Căn cứ hợp lệ'
-  if (value === 'partially_grounded') return 'Căn cứ hợp lệ một phần'
-  if (value === 'insufficient_evidence') return 'Cần bổ sung nguồn'
-  return 'Đang đối chiếu căn cứ'
-}
-
-function answerCompletenessLabel(value?: AskResponse['answer_completeness'] | null): string {
-  if (value?.status === 'complete') return 'Trả lời đầy đủ'
-  if (value?.status === 'incomplete') return 'Trả lời chưa đầy đủ'
-  return 'Chưa xác định độ đầy đủ'
-}
-
-function providerFallbackLabel(): string {
-  return 'Nguồn đã xác minh nhưng câu trả lời đang ở chế độ rút gọn'
-}
-
-function citationLabel(citation: LegalAnswerSection['citations'][number]): string {
-  const provision = [
-    citation.article_number ? `Điều ${citation.article_number}` : '',
-    citation.clause_number ? `Khoản ${citation.clause_number}` : '',
-    citation.point_number ? `Điểm ${citation.point_number}` : '',
-  ].filter(Boolean).join(', ')
-  return [citation.law_number || citation.document_title || 'Nguồn pháp lý', provision]
-    .filter(Boolean)
-    .join(' · ')
-}
-
-function SectionCitations({ citations }: { citations: LegalAnswerSection['citations'] }) {
-  if (!citations.length) return null
-  return (
-    <div className="space-y-2" data-testid="answer-section-citations">
-      <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-        Căn cứ trực tiếp
-      </p>
-      <div className="flex flex-wrap gap-2">
-        {citations.map((citation, index) => {
-          const label = citationLabel(citation)
-          const key = `${citation.law_number || citation.document_title || 'source'}-${citation.article_number || ''}-${index}`
-          if (!citation.source_url) {
-            return (
-              <span
-                key={key}
-                className="inline-flex max-w-full items-center rounded-full border bg-muted/40 px-3 py-1.5 text-xs font-medium text-muted-foreground"
-              >
-                {label}
-              </span>
-            )
-          }
-          return (
-            <a
-              key={key}
-              href={citation.source_url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-primary/20 bg-primary/5 px-3 py-1.5 text-xs font-semibold text-primary transition-colors hover:border-primary/40 hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
-            >
-              <span className="truncate">{label}</span>
-              <ExternalLink className="h-3 w-3 shrink-0" aria-hidden="true" />
-            </a>
-          )
-        })}
-      </div>
-    </div>
-  )
-}
-
 function AnswerSectionBlock({
   section,
   role,
@@ -1061,8 +879,6 @@ function AnswerSectionBlock({
 }) {
   const facet = section.facet || 'unknown'
   const Icon = SECTION_ICONS[facet] || CircleHelp
-  const status = sectionStatus(section)
-  const StatusIcon = status.icon
   const isImmediateAction = section.claim_types?.includes('next_action') === true
   const content = section.status === 'sufficiently_evidenced'
     ? section.answer
@@ -1103,14 +919,6 @@ function AnswerSectionBlock({
             )}
           </div>
         </div>
-        <Badge
-          variant="outline"
-          className={`w-fit shrink-0 gap-1.5 ${status.className}`}
-          data-testid={`answer-section-status-${section.status}`}
-        >
-          <StatusIcon className="h-3.5 w-3.5" aria-hidden="true" />
-          {status.label}
-        </Badge>
       </div>
 
       <div className="mt-4 space-y-4 pl-0 sm:pl-12">
@@ -1143,9 +951,6 @@ function AnswerSectionBlock({
             />
           </div>
         )}
-        {section.status === 'sufficiently_evidenced' && (
-          <SectionCitations citations={section.citations} />
-        )}
       </div>
     </section>
   )
@@ -1154,16 +959,10 @@ function AnswerSectionBlock({
 function StructuredLegalAnswer({
   sections,
   role,
-  groundingStatus,
-  answerCompleteness,
-  answerMode,
   onReferenceClick,
 }: {
   sections: LegalAnswerSection[]
   role: 'citizen' | 'officer' | 'admin'
-  groundingStatus?: string | null
-  answerCompleteness?: AskResponse['answer_completeness'] | null
-  answerMode?: AskResponse['answer_mode'] | null
   onReferenceClick: (type: string, id: string) => void
 }) {
   const order = role === 'officer' ? OFFICER_SECTION_ORDER : CITIZEN_SECTION_ORDER
@@ -1218,30 +1017,6 @@ function StructuredLegalAnswer({
       aria-label={roleLabel}
       data-testid="structured-legal-answer"
     >
-      <header className="flex flex-col gap-2 border-b bg-muted/25 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-6">
-        <div className="flex items-center gap-2 text-sm font-semibold">
-          <ShieldCheck className="h-4 w-4 text-primary" aria-hidden="true" />
-          {roleLabel}
-        </div>
-        <div className="flex flex-wrap gap-2">
-          {answerMode && answerMode !== 'normal' ? (
-            <Badge variant="outline" className="w-fit" data-testid="answer-mode-badge">
-              {providerFallbackLabel()}
-            </Badge>
-          ) : (
-            <Badge variant="secondary" className="w-fit" data-testid="grounding-status-badge">
-              {answerGroundingLabel(groundingStatus)}
-            </Badge>
-          )}
-          <Badge
-            variant={answerCompleteness?.status === 'complete' ? 'default' : 'outline'}
-            className="w-fit"
-            data-testid="answer-completeness-badge"
-          >
-            {answerCompletenessLabel(answerCompleteness)}
-          </Badge>
-        </div>
-      </header>
       {summary && (
         <AnswerSectionBlock
           section={summary}
@@ -1285,12 +1060,30 @@ function FinalAnswerContent({
   onReferenceClick: (type: string, id: string) => void
   citations?: AskResponse['citations']
 }) {
-  const router = useRouter()
-  // Convert references to markdown links
-  const markdownWithLinks = convertReferencesToMarkdownLinks(content)
+  const openLegalPreview = useLegalPreview()
+  // Enrich legal citations and convert references to markdown links
+  const enriched = enrichMarkdownWithArticleLinks(content, citations)
+  const markdownWithLinks = convertReferencesToMarkdownLinks(enriched)
 
   // Custom link component to intercept external VBPL links and route them internally
   const LinkComponent = ({ href, children, ...props }: React.AnchorHTMLAttributes<HTMLAnchorElement> & { href?: string; children?: React.ReactNode }) => {
+    // 0. Internal legal document routing
+    if (href?.startsWith('/legal-documents/')) {
+      return (
+        <button
+          onClick={(e) => {
+            e.preventDefault()
+            e.stopPropagation()
+            openLegalPreview(href)
+          }}
+          className="inline font-medium text-primary hover:text-primary/80 underline decoration-primary/25 hover:decoration-primary/60 underline-offset-4 cursor-pointer transition-colors text-left"
+          type="button"
+        >
+          {children}
+        </button>
+      )
+    }
+
     // 1. Check if this is an internal reference link (#ref-source-id)
     if (href?.startsWith('#ref-')) {
       const parts = href.substring(5).split('-')
@@ -1303,7 +1096,7 @@ function FinalAnswerContent({
             e.stopPropagation()
             onReferenceClick(type, id)
           }}
-          className="text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 underline decoration-dashed decoration-blue-500/60 hover:decoration-blue-700 underline-offset-4 cursor-pointer inline font-semibold transition-colors duration-150"
+          className="inline font-medium text-primary hover:text-primary/80 underline decoration-primary/25 hover:decoration-primary/60 underline-offset-4 cursor-pointer transition-colors text-left"
           type="button"
         >
           {children}
@@ -1327,9 +1120,9 @@ function FinalAnswerContent({
             onClick={(e) => {
               e.preventDefault()
               e.stopPropagation()
-              router.push(`/legal-documents/${encodeURIComponent(cleanId)}${queryStr}`)
+              openLegalPreview(`/legal-documents/${encodeURIComponent(cleanId)}${queryStr}`)
             }}
-            className="text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 underline decoration-dashed decoration-blue-500/60 hover:decoration-blue-700 underline-offset-4 cursor-pointer inline font-semibold transition-colors duration-150"
+            className="inline font-medium text-primary hover:text-primary/80 underline decoration-primary/25 hover:decoration-primary/60 underline-offset-4 cursor-pointer transition-colors text-left"
             type="button"
           >
             {children}
@@ -1340,18 +1133,25 @@ function FinalAnswerContent({
 
     // Fallback standard external link
     return (
-      <a href={href} target="_blank" rel="noopener noreferrer" {...props} className="text-primary hover:underline">
+      <a href={href} target="_blank" rel="noopener noreferrer" {...props} className="text-primary hover:underline font-semibold inline-flex items-center gap-1">
         {children}
       </a>
     )
   }
 
   return (
-    <div className="prose prose-sm max-w-none dark:prose-invert break-words prose-a:break-all prose-p:leading-relaxed prose-headings:mt-4 prose-headings:mb-2">
+    <div className="prose max-w-none break-words text-[18px] md:text-[19px] leading-8 text-foreground prose-a:break-all prose-p:my-3 prose-p:leading-8 dark:prose-invert">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={[remarkGfm, remarkLegalBreaks]}
         components={{
           a: LinkComponent,
+          h3: ({ children }) => <h3 className="text-lg font-bold text-foreground mt-6 mb-3 border-b pb-1.5 border-border/40">{children}</h3>,
+          h4: ({ children }) => <h4 className="text-base font-semibold text-foreground mt-4 mb-2">{children}</h4>,
+          p: ({ children }) => <p className="my-3 text-[18px] md:text-[19px] leading-8 text-foreground/90">{children}</p>,
+          ul: ({ children }) => <ul className="my-3 list-disc space-y-2 pl-5 text-[18px] md:text-[19px] leading-8">{children}</ul>,
+          ol: ({ children }) => <ol className="my-3 list-decimal space-y-2 pl-5 text-[18px] md:text-[19px] leading-8">{children}</ol>,
+          li: ({ children }) => <li className="my-1 text-foreground/90">{children}</li>,
+          strong: ({ children }) => <strong className="font-semibold text-foreground">{children}</strong>,
           table: ({ children }) => (
             <div className="my-4 overflow-x-auto">
               <table className="min-w-full border-collapse border border-border">{children}</table>

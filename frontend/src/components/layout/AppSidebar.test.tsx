@@ -29,6 +29,21 @@ describe('AppSidebar', () => {
   it('shows Hồ sơ pháp lý for admin', () => {
     render(<AppSidebar />)
     expect(screen.getByText('Hồ sơ pháp lý')).toBeDefined()
+    expect(screen.queryByText('common.theme')).toBeNull()
+    expect(screen.queryByText('common.language')).toBeNull()
+  })
+
+  it('restores scroll after the page shell is unmounted and created again', () => {
+    sessionStorage.removeItem('admin-sidebar-scroll-top')
+    const first = render(<AppSidebar />)
+    const nav = first.container.querySelector('nav')!
+    nav.scrollTop = 320
+    fireEvent.scroll(nav)
+    first.unmount()
+    const next = render(<AppSidebar />)
+    expect(next.container.querySelector('nav')!.scrollTop).toBe(320)
+    next.unmount()
+    sessionStorage.removeItem('admin-sidebar-scroll-top')
   })
 
   it('hides Hồ sơ pháp lý from citizen navigation', () => {
@@ -44,11 +59,11 @@ describe('AppSidebar', () => {
     expect(document.querySelector('a[href="/sources"]')).toBeNull()
   })
 
-  it('shows Hồ sơ pháp lý for officer navigation', () => {
+  it('shows Hồ sơ pháp lý without the legacy create menu for officer navigation', () => {
     useAuthStore.setState({ role: 'officer', username: 'officer' } as any)
     render(<AppSidebar />)
     expect(screen.getByText('Hồ sơ pháp lý')).toBeDefined()
-    expect(screen.getByText('common.create')).toBeDefined()
+    expect(screen.queryByText('common.create')).toBeNull()
   })
 
   it('does not show the create menu to citizens', () => {

@@ -1,0 +1,2 @@
+-- Non-destructive rollback by design. Runtime can switch back to `legacy`
+-- without dropping organization data or the legacy compatibility fields.

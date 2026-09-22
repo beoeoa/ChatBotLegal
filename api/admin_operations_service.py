@@ -42,7 +42,7 @@ def _module(code: str) -> str:
 
 
 ACTION_POLICY: dict[str, tuple[str, str]] = {
-    "support.overdue": ("Mở danh sách phiên quá SLA", "/admin/support?status=overdue"),
+    "support.overdue": ("Mở danh sách phiên quá SLA", "/admin/support?sla=overdue"),
     "support.unassigned": ("Mở danh sách chưa phân công", "/admin/support?status=queued"),
     "import.failed": ("Mở tác vụ cần xử lý", "/legal-import?tab=proposals&status=needs_attention"),
     "candidate.pending": ("Rà soát đề xuất văn bản", "/legal-import?tab=proposals&status=pending"),
@@ -121,4 +121,3 @@ def project_operational_alerts(raw_items: Iterable[dict[str, Any]]) -> list[dict
             },
         })
     return sorted(projected, key=lambda item: (-item["priority"], item["code"]))
-

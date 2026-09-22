@@ -5,7 +5,7 @@ type ModelType = Model['type']
 export const PROVIDER_MODALITIES: Record<string, ModelType[]> = {
   openai: ['language', 'embedding', 'text_to_speech', 'speech_to_text'],
   anthropic: ['language'],
-  google: ['language', 'embedding', 'text_to_speech', 'speech_to_text'],
+  google: ['language', 'embedding'],
   groq: ['language', 'speech_to_text'],
   mistral: ['language', 'embedding', 'speech_to_text', 'text_to_speech'],
   deepseek: ['language'],

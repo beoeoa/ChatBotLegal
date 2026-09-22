@@ -1,11 +1,14 @@
 'use client'
 
 import { useState } from 'react'
-import { Menu, X } from 'lucide-react'
+import { usePathname } from 'next/navigation'
+import { Menu, X, ShieldCheck } from 'lucide-react'
 import { AppSidebar } from './AppSidebar'
 import { SetupBanner } from './SetupBanner'
 import { Button } from '@/components/ui/button'
 import { useSidebarStore } from '@/lib/stores/sidebar-store'
+import { useAuthStore } from '@/lib/stores/auth-store'
+import { cn } from '@/lib/utils'
 
 interface AppShellProps {
   children: React.ReactNode
@@ -13,7 +16,19 @@ interface AppShellProps {
 
 export function AppShell({ children }: AppShellProps) {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
+  const pathname = usePathname()
+  const role = useAuthStore((state) => state.role)
   const setCollapsed = useSidebarStore((state) => state.setCollapsed)
+  const userNavigation = role === 'citizen' || role === 'officer'
+  const usesConversationNavigation = pathname === '/search'
+  // The Q&A route owns the conversation workspace sidebar. Every other
+  // protected route gets the same primary navigation shell as Admin, so
+  // feature pages open in the main area instead of switching to a different
+  // topbar layout.
+  // The Q&A page owns the citizen/officer conversation sidebar. Rendering the
+  // role navigation here as well creates two permanent left rails on desktop.
+  // Keep the primary navigation for every other protected page.
+  const usesPrimaryNavigation = Boolean(role) && !usesConversationNavigation
 
   const openMobileSidebar = () => {
     setCollapsed(false)
@@ -21,25 +36,20 @@ export function AppShell({ children }: AppShellProps) {
   }
 
   return (
-    <div className="flex h-screen min-w-0 overflow-hidden">
-      <div className="hidden h-full shrink-0 md:block">
-        <AppSidebar />
-      </div>
-
-      <Button
-        type="button"
-        variant="outline"
-        size="icon"
-        onClick={openMobileSidebar}
-        className="fixed left-3 top-3 z-40 bg-background/95 shadow-sm backdrop-blur md:hidden"
-        aria-label="Mở điều hướng"
-        aria-expanded={mobileSidebarOpen}
+    <div className={cn('flex h-dvh min-w-0 overflow-hidden bg-background', userNavigation && 'user-workspace')}>
+      <a
+        href="#main-content"
+        className="sr-only z-[60] rounded-md bg-card px-4 py-2 text-sm font-semibold text-foreground shadow-lg focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:outline-none focus:ring-2 focus:ring-ring"
       >
-        <Menu className="h-5 w-5" aria-hidden="true" />
-      </Button>
-
-      {mobileSidebarOpen && (
-        <div className="fixed inset-0 z-50 md:hidden" role="dialog" aria-label="Điều hướng">
+        Chuyển đến nội dung chính
+      </a>
+      {usesPrimaryNavigation && (
+        <div className="hidden h-full shrink-0 lg:block">
+          <AppSidebar />
+        </div>
+      )}
+      {mobileSidebarOpen && usesPrimaryNavigation && (
+        <div className="fixed inset-0 z-50 lg:hidden" role="dialog" aria-label="Điều hướng">
           <button
             type="button"
             aria-label="Đóng điều hướng"
@@ -62,8 +72,37 @@ export function AppShell({ children }: AppShellProps) {
         </div>
       )}
 
-      <main className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+      <main id="main-content" className="app-main-gradient flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         <SetupBanner />
+        <header className={cn(
+          'min-h-16 shrink-0 items-center justify-between gap-4 border-b border-border/70 bg-card/90 px-4 py-3 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-card/75 md:px-7 lg:hidden',
+          usesPrimaryNavigation ? 'flex' : 'hidden',
+        )}>
+          <div className="flex min-w-0 items-center gap-3">
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
+              onClick={openMobileSidebar}
+              className="h-11 w-11 shrink-0 lg:hidden"
+              aria-label="Mở điều hướng"
+              aria-expanded={mobileSidebarOpen}
+            >
+              <Menu className="h-5 w-5" aria-hidden="true" />
+            </Button>
+            <div className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary sm:flex">
+              <ShieldCheck className="h-5 w-5" aria-hidden="true" />
+            </div>
+            <div className="min-w-0">
+              <p className="truncate text-sm font-semibold text-foreground md:text-base">Không gian pháp luật số</p>
+              <p className="hidden truncate text-xs text-muted-foreground sm:block">Tra cứu có căn cứ · Hỗ trợ đúng quy trình</p>
+            </div>
+          </div>
+          <div className="hidden items-center gap-2 text-xs text-muted-foreground sm:flex">
+            <span className="h-2 w-2 rounded-full bg-emerald-600" aria-hidden="true" />
+            Hệ thống đang hoạt động
+          </div>
+        </header>
         {children}
       </main>
     </div>

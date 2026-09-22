@@ -1,23 +1,25 @@
 ﻿"""
-Headless browser crawler for JavaScript-rendered legal websites.
-Uses Playwright to render SPA pages and extract content.
-Supports: VBPL.vn (Next.js), UBND Hai Phong (dynamic), DVC portals.
+Compatibility facade for the shared Crawl4AI legal-page crawler.
+
+This module keeps the historical ``HeadlessCrawler`` API used by local
+scripts, but no longer owns a second Playwright implementation. All HTML
+navigation goes through the shared Crawl4AI adapter.
 """
 
 from __future__ import annotations
-import asyncio, re, hashlib, json
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any
-from urllib.parse import urljoin, urlparse
 
+import asyncio
+import hashlib
+import re
+from datetime import datetime, timezone
+from typing import Any
+
+from bs4 import BeautifulSoup
 from loguru import logger
 
-try:
-    from playwright.async_api import async_playwright
-    HAS_PLAYWRIGHT = True
-except ImportError:
-    HAS_PLAYWRIGHT = False
+from api.crawlers.crawl4ai_fetcher import HAS_CRAWL4AI, fetch_rendered
+
+HAS_PLAYWRIGHT = HAS_CRAWL4AI
 
 
 def utcnow() -> str:
@@ -30,83 +32,63 @@ def content_fingerprint(content: str) -> str:
 
 
 class HeadlessCrawler:
-    """Crawl JavaScript-rendered pages using Playwright."""
+    """Crawl JavaScript-rendered pages through Crawl4AI."""
 
     def __init__(self, headless: bool = True, timeout_ms: int = 30000):
-        if not HAS_PLAYWRIGHT:
-            raise RuntimeError("playwright not installed. Run: pip install playwright && playwright install chromium")
+        if not HAS_CRAWL4AI:
+            raise RuntimeError(
+                "crawl4ai is not available. Install project dependencies and Chromium."
+            )
         self.headless = headless
         self.timeout_ms = timeout_ms
 
     async def fetch_page_content(self, url: str) -> dict[str, Any] | None:
         """Fetch and extract content from a JS-rendered page."""
-        try:
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=self.headless)
-                page = await browser.new_page()
-                await page.goto(url, wait_until='networkidle', timeout=self.timeout_ms)
-                
-                # Wait for content to render
-                await page.wait_for_timeout(2000)
-                
-                # Get title
-                title = await page.title()
-                
-                # Try to get H1
-                try:
-                    h1 = await page.inner_text('h1')
-                except Exception:
-                    h1 = ''
-                
-                # Get main content
-                content = ''
-                for selector in [
-                    '#contentPrint', '.content', '.vbpq-content',
-                    '#main-content', '.detail-content', '.article-content',
-                    'article', '[class*=content]', '[class*=detail]',
-                ]:
-                    try:
-                        el = page.locator(selector).first
-                        if await el.count() > 0:
-                            content = await el.inner_text()
-                            if len(content) > 100:
-                                break
-                    except Exception:
-                        continue
-                
-                # Fallback: get body text
-                if len(content) < 100:
-                    try:
-                        content = await page.inner_text('body')
-                    except Exception:
-                        content = ''
-                
-                # Clean content
-                content = ' '.join(content.split())
-                
-                # Get URL after redirects
-                final_url = page.url
-                
-                # Get HTML for metadata extraction
-                html = await page.content()
-                
-                await browser.close()
-                
-                return {
-                    'url': final_url,
-                    'title': ' '.join(title.split()) if title else '',
-                    'h1': ' '.join(h1.split()) if h1 else '',
-                    'content': content,
-                    'content_len': len(content),
-                    'html': html,
-                }
-        except Exception as e:
-            logger.error(f"HeadlessCrawler failed for {url}: {e}")
+        result = await fetch_rendered(
+            url,
+            timeout_ms=self.timeout_ms,
+            headless=self.headless,
+            check_robots_txt=True,
+        )
+        if result.get("status") != "ok" or not result.get("html"):
+            logger.error(
+                f"Crawl4AI failed for {url}: "
+                f"{result.get('reason') or result.get('status')}"
+            )
             return None
+
+        html = str(result.get("html") or "")
+        soup = BeautifulSoup(html, "html.parser")
+        title = " ".join(soup.title.get_text(" ", strip=True).split()) if soup.title else ""
+        h1_element = soup.select_one("h1")
+        h1 = " ".join(h1_element.get_text(" ", strip=True).split()) if h1_element else ""
+
+        content = ""
+        for selector in [
+            "#contentPrint", ".content", ".vbpq-content",
+            "#main-content", ".detail-content", ".article-content",
+            "article", "[class*=content]", "[class*=detail]", "body",
+        ]:
+            element = soup.select_one(selector)
+            if not element:
+                continue
+            candidate = " ".join(element.get_text(" ", strip=True).split())
+            if len(candidate) > len(content):
+                content = candidate
+            if len(content) > 100:
+                break
+
+        return {
+            "url": result.get("final_url") or url,
+            "title": title,
+            "h1": h1,
+            "content": content,
+            "content_len": len(content),
+            "html": html,
+        }
 
     async def extract_metadata_from_html(self, html: str) -> dict[str, str]:
         """Extract legal metadata from rendered HTML."""
-        from bs4 import BeautifulSoup
         soup = BeautifulSoup(html, 'html.parser')
         
         meta = {}

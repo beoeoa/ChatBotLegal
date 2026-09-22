@@ -1,0 +1,84 @@
+{
+  "schema_version": "legal-retrieval-production-freeze-v1",
+  "decision_date": "2026-08-22",
+  "decision_authority": "explicit_owner_approval",
+  "status": "frozen_default",
+  "selected_m5": "v6r26",
+  "candidate_profile": "r26-shadow-facet-alias",
+  "candidate_profile_name_is_immutable_legacy_identifier": true,
+  "replaces": "v6r20",
+  "rollback_profile": "v6r20",
+  "ranking_contract": {
+    "selected_experiment": "m5-issue-split-k80",
+    "vector_top_k": 80,
+    "lexical_top_k": 80,
+    "fusion_strategy": "weighted",
+    "vector_weight": 0.7,
+    "lexical_weight": 0.3,
+    "exact_lookup_enabled": true,
+    "issue_split_enabled": true,
+    "alias_count": 11,
+    "identity_diversity_windows": [20, 60]
+  },
+  "execution_contract": {
+    "prewarm_fts_document_frequency_on_kaggle_suite_terms": true,
+    "prewarm_full_fts_vocabulary_on_local_16gb": false,
+    "local_fts_frequency_cache_mode": "lazy",
+    "prewarm_law_chunk_cache_on_kaggle": true,
+    "prewarm_law_chunk_cache_on_local_16gb": false,
+    "local_law_chunk_cache_mode": "lazy",
+    "request_p95_ms": 1088.19,
+    "request_p99_ms": 11994.99,
+    "p95_gate_ms": 3000,
+    "p95_gate_pass": true,
+    "p99_is_diagnostic_not_passed": true
+  },
+  "immutable_data_contract": {
+    "release_id": "retrieval-v2-20260816-v6",
+    "source_snapshot_sha256": "d4040ff69a0da62db0227fdfa28a0aa198d9cb385118b0aa381eae00fd108ca6",
+    "manifest_sha256": "20072befc93dc5f66401c392cd174a278fda9efeb2ca8307c37f7fc7cf517b9f",
+    "serving_manifest_file_sha256": "14b540b20d5bac7f51b94d22cfb96dbe0fd1cb13f92ffafdae910652d908fe18",
+    "active_pointer_expected": "legal_chunks_vnlegal_lal_haiphong_unified_v1",
+    "corpus_mutation_allowed": false,
+    "vector_mutation_allowed": false,
+    "manifest_mutation_allowed": false,
+    "reindex_allowed": false
+  },
+  "evidence": {
+    "candidate_source_sha256": "1380a666b564d00c4b010d0377407bed04a5b9fcc451a25ab925743d513fd775",
+    "development_acceptance_sha256": "1c782a158fe2fd87ccc093db3b125220de4ceb503a5590d6a73a768fab41e13c",
+    "development_candidate_cache_sha256": "49f1c86aa25809b49448635c5f9c4da2e4edafdccab3b94c51789a17842270f0",
+    "latency_acceptance_sha256": "7f2602b6c491cc0d6a0370a94e8c06e7ea8dec567bed157b23eeb781af8aa6ba",
+    "owner_directed_holdout_receipt_sha256": "6fdc69dff0ec5e921b4142ce57889798caa69c92a9796d2d369c4c589c48027c"
+  },
+  "quality_summary": {
+    "development_golden_recall_at_10": 0.98375,
+    "development_golden_mrr_at_10": 0.9317232142857143,
+    "development_hard_negative_recall_at_10": 0.9625,
+    "development_hard_negative_mrr_at_10": 0.8749335317460317,
+    "owner_directed_holdout_recall_at_10": 1.0,
+    "owner_directed_holdout_mrr_at_10": 0.9436904761904762,
+    "owner_directed_holdout_required_source_coverage": 0.995,
+    "exact_law_article_recall": 1.0,
+    "correct_refusal_rate": 1.0,
+    "outside_manifest_count": 0,
+    "invalid_temporal_count": 0,
+    "timeout_count": 0,
+    "oom_count": 0
+  },
+  "accepted_limitations": {
+    "development_aspirational_99_percent_gate_passed": false,
+    "holdout_independent_human_legal_qa_complete": false,
+    "holdout_was_created_by_same_agent": true,
+    "holdout_has_been_consumed": true,
+    "owner_accepts_documented_deviation": true
+  },
+  "change_policy": {
+    "silent_profile_drift_allowed": false,
+    "edit_in_place_allowed": false,
+    "next_behavior_change_requires_new_version": true,
+    "next_version_requires_regression_benchmark": true,
+    "production_health_must_report_selected_m5": "v6r26",
+    "production_health_must_report_candidate_profile": "r26-shadow-facet-alias"
+  }
+}

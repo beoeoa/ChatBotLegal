@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Literal, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional
 
 from datetime import date
 
@@ -35,8 +35,12 @@ class SearchRequest(BaseModel):
     query: str = Field(..., description="Search query")
     type: Literal["text", "vector"] = Field("text", description="Search type")
     limit: int = Field(100, description="Maximum number of results", le=1000)
-    search_sources: bool = Field(True, description="Include sources in search")
-    search_notes: bool = Field(True, description="Include notes in search")
+    # Legal retrieval is the primary path.  Notebook source/note scans are an
+    # optional, potentially expensive compatibility feature and must be opted
+    # into explicitly so an omitted field cannot turn a simple search into a
+    # multi-store fan-out.
+    search_sources: bool = Field(False, description="Include notebook sources in search")
+    search_notes: bool = Field(False, description="Include notebook notes in search")
     minimum_score: float = Field(
         0.2, description="Minimum score for vector search", ge=0, le=1
     )
@@ -51,6 +55,13 @@ class SearchResponse(BaseModel):
 class AskRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
+    answer_depth: Literal["quick", "balanced", "deep"] = "balanced"
+    attachment_text: str = Field(default="", max_length=81000)
+    attachment_id: Optional[str] = Field(None, pattern=r"^[a-f0-9]{32}$")
+    attachment_name: str = Field(default="", max_length=255)
+    attachment_sha256: Optional[str] = Field(None, max_length=64)
+    attachment_status: Literal["processing", "complete", "partial", "error"] = "complete"
+
     question: str = Field(..., description="Question to ask the knowledge base")
     role: Literal["officer", "citizen", "admin"] = Field(
         "citizen", description="Answer profile selected by the user"
@@ -59,6 +70,7 @@ class AskRequest(BaseModel):
     strategy_model: str = Field("", description="Model ID for query strategy")
     answer_model: str = Field("", description="Model ID for individual answers")
     final_answer_model: str = Field("", description="Model ID for final answer")
+    model_option_id: Optional[str] = Field(None, max_length=200, description="Role-scoped admin-approved chat model option")
     offline_mode: bool = Field(False, description="Use local Ollama instead of cloud graph")
     offline_model: str = Field("qwen2.5:3b", description="Ollama model name")
     domain: Optional[str] = Field(None, description="Commune task domain filter")
@@ -75,6 +87,16 @@ class AskRequest(BaseModel):
     topic_confidence: Optional[str] = Field(None, description="Internal: taxonomy classification confidence")
     topic_domain: Optional[str] = Field(None, description="Internal: primary LegalDomain inferred by topic taxonomy")
     pre_persisted_user_message: bool = Field(False, description="True when frontend pre-persisted the user message")
+    memory_item_ids: List[str] = Field(
+        default_factory=list,
+        max_length=8,
+        description="Explicit owner-scoped long-term memory items selected for this turn",
+    )
+    active_document_id: Optional[str] = Field(
+        None,
+        max_length=1000,
+        description="Backend-known document selected as the active conversation source",
+    )
 
 
 class CitationDisplayItem(BaseModel):
@@ -92,6 +114,21 @@ class CitationDisplayItem(BaseModel):
     effective_status: str = Field(..., min_length=1, description="Verified applicability status")
     legal_as_of: Optional[date] = Field(None, description="Date used for applicability")
     source_url: Optional[str] = Field(None, description="Official public source URL when available")
+    page_number: Optional[int] = Field(None, description="Page number of the PDF document")
+    label: Optional[str] = Field(None, description="Verified public citation label")
+    authority_level: Optional[str] = Field(None, description="Verified authority level")
+    authority_label: Optional[str] = Field(None, description="Verified authority label")
+    validity_sync: Optional[Dict[str, Any]] = Field(None, description="Public validity snapshot")
+    # Provenance is derived by the backend verifier, never accepted as a
+    # model-authored claim.  Keep these optional for older persisted answers
+    # while exposing the verification contract to the structured answer UI.
+    verification_status: Optional[str] = Field(None, description="Backend citation verification status")
+    verification_level: Optional[str] = Field(None, description="Verified quote/provenance level")
+    verification_reason: Optional[str] = Field(None, description="Backend verification reason")
+    viewer_url: Optional[str] = Field(None, description="Safe viewer URL for the verified source")
+    proof: Optional[Dict[str, Any]] = Field(None, description="Public, redacted verification proof")
+    # Request-local display markers, not corpus/source identifiers.
+    evidence_ids: List[Annotated[str, Field(pattern=r"^E[1-9]\d{0,2}$")]] = Field(default_factory=list)
 
 
 class AnswerSection(BaseModel):
@@ -109,6 +146,11 @@ class AnswerSection(BaseModel):
     limitation: Optional[str] = Field(None, description="Evidence limitation for a partial or insufficient issue")
     citations: List[CitationDisplayItem] = Field(default_factory=list, description="Public citations for a sufficient issue only")
     clarifying_question: Optional[str] = Field(None, description="One optional follow-up for an insufficient issue")
+    # Presentation metadata is populated deterministically from the planned
+    # issue.  It is optional to preserve compatibility with legacy messages.
+    facet: Optional[str] = Field(None, description="Primary requested facet")
+    priority: Optional[str] = Field(None, description="Issue priority")
+    claim_types: List[str] = Field(default_factory=list, description="Validated public claim types")
 
     @model_validator(mode="after")
     def validate_status_content(self):
@@ -132,7 +174,23 @@ class AnswerSection(BaseModel):
         return self
 
 
+class AnswerCompleteness(BaseModel):
+    """Structured completeness result kept separate from grounding status."""
+
+    model_config = ConfigDict(extra="allow")
+
+    status: str
+    coverage_ratio: float | None = None
+    source_unit_count: int | None = None
+    covered_unit_count: int | None = None
+    required_checks: list[str] = Field(default_factory=list)
+    checks: dict[str, bool] = Field(default_factory=dict)
+    reason_codes: list[str] = Field(default_factory=list)
+
+
 class AskResponse(BaseModel):
+    request_items: List[Dict[str, Any]] = Field(default_factory=list)
+    item_results: List[Dict[str, Any]] = Field(default_factory=list)
     model_config = ConfigDict(extra="allow")
 
     answer: str = Field(..., description="Final answer from the knowledge base")
@@ -174,25 +232,114 @@ class AskResponse(BaseModel):
         description="Optional independently grounded answer sections; omitted for legacy responses and when the feature is disabled",
     )
     canonical_domain: Optional[str] = Field(None, description="Canonical legal domain slug")
-    answer_status: Optional[str] = Field(None, description="Public answer delivery status")
-    fallback_tier: Optional[str] = Field(None, description="Retrieval/fallback tier")
-    evidence_count: Optional[int] = Field(None, description="Number of evidence chunks retrieved")
+    answer_status: Optional[str] = Field(
+        "source_gap",
+        description=(
+            "Public answer delivery status: verified|unverified|partial|cannot_verify; "
+            "legacy responses retain source_gap until upgraded by the answer pipeline"
+        ),
+    )
+    # Unified V3 delivery contract. These fields are additive so older
+    # clients can continue reading answer_status/fallback_tier while newer
+    # clients can make retry and presentation decisions deterministically.
+    outcome: Optional[str] = Field(
+        None,
+        description="Unified delivery outcome: answered|partial|source_only|clarification_required|failed",
+    )
+    reason_code: Optional[str] = Field(
+        None,
+        description="Normalized backend reason code for the delivery outcome",
+    )
+    retryable: Optional[bool] = Field(
+        None,
+        description="Whether the backend permits a retry for this turn",
+    )
+    scope: Optional[str] = Field(
+        None,
+        description="Answer scope: full_article|article_outline|bounded_window|multi_source",
+    )
+    persistence_degraded: bool = Field(
+        False,
+        description="Answer was returned but durable conversation persistence was degraded",
+    )
+    quality: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "Compact Direct RAG quality observations: citation membership, candidate "
+            "support references, assessed/unknown coverage and recorded validity; "
+            "unmeasured claim counts are omitted"
+        ),
+    )
+    fallback_tier: Optional[str] = Field("support", description="Retrieval/fallback tier")
+    evidence_count: Optional[int] = Field(0, description="Number of evidence chunks retrieved")
     coverage_warning: Optional[str] = Field(None, description="Coverage warning text")
     blocked_reason: Optional[str] = Field(None, description="Blocked reason code if any")
-    answer_completeness: Optional[Dict[str, Any]] = Field(None, description="Answer completeness detail")
+    answer_completeness: Optional[AnswerCompleteness] = Field(None, description="Answer completeness detail")
     answer_mode: Optional[str] = Field(None, description="Answer mode decision")
     timing_summary: Optional[Dict[str, Any]] = Field(None, description="Detailed stage timing summary")
+    timing: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "Canonical Direct RAG timing contract; timing_summary is retained "
+            "as a compatibility projection"
+        ),
+    )
     response_mode: Optional[str] = Field(None, description="V3 response mode")
     reason_codes: List[str] = Field(default_factory=list, description="Reason codes for response mode")
     answer_route: Optional[str] = Field(None, description="Deterministic answer route")
     pipeline_version: Optional[str] = Field(None, description="Pipeline version string")
     presentation_version: Optional[str] = Field(None, description="Presentation schema version")
     data_release_id: Optional[str] = Field(None, description="Active data release ID")
+    release_id: Optional[str] = Field(None, description="Canonical serving release identifier")
     index_fingerprint: Optional[str] = Field(None, description="Active index fingerprint")
+    manifest_hash: Optional[str] = Field(None, description="Serving manifest hash")
     validity_snapshot: Optional[str] = Field(None, description="Active validity snapshot hash")
     verification_label: Optional[str] = Field(None, description="Presentation verification label")
     historical_label: Optional[str] = Field(None, description="Presentation historical label")
     sections: Optional[Any] = Field(None, description="Structured presentation sections")
+    unverified_explanations: Optional[List[Dict[str, Any]]] = Field(
+        None,
+        description="Interpretations retained with an explicit not-verified warning",
+    )
+    suggested_questions: List[Dict[str, str]] = Field(
+        default_factory=list,
+        description="Bounded follow-up questions generated in the same answer call",
+    )
+    memory_usage: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Privacy-safe summary of conversation memory used for this turn",
+    )
+    conversation_route: Optional[Literal[
+        "chat_meta", "document_followup", "legal_query", "out_of_scope"
+    ]] = Field(None, description="Deterministic conversation-level route")
+    active_document: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Backend-projected source currently referenced by this conversation",
+    )
+    related_documents: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Up to three backend-projected documents from current retrieval citations",
+    )
+    conversation_patch: Optional[Dict[str, Any]] = Field(
+        None,
+        exclude=True,
+        description=(
+            "Internal validated digest patch. It is persisted into owner-scoped "
+            "conversation state and is never exposed by the public Ask API."
+        ),
+    )
+    model_option_id: Optional[str] = Field(
+        None, description="Turn-scoped public model option"
+    )
+    model_display_name: Optional[str] = Field(
+        None, description="Safe display name of the selected chat model"
+    )
+    model_locked: Optional[bool] = Field(
+        None, description="Deprecated compatibility field; model selection is turn-scoped"
+    )
+    generation_provenance: Optional[Dict[str, Any]] = Field(
+        None, description="Privacy-safe provider/model generation snapshot"
+    )
 
 
 # Models API models
@@ -393,12 +540,129 @@ class RebuildStatusResponse(BaseModel):
 
 
 # Settings API models
+class OrganizationUnitDomainConfig(BaseModel):
+    """One effective responsibility assignment between a unit and a domain."""
+
+    domain_code: str = Field(..., min_length=2, max_length=120, pattern=r"^[a-z0-9][a-z0-9_-]*$")
+    responsibility: Literal["primary", "support"] = "primary"
+
+
+class LegalDomainConfig(BaseModel):
+    """Admin-managed routing label with a stable, non-legal identifier."""
+
+    code: str = Field(
+        ...,
+        min_length=2,
+        max_length=120,
+        pattern=r"^[a-z0-9][a-z0-9_-]*$",
+    )
+    name: str = Field(..., min_length=2, max_length=200)
+    aliases: List[str] = Field(default_factory=list, max_length=50)
+    is_active: bool = True
+    sort_order: int = Field(0, ge=0, le=10000)
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        return " ".join(value.split())
+
+    @field_validator("aliases")
+    @classmethod
+    def normalize_aliases(cls, values: List[str]) -> List[str]:
+        return list(
+            dict.fromkeys(
+                " ".join(str(value).split())
+                for value in values
+                if str(value).strip()
+            )
+        )
+
+
+class OrganizationUnitConfig(BaseModel):
+    """Stable operational unit with a legacy domain projection.
+
+    ``domain_codes`` remains in the public contract for old clients. New code
+    persists ``domain_assignments`` as the source for primary/support routing.
+    """
+
+    id: str = Field(..., min_length=1, max_length=120)
+    code: str = Field(..., min_length=2, max_length=80, pattern=r"^[a-z0-9][a-z0-9_-]*$")
+    name: str = Field(..., min_length=2, max_length=200)
+    short_name: Optional[str] = Field(None, max_length=120)
+    aliases: List[str] = Field(default_factory=list, max_length=50)
+    parent_id: Optional[str] = Field(None, max_length=120)
+    # Keep the unit/domain relation bounded but well above the original
+    # seven-domain catalog so future administrators are not forced into a
+    # code deployment merely because the locality adds more responsibilities.
+    domain_codes: List[str] = Field(default_factory=list, max_length=200)
+    domain_assignments: List[OrganizationUnitDomainConfig] = Field(
+        default_factory=list, max_length=200
+    )
+    support_enabled: bool = True
+    is_active: bool = True
+    sort_order: int = Field(0, ge=0, le=10000)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_domain_projection(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        assignments = list(normalized.get("domain_assignments") or [])
+        domain_codes = [
+            str(item).strip()
+            for item in (normalized.get("domain_codes") or [])
+            if str(item).strip()
+        ]
+        if not assignments:
+            assignments = [
+                {"domain_code": domain, "responsibility": "primary"}
+                for domain in domain_codes
+            ]
+        assignment_domains = [
+            str(item.get("domain_code") or "").strip()
+            for item in assignments
+            if isinstance(item, dict) and str(item.get("domain_code") or "").strip()
+        ]
+        normalized["domain_assignments"] = assignments
+        normalized["domain_codes"] = list(dict.fromkeys([*domain_codes, *assignment_domains]))
+        normalized["aliases"] = list(
+            dict.fromkeys(
+                str(item).strip()
+                for item in (normalized.get("aliases") or [])
+                if str(item).strip()
+            )
+        )
+        return normalized
+
+
+class ChatModelPolicyConfig(BaseModel):
+    """Safe allow-list metadata; provider credentials never belong here."""
+
+    option_id: str = Field(..., min_length=1, max_length=200)
+    model_id: str = Field(..., min_length=1, max_length=200)
+    display_name: str = Field(..., min_length=1, max_length=160)
+    audiences: List[Literal["citizen", "officer"]] = Field(default_factory=list)
+    default_for: List[Literal["citizen", "officer"]] = Field(default_factory=list)
+    is_active: bool = True
+
+
 class SettingsResponse(BaseModel):
     default_content_processing_engine_doc: Optional[str] = None
     default_content_processing_engine_url: Optional[str] = None
     default_embedding_option: Optional[str] = None
     auto_delete_files: Optional[str] = None
     youtube_preferred_languages: Optional[List[str]] = None
+    system_name: str = "Pháp luật Hải Phòng"
+    organization_name: str = ""
+    system_prompt_addendum: str = ""
+    active_prompt_revision: int = 1
+    config_revision: int = 1
+    organization_routing_mode: Literal["legacy", "shadow", "hybrid", "unit_primary"] = "legacy"
+    organization_hybrid_started_at: Optional[str] = None
+    legal_domains: List[LegalDomainConfig] = Field(default_factory=list)
+    organization_units: List[OrganizationUnitConfig] = Field(default_factory=list)
+    chat_model_policy: List[ChatModelPolicyConfig] = Field(default_factory=list)
 
 
 class SettingsUpdate(BaseModel):
@@ -407,6 +671,34 @@ class SettingsUpdate(BaseModel):
     default_embedding_option: Optional[str] = None
     auto_delete_files: Optional[str] = None
     youtube_preferred_languages: Optional[List[str]] = None
+    system_name: Optional[str] = Field(None, min_length=2, max_length=160)
+    organization_name: Optional[str] = Field(None, max_length=200)
+    system_prompt_addendum: Optional[str] = Field(None, max_length=8000)
+    active_prompt_revision: Optional[int] = Field(None, ge=1)
+    expected_config_revision: Optional[int] = Field(None, ge=1)
+    organization_routing_mode: Optional[
+        Literal["legacy", "shadow", "hybrid", "unit_primary"]
+    ] = None
+    legal_domains: Optional[List[LegalDomainConfig]] = Field(None, max_length=200)
+    organization_units: Optional[List[OrganizationUnitConfig]] = Field(None, max_length=100)
+    chat_model_policy: Optional[List[ChatModelPolicyConfig]] = Field(None, max_length=50)
+
+
+class ModelOptionResponse(BaseModel):
+    option_id: str
+    display_name: str
+    audiences: List[Literal["citizen", "officer"]] = Field(default_factory=list)
+    is_default: bool = False
+    is_active: bool = True
+
+
+class SupportRoutingOption(BaseModel):
+    domain: str
+    domain_name: str
+    unit_id: str
+    unit_name: str
+    unit_short_name: Optional[str] = None
+    responsibility: Literal["primary", "support"] = "primary"
 
 
 # Sources API models
@@ -481,6 +773,7 @@ class SourceResponse(BaseModel):
     topics: Optional[List[str]]
     asset: Optional[AssetModel]
     full_text: Optional[str]
+    legal_document_id: Optional[str] = None
     source_scope: Optional[str] = None
     review_status: Optional[str] = None
     embedded: bool
@@ -503,6 +796,7 @@ class SourceListResponse(BaseModel):
     asset: Optional[AssetModel]
     source_scope: Optional[str] = None
     review_status: Optional[str] = None
+    legal_document_id: Optional[str] = None
     embedded: bool  # Boolean flag indicating if source has embeddings
     embedded_chunks: int  # Number of embedded chunks
     insights_count: int

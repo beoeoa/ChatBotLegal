@@ -70,6 +70,9 @@ surreal_single_data
 *.db
 *.log
 docker.env
+google-credentials.json
+firebase-service-account.json
+secrets
 .env
 .env.release
 docker-compose*

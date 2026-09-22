@@ -1,0 +1,61 @@
+{
+  "version": "legal-query-normalization-v1",
+  "checksum": "6561a4d527eb97aa61f00dd8ce87b0b291926e6c446f475015977b4b345c6c5c",
+  "unambiguous_aliases": {
+    "ko": {"replacement": "không", "code": "abbr_ko", "confidence": 0.99},
+    "k": {"replacement": "không", "code": "abbr_k", "confidence": 0.96},
+    "j": {"replacement": "gì", "code": "abbr_j", "confidence": 0.99},
+    "dc": {"replacement": "được", "code": "abbr_dc", "confidence": 0.99},
+    "ubnd": {"replacement": "Ủy ban nhân dân", "code": "abbr_ubnd", "confidence": 0.99},
+    "gpxd": {"replacement": "giấy phép xây dựng", "code": "abbr_gpxd", "confidence": 0.99},
+    "ct01": {"replacement": "CT01", "code": "abbr_ct01", "confidence": 0.99},
+    "ttru": {"replacement": "tạm trú", "code": "abbr_ttru", "confidence": 0.96},
+    "csh": {"replacement": "chủ sở hữu", "code": "abbr_csh", "confidence": 0.94},
+    "kn": {"replacement": "khiếu nại", "code": "abbr_kn", "confidence": 0.93},
+    "gks": {"replacement": "giấy khai sinh", "code": "abbr_gks", "confidence": 0.93}
+  },
+  "ambiguous_aliases": {
+    "hs": [
+      {"replacement": "hồ sơ", "required_any": ["gồm", "nộp", "giấy tờ", "thành phần", "thủ tục"], "excluded_any": ["lớp", "điểm", "sinh viên", "trường"], "confidence": 0.92, "code": "abbr_hs_ho_so"},
+      {"replacement": "học sinh", "required_any": ["lớp", "điểm", "sinh viên", "trường", "cảnh báo"], "excluded_any": ["nộp", "giấy tờ"], "confidence": 0.92, "code": "abbr_hs_hoc_sinh"}
+    ],
+    "ct": [
+      {"replacement": "Chủ tịch", "required_any": ["ubnd", "quyết định", "khiếu nại"], "confidence": 0.86, "code": "abbr_ct_chu_tich"},
+      {"replacement": "công ty", "required_any": ["doanh nghiệp", "mã số", "đăng ký kinh doanh"], "confidence": 0.86, "code": "abbr_ct_cong_ty"}
+    ],
+    "ca": [
+      {"replacement": "Công an", "required_any": ["phường", "xã", "cư trú", "căn cước"], "confidence": 0.88, "code": "abbr_ca_cong_an"},
+      {"replacement": "cả", "required_any": ["hai", "ba", "đều"], "confidence": 0.78, "code": "abbr_ca_ca"}
+    ],
+    "qđ": [
+      {"replacement": "quyết định", "required_any": ["ubnd", "khiếu nại", "xử phạt"], "confidence": 0.90, "code": "abbr_qd_quyet_dinh"},
+      {"replacement": "quy định", "required_any": ["pháp luật", "áp dụng", "theo"], "confidence": 0.82, "code": "abbr_qd_quy_dinh"}
+    ],
+    "ht": [
+      {"replacement": "hộ tịch", "required_any": ["khai sinh", "khai tử", "đăng ký", "sổ"], "confidence": 0.89, "code": "abbr_ht_ho_tich"},
+      {"replacement": "hình thức", "required_any": ["mẫu", "văn bản", "trình bày"], "confidence": 0.78, "code": "abbr_ht_hinh_thuc"}
+    ],
+    "nh": [
+      {"replacement": "ngân hàng", "required_any": ["thế chấp", "khoản vay", "tín dụng"], "confidence": 0.90, "code": "abbr_nh_ngan_hang"},
+      {"replacement": "nhà", "required_any": ["thuê", "ở", "đất"], "confidence": 0.78, "code": "abbr_nh_nha"}
+    ]
+  },
+  "phrase_corrections": {
+    "quan trongk": "quan trọng",
+    "khai sinhh": "khai sinh",
+    "khieeu nai": "khiếu nại",
+    "phap luatj": "pháp luật",
+    "thoi han": "thời hạn",
+    "ho so": "hồ sơ",
+    "dang ky": "đăng ký",
+    "giay to": "giấy tờ",
+    "co quan": "cơ quan",
+    "phap luat": "pháp luật",
+    "can bo": "cán bộ",
+    "chu nha": "chủ nhà",
+    "thu tuc": "thủ tục"
+  },
+  "vocabulary": [
+    "hồ sơ", "khai sinh", "khai tử", "hộ tịch", "khiếu nại", "tố cáo", "cư trú", "tạm trú", "thường trú", "giấy tờ", "biểu mẫu", "thủ tục", "thẩm quyền", "quyết định", "quy định", "Chủ tịch", "Công an", "Ủy ban nhân dân", "giấy phép xây dựng", "trợ cấp", "hưu trí xã hội", "chủ sở hữu", "ngân hàng", "quan trọng"
+  ]
+}

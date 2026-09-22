@@ -271,11 +271,14 @@ def classify_question(question: str, detected_domain: str | None = None) -> dict
         "dat dai", "so do", "giay chung nhan quyen su dung dat", "xay dung",
         "giay phep xay dung", "chuyen nhuong dat", "tach thua", "thua dat",
         "ranh gioi dat", "quy hoach", "khu dat", "dat xen ket",
-        "thu hoi dat", "dien tich dat",
+        "thu hoi dat", "dien tich dat", "quy hoach do thi",
+        "quy hoach nong thon", "quy dinh quan ly theo quy hoach",
+        "cong trinh thuy loi", "an toan cong trinh thuy loi",
     ))
     complaint = _has_any(text, (
         "khieu nai", "to cao", "xu phat", "phat hanh chinh", "bien ban",
-        "quyet dinh xu phat", "khieu kien", "giai trinh",
+        "quyet dinh xu phat", "khieu kien", "bi phat", "muc phat",
+        "khac phuc", "xam pham", "vi pham quy dinh",
     ))
     residence = _has_any(text, (
         "cu tru", "thuong tru", "tam tru", "luu tru", "can cuoc", "an ninh",
@@ -283,7 +286,9 @@ def classify_question(question: str, detected_domain: str | None = None) -> dict
     ))
     social = _has_any(text, (
         "bao tro xa hoi", "tro cap", "ho ngheo", "bao hiem y te", "y te",
-        "giao duc", "nguoi co cong", "khuyet tat", "tre em",
+        "giao duc", "hoc sinh", "truong pho thong", "truong cong lap",
+        "co so giao duc", "trach nhiem giai trinh", "nguoi dung dau",
+        "nguoi co cong", "khuyet tat", "tre em",
     ))
     explanation = _has_any(text, (
         "la gi", "quy dinh the nao", "co duoc khong", "dieu kien",
@@ -394,7 +399,39 @@ def classify_question(question: str, detected_domain: str | None = None) -> dict
         )):
             sections.append("legal_basis_links")
     elif question_type in {"complaint_sanction"}:
-        sections = ["conclusion", "authority", "rights_or_explanation", "documents", "deadline", "legal_basis_links"]
+        # A complaint/denunciation label does not imply that the user asked
+        # for a dossier and deadline. Requiring the broad template made a
+        # correctly grounded classification/transfer answer look incomplete.
+        sections = ["conclusion", "rights_or_explanation"]
+        if _has_any(
+            text,
+            (
+                "tham quyen",
+                "co quan nao",
+                "ai giai quyet",
+                "nop cho ai",
+                "chuyen den ai",
+                "chuyen cho ai",
+                "ai tiep nhan",
+            ),
+        ):
+            sections.append("authority")
+        if _has_any(text, ("ho so", "giay to", "tai lieu", "can chuan bi")):
+            sections.append("documents")
+        if _has_any(text, ("thoi han", "bao lau", "may ngay", "ngay lam viec")):
+            sections.append("deadline")
+        if _has_any(
+            text,
+            (
+                "can cu",
+                "dieu luat",
+                "theo dieu",
+                "van ban",
+                "nguon",
+                "quy dinh nao",
+            ),
+        ):
+            sections.append("legal_basis_links")
     else:
         # A direct request to explain one provision needs the governing rule,
         # not synthetic condition and exception sections. Add those facets only

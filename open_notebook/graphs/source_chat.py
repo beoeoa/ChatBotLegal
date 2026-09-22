@@ -1,5 +1,6 @@
 import asyncio
 import sqlite3
+from threading import Lock
 from typing import Annotated, Dict, List, Optional
 
 from ai_prompter import Prompter
@@ -10,7 +11,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
-from open_notebook.ai.provision import provision_langchain_model
+from open_notebook.ai.models import model_manager
 from open_notebook.config import LANGGRAPH_CHECKPOINT_FILE
 from open_notebook.domain.notebook import Source, SourceInsight
 from open_notebook.exceptions import OpenNotebookError
@@ -68,7 +69,7 @@ def _call_model_with_source_context_inner(
                 source_id=source_id,
                 include_insights=True,
                 include_notes=False,  # Focus on source-specific content
-                max_tokens=50000,  # Reasonable limit for source context
+                max_tokens=18000,
             )
             return new_loop.run_until_complete(context_builder.build())
         finally:
@@ -130,24 +131,30 @@ def _call_model_with_source_context_inner(
     )
     payload = [SystemMessage(content=system_prompt)] + state.get("messages", [])
 
-    # Handle async model provisioning from sync context
+    async def generate():
+        from api.model_gateway import default_model_gateway
+        model_id = (
+            config.get("configurable", {}).get("model_id")
+            or state.get("model_override")
+        )
+        if not model_id:
+            model_id = (await model_manager.get_defaults()).default_chat_model
+        result = await default_model_gateway.generate(
+            str(payload),
+            model_id=str(model_id),
+            options={"max_tokens": 8192, "timeout": 45},
+        )
+        return AIMessage(
+            content=result.text,
+            response_metadata={
+                **result.metadata,
+                "canonical_model_id": result.model_id,
+                "fallback_used": result.fallback_used,
+            },
+        )
+
     def run_in_new_loop():
-        """Run the async function in a new event loop"""
-        new_loop = asyncio.new_event_loop()
-        try:
-            asyncio.set_event_loop(new_loop)
-            return new_loop.run_until_complete(
-                provision_langchain_model(
-                    str(payload),
-                    config.get("configurable", {}).get("model_id")
-                    or state.get("model_override"),
-                    "chat",
-                    max_tokens=8192,
-                )
-            )
-        finally:
-            new_loop.close()
-            asyncio.set_event_loop(None)
+        return asyncio.run(generate())
 
     try:
         # Try to get the current event loop
@@ -157,20 +164,10 @@ def _call_model_with_source_context_inner(
 
         with concurrent.futures.ThreadPoolExecutor() as executor:
             future = executor.submit(run_in_new_loop)
-            model = future.result()
+            ai_message = future.result()
     except RuntimeError:
         # No event loop running, safe to use asyncio.run()
-        model = asyncio.run(
-            provision_langchain_model(
-                str(payload),
-                config.get("configurable", {}).get("model_id")
-                or state.get("model_override"),
-                "chat",
-                max_tokens=8192,
-            )
-        )
-
-    ai_message = model.invoke(payload)
+        ai_message = asyncio.run(generate())
 
     # Clean thinking content from AI response (e.g., <think>...</think> tags)
     content = extract_text_content(ai_message.content)
@@ -240,16 +237,42 @@ def _format_source_context(context_data: Dict) -> str:
     return "\n".join(context_parts)
 
 
-# Create SQLite checkpointer
-conn = sqlite3.connect(
-    LANGGRAPH_CHECKPOINT_FILE,
-    check_same_thread=False,
-)
-memory = SqliteSaver(conn)
+_graph_lock = Lock()
+_compiled_source_chat_graph = None
+_checkpoint_connection = None
 
-# Create the StateGraph
-source_chat_state = StateGraph(SourceChatState)
-source_chat_state.add_node("source_chat_agent", call_model_with_source_context)
-source_chat_state.add_edge(START, "source_chat_agent")
-source_chat_state.add_edge("source_chat_agent", END)
-source_chat_graph = source_chat_state.compile(checkpointer=memory)
+
+def _get_compiled_source_chat_graph():
+    """Create the persistent source-chat graph only on first use."""
+
+    global _compiled_source_chat_graph, _checkpoint_connection
+    if _compiled_source_chat_graph is not None:
+        return _compiled_source_chat_graph
+    with _graph_lock:
+        if _compiled_source_chat_graph is not None:
+            return _compiled_source_chat_graph
+        _checkpoint_connection = sqlite3.connect(
+            LANGGRAPH_CHECKPOINT_FILE,
+            check_same_thread=False,
+        )
+        memory = SqliteSaver(_checkpoint_connection)
+        source_chat_state = StateGraph(SourceChatState)
+        source_chat_state.add_node(
+            "source_chat_agent", call_model_with_source_context
+        )
+        source_chat_state.add_edge(START, "source_chat_agent")
+        source_chat_state.add_edge("source_chat_agent", END)
+        _compiled_source_chat_graph = source_chat_state.compile(
+            checkpointer=memory
+        )
+        return _compiled_source_chat_graph
+
+
+class _LazySourceChatGraph:
+    """Keep the graph API stable while avoiding import-time file writes."""
+
+    def __getattr__(self, name):
+        return getattr(_get_compiled_source_chat_graph(), name)
+
+
+source_chat_graph = _LazySourceChatGraph()

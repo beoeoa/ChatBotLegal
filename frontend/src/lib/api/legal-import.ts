@@ -8,6 +8,7 @@ export interface LegalField {
 }
 
 export interface LegalImportPayload {
+  uploaded_pdf_sha256?: string | null
   title: string
   law_number: string
   document_type: string
@@ -22,6 +23,12 @@ export interface LegalImportPayload {
   applicability_info: string
   content: string
   confirmed_official_source: boolean
+  /** Stable admin-managed routing code; field_id remains a legacy storage key. */
+  domain_slug?: string | null
+  domain_codes?: string[]
+  primary_organization_unit_id?: string | null
+  organization_unit_ids?: string[]
+  organization_assignment_state?: 'assigned' | 'shared' | 'unassigned'
 }
 
 export interface LegalDomain {
@@ -42,12 +49,20 @@ export interface LegalCrawlSource {
   max_documents_per_run: number
   max_listing_pages_per_run?: number | null
   filter_keyword?: string | null
+  website_type?: 'mixed_official' | 'legal_documents' | 'procedures' | 'forms' | 'reference'
+  link_selector?: string | null
+  next_page_selector?: string | null
+  include_patterns?: string[] | null
+  exclude_patterns?: string[] | null
   last_checked_at?: string | null
   last_success_at?: string | null
   last_error?: string | null
   domains?: string[] | null
+  default_organization_unit_id?: string | null
+  unassigned_policy?: 'unassigned' | 'shared'
   rate_limit_seconds?: number | null
   content_fetch_allowed?: boolean | null
+  compatibility_mode?: 'standard' | 'high'
   last_run_stats?: Record<string, number> | null
   source_freshness?: string | null
   last_status?: string | null
@@ -56,6 +71,33 @@ export interface LegalCrawlSource {
   can_delete?: boolean
   can_scan?: boolean
   purpose?: string | null
+}
+
+export interface LegalCrawlScanError {
+  source_id: string
+  status: string
+  message: string
+}
+
+export interface LegalCrawlScanRun {
+  status: string
+  source_id?: string
+  statistics?: Record<string, number>
+  failure_reason?: string | null
+  reason?: string | null
+}
+
+export interface LegalCrawlScanResult {
+  status: 'completed' | 'completed_with_warnings' | 'partial' | 'failed' | 'busy' | 'skipped'
+  runs: LegalCrawlScanRun[]
+  run_count: number
+  created: number
+  updated: number
+  failed_count: number
+  warning_count: number
+  busy_count: number
+  skipped_count: number
+  errors: LegalCrawlScanError[]
 }
 
 export interface LegalImportReadiness {
@@ -88,7 +130,27 @@ export interface FormReviewCaseV17 {
   status: FormWorkflowStatus
   revision: number
   version: number
-  current_submission: { source_url: string; source_checksum?: string | null; note?: string }
+  current_submission: { source_url: string; source_checksum?: string | null; note?: string; asset_kind?: 'file' | 'eform'; page_number?: number | null }
+  legal_metadata?: Record<string, unknown>
+}
+
+export interface FormManagementEvent {
+  event_id: string; actor_id: string; action: string; occurred_at: string
+  from_status?: string; to_status?: string; reason_code?: string
+}
+
+export interface FormManagementAsset {
+  form_id: string; canonical_name: string; form_code?: string; asset_kind: 'file' | 'eform'
+  source_url: string; source_checksum: string; effective_from?: string; effective_to?: string
+  audiences: string[]; download_url?: string
+}
+
+export interface FormManagementCatalog {
+  release_id?: string
+  procedures: FormProcedureCandidateV18[]
+  assets: FormManagementAsset[]
+  bindings: Array<{ procedure_id: string; form_id?: string; audience: string; condition?: string }>
+  aliases: Array<{ procedure_id: string; alias: string; alias_kind: string }>
 }
 
 export interface FormCoverageV17 {
@@ -109,6 +171,9 @@ export interface FormProcedureCandidateV18 {
   domain: string
   official_source_url?: string | null
   coverage_status?: string | null
+  primary_organization_unit_id?: string | null
+  primary_organization_unit_name?: string | null
+  supporting_organization_unit_ids?: string[]
 }
 
 export interface FormSourceProposalMetadataV18 {
@@ -154,6 +219,7 @@ export interface FormReleaseV17 {
     procedures?: Array<Record<string, unknown>>
     assets?: Array<Record<string, unknown>>
     bindings?: Array<Record<string, unknown>>
+    exclusions?: Array<Record<string, unknown>>
   }
 }
 
@@ -166,7 +232,37 @@ export interface CrawlSourceCreatePayload {
   max_documents_per_run?: number
   max_listing_pages_per_run?: number
   rate_limit_seconds?: number
+  compatibility_mode?: 'standard' | 'high'
   filter_keyword?: string | null
+  website_type?: 'mixed_official' | 'legal_documents' | 'procedures' | 'forms' | 'reference'
+  link_selector?: string | null
+  next_page_selector?: string | null
+  include_patterns?: string[]
+  exclude_patterns?: string[]
+  domains?: string[]
+  default_organization_unit_id?: string | null
+  unassigned_policy?: 'unassigned' | 'shared'
+}
+
+export interface CrawlSourcePreview {
+  status: 'ok'
+  mutation_performed: false
+  base_url: string
+  website_type: NonNullable<LegalCrawlSource['website_type']>
+  discovered_count: number
+  preview_count: number
+  truncated: boolean
+  listing_verified?: boolean
+  filtered_out_count?: number
+  notice?: string | null
+  candidates: Array<{
+    url: string
+    title: string
+    context: string
+    source_type: string
+    law_number?: string
+    document_type?: string
+  }>
 }
 
 export interface AiAssessment {
@@ -188,6 +284,19 @@ export interface CandidateExtractionResult {
   reason?: string
   language?: string
   page_count?: number
+  processed_pages?: number
+  total_pages?: number
+  complete?: boolean
+  truncated?: boolean
+  failed_pages?: number[]
+  pages_without_text?: number[]
+  native_text_pages?: number[]
+  ocr_requested_pages?: number[]
+  ocr_pages?: number[]
+  page_extractors?: Record<string, string>
+  coverage_percent?: number
+  table_count?: number
+  table_extracted_count?: number
   characters?: number
   preview?: string
   text_fingerprint?: string | null
@@ -202,6 +311,42 @@ export interface CandidateReviewRecommendation {
   passed_hard_gates?: boolean
   evidence_snippets?: Array<{ kind: string; text: string }>
   generated_at?: string
+}
+
+export interface LegalDuplicateMatch {
+  id: string
+  target_type: 'document' | 'candidate'
+  kind: 'duplicate_content' | 'identity_match' | 'content_changed' | 'metadata_conflict'
+  title?: string | null
+  law_number?: string | null
+  issuing_agency?: string | null
+  issued_date?: string | null
+  source_url?: string | null
+  status?: string | null
+  reason_codes: string[]
+  target_revision: string
+  can_archive: boolean
+  can_review_replacement: boolean
+}
+
+export interface LegalDuplicateResolutionRequest {
+  action: 'archive_duplicate' | 'review_replacement'
+  target_type: 'document' | 'candidate'
+  target_id: string
+  expected_revision: string
+  target_revision: string
+  reason: string
+  confirmed_same_document: boolean
+}
+
+export interface LegalDuplicateResolution {
+  action: LegalDuplicateResolutionRequest['action']
+  target_type: 'document' | 'candidate'
+  target_id: string
+  target_title?: string
+  reason: string
+  resolved_at: string
+  corpus_changed: false
 }
 
 export interface LegalCrawlCandidate {
@@ -219,6 +364,15 @@ export interface LegalCrawlCandidate {
   status: string
   suggested_action: string
   comparison_status: string
+  duplicate_matches?: LegalDuplicateMatch[]
+  duplicate_check_status?: 'complete' | 'unavailable'
+  duplicate_check_revision?: string
+  duplicate_resolution?: LegalDuplicateResolution | null
+  duplicate_runtime_document?: {
+    id?: string | number | null
+    title?: string | null
+    law_number?: string | null
+  } | null
   detected_changes: string[]
   detected_change_details?: Array<{
     field: string
@@ -233,6 +387,9 @@ export interface LegalCrawlCandidate {
   reviewed_by?: string | null
   reviewed_role?: string | null
   inferred_domain?: string | null
+  assignment_state?: 'assigned' | 'shared' | 'unassigned' | null
+  primary_organization_unit_id?: string | null
+  organization_unit_ids?: string[] | null
   suitability_recommendation?: string | null
   ai_assessment?: AiAssessment | null
   review_recommendation?: CandidateReviewRecommendation | null
@@ -248,6 +405,8 @@ export interface LegalCrawlCandidate {
   document_id?: string | null
   chunk_count?: number | null
   indexed_at?: string | null
+  vector_collection?: string | null
+  chatbot_ready?: boolean | null
   requested_changes_note?: string | null
   proposal_reason?: string | null
   source_type?: string | null
@@ -266,6 +425,8 @@ export interface LegalCandidateMetadataUpdate {
   expired_date?: string
   source_url?: string
   confirmed_official_source?: boolean
+  assignment_state?: 'assigned' | 'shared' | 'unassigned'
+  primary_organization_unit_id?: string | null
 }
 
 export interface LegalCrawlNotification {
@@ -282,6 +443,8 @@ export interface LegalCrawlSummary {
   pending_review_count: number
   unread_notification_count: number
   source_count: number
+  /** Included by /crawl/summary so the page does not repeat /crawl/sources. */
+  sources?: LegalCrawlSource[]
   last_checked_at?: string | null
   schedule_interval_minutes?: number
   activated_candidates?: number
@@ -578,7 +741,13 @@ export interface ImportPreview {
 export type LegalImportExtractor = 'auto' | 'basic' | 'rag_anything'
 
 export type LegalValidityHealth = 'healthy' | 'degraded' | 'stale' | 'missing'
-export type LegalValidityDecisionAction = 'confirm_mapping' | 'reject_match' | 'request_recheck'
+export type LegalValidityDecisionAction =
+  | 'confirm_mapping'
+  | 'reject_match'
+  | 'request_recheck'
+  | 'mark_historical'
+  | 'quarantine'
+  | 'replace_with_candidate'
 
 export interface LegalValiditySyncStatus {
   mode: 'observe' | 'protect' | 'strict'
@@ -596,6 +765,11 @@ export interface LegalValiditySyncStatus {
   }>
   reason_code?: string | null
   age_seconds?: number | null
+  failure_phase?: string | null
+  error_code?: string | null
+  error_message?: string | null
+  release_id?: string | null
+  manifest_sha256?: string | null
 }
 
 export interface LegalValidityEvent {
@@ -672,27 +846,27 @@ export interface LegalValiditySyncClient {
     review_status?: string
     severity?: string
     scope?: string
+    expired_within_days?: number
+    current_snapshot_only?: boolean
     limit?: number
     cursor?: string
   }): Promise<LegalValidityEventPage>
-  runValiditySync(payload: {
-    reason: string
-    scope: Array<'central' | 'haiphong' | 'local'>
-    limit: number
-  }): Promise<Record<string, unknown>>
   decideValidityEvent(
     eventId: string,
     payload: { action: LegalValidityDecisionAction; reason: string },
-  ): Promise<{ event: Partial<LegalValidityEvent> | null; decision: Record<string, unknown> }>
+  ): Promise<{ event: Partial<LegalValidityEvent> | null; decision: Record<string, unknown>; operation?: Record<string, unknown> | null }>
   validityDocument(documentId: string): Promise<LegalValidityDocumentTimeline>
   previewValidityVectorCleanup(documentId: string): Promise<LegalVectorCleanupManifest>
   cleanupValidityVectors(documentId: string, payload: { reason: string }): Promise<LegalVectorCleanupManifest>
+  extractFile?(file: File, extractor?: LegalImportExtractor): Promise<{ filename: string; characters: number; content: string }>
+  createReplacementWorkflow?(documentId: string, payload: { event_id: string; source_url: string; reason: string; uploaded_content?: string; uploaded_filename?: string }): Promise<{ status: string; workflow_id?: string; replacement?: Record<string, unknown>; old_document?: Record<string, unknown>; message?: string }>
 }
 
 export const legalImportApi = {
   async formProcedureCandidates(params: {
     q?: string
     domain?: string
+    organization_unit_id?: string
     limit?: number
   } = {}): Promise<{
     items: FormProcedureCandidateV18[]
@@ -717,6 +891,7 @@ export const legalImportApi = {
     source_checksum?: string | null
     asset_kind?: 'file' | 'eform'
     note?: string
+    page_number?: number | null
   }): Promise<FormReviewCaseV17> {
     const response = await apiClient.post<FormReviewCaseV17>('/procedures/forms-catalog/review-cases', payload)
     return response.data
@@ -743,6 +918,38 @@ export const legalImportApi = {
   async formGovernanceCases(status?: FormWorkflowStatus): Promise<FormReviewCaseV17[]> {
     const response = await apiClient.get<FormReviewCaseV17[]>('/procedures/forms-catalog/review-cases', { params: { status } })
     return response.data
+  },
+
+  async formManagementCatalog(): Promise<FormManagementCatalog> {
+    return (await apiClient.get<FormManagementCatalog>('/procedures/forms-catalog/management-catalog')).data
+  },
+
+  async editFormDraft(item: FormReviewCaseV17, submission: FormReviewCaseV17['current_submission'] & { title: string; procedure_id: string; domain: string }): Promise<FormReviewCaseV17> {
+    return (await apiClient.put<FormReviewCaseV17>(`/procedures/forms-catalog/review-cases/${encodeURIComponent(item.case_id)}/draft`, { version: item.version, submission })).data
+  },
+
+  async deleteFormDraft(item: FormReviewCaseV17, reason: string): Promise<FormReviewCaseV17> {
+    return (await apiClient.post<FormReviewCaseV17>(`/procedures/forms-catalog/review-cases/${encodeURIComponent(item.case_id)}/delete-draft`, { version: item.version, reason })).data
+  },
+
+  async replaceManagedForm(formId: string, procedureId: string): Promise<FormReviewCaseV17> {
+    return (await apiClient.post<FormReviewCaseV17>(`/procedures/forms-catalog/managed-assets/${encodeURIComponent(formId)}/replace`, { procedure_id: procedureId })).data
+  },
+
+  async formCaseHistory(caseId: string): Promise<FormManagementEvent[]> {
+    return (await apiClient.get<FormManagementEvent[]>(`/procedures/forms-catalog/review-cases/${encodeURIComponent(caseId)}/history`)).data
+  },
+
+  async formAssetHistory(formId: string): Promise<FormManagementEvent[]> {
+    return (await apiClient.get<FormManagementEvent[]>(`/procedures/forms-catalog/managed-assets/${encodeURIComponent(formId)}/history`)).data
+  },
+
+  async withdrawFormPreview(formId: string, reason: string): Promise<FormReleaseV17> {
+    return (await apiClient.post<FormReleaseV17>(`/procedures/forms-catalog/managed-assets/${encodeURIComponent(formId)}/withdraw-preview`, { reason })).data
+  },
+
+  async testFormDownload(caseId: string): Promise<Blob> {
+    return (await apiClient.get<Blob>(`/procedures/forms-catalog/review-cases/${encodeURIComponent(caseId)}/test-download`, { responseType: 'blob' })).data
   },
 
   async formGovernanceCoverage(): Promise<FormCoverageV17> {
@@ -772,6 +979,11 @@ export const legalImportApi = {
 
   async readyFormForAttestation(caseId: string): Promise<FormReviewCaseV17> {
     const response = await apiClient.post<FormReviewCaseV17>(`/procedures/forms-catalog/review-cases/${encodeURIComponent(caseId)}/ready-for-attestation`)
+    return response.data
+  },
+
+  async reopenFormForCorrection(caseId: string): Promise<FormReviewCaseV17> {
+    const response = await apiClient.post<FormReviewCaseV17>(`/procedures/forms-catalog/review-cases/${encodeURIComponent(caseId)}/reopen-for-correction`)
     return response.data
   },
 
@@ -807,6 +1019,16 @@ export const legalImportApi = {
     const response = await apiClient.get<Pick<FormReleaseV17, 'release_id' | 'version' | 'legal_as_of' | 'manifest_sha256' | 'status'>>('/procedures/forms-catalog/releases/active')
     return response.data
   },
+  async pendingFormRelease(): Promise<FormReleaseV17 | null> {
+    try {
+      const response = await apiClient.get<FormReleaseV17>('/procedures/forms-catalog/releases/pending')
+      return response.data
+    } catch (error) {
+      const status = (error as { response?: { status?: number } })?.response?.status
+      if (status === 404) return null
+      throw error
+    }
+  },
   async validityStatus(): Promise<LegalValiditySyncStatus> {
     const response = await apiClient.get<LegalValiditySyncStatus>('/legal/validity/status')
     return response.data
@@ -816,6 +1038,8 @@ export const legalImportApi = {
     review_status?: string
     severity?: string
     scope?: string
+    expired_within_days?: number
+    current_snapshot_only?: boolean
     limit?: number
     cursor?: string
   } = {}): Promise<LegalValidityEventPage> {
@@ -823,22 +1047,14 @@ export const legalImportApi = {
     return response.data
   },
 
-  async runValiditySync(payload: {
-    reason: string
-    scope: Array<'central' | 'haiphong' | 'local'>
-    limit: number
-  }): Promise<Record<string, unknown>> {
-    const response = await apiClient.post<Record<string, unknown>>('/legal/validity/run', payload)
-    return response.data
-  },
-
   async decideValidityEvent(
     eventId: string,
     payload: { action: LegalValidityDecisionAction; reason: string },
-  ): Promise<{ event: Partial<LegalValidityEvent> | null; decision: Record<string, unknown> }> {
+  ): Promise<{ event: Partial<LegalValidityEvent> | null; decision: Record<string, unknown>; operation?: Record<string, unknown> | null }> {
     const response = await apiClient.post<{
       event: Partial<LegalValidityEvent> | null
       decision: Record<string, unknown>
+      operation?: Record<string, unknown> | null
     }>(`/legal/validity/events/${encodeURIComponent(eventId)}/decision`, payload)
     return response.data
   },
@@ -868,16 +1084,36 @@ export const legalImportApi = {
     return response.data
   },
 
-  async importReadiness(): Promise<LegalImportReadiness> {
+  async createReplacementWorkflow(
+    documentId: string,
+    payload: { event_id: string; source_url: string; reason: string; uploaded_content?: string; uploaded_filename?: string },
+  ): Promise<{ status: string; workflow_id?: string; replacement?: Record<string, unknown>; old_document?: Record<string, unknown>; message?: string }> {
+    const response = await apiClient.post<{ status: string; workflow_id?: string; replacement?: Record<string, unknown>; old_document?: Record<string, unknown>; message?: string }>(
+      `/legal/validity/documents/${encodeURIComponent(documentId)}/replacement-workflow`,
+      payload,
+      { headers: { 'Idempotency-Key': `replacement-${documentId}-${payload.source_url}-${payload.uploaded_filename || ''}-${(payload.uploaded_content || '').length}` } },
+    )
+    return response.data
+  },
+
+  async importReadiness(timeout = 1800): Promise<LegalImportReadiness> {
     const baseUrl = (await getApiUrl()).replace(/\/$/, '')
     // The normal local deployment uses the Next.js `/api` rewrite. Readiness
     // is mounted at the FastAPI root, so keep that root route when an explicit
     // API origin exists and tunnel it through the rewrite for a relative URL.
     const readinessUrl = baseUrl ? `${baseUrl}/ready/import` : '/api/ready/import'
-    const response = await fetch(readinessUrl, {
-      cache: 'no-store',
-      credentials: 'include',
-    })
+    const controller = new AbortController()
+    const timer = window.setTimeout(() => controller.abort(), timeout)
+    let response: Response
+    try {
+      response = await fetch(readinessUrl, {
+        cache: 'no-store',
+        credentials: 'include',
+        signal: controller.signal,
+      })
+    } finally {
+      window.clearTimeout(timer)
+    }
     const payload = await response.json().catch(() => null)
     if (!payload || typeof payload !== 'object' || !('status' in payload)) {
       throw new Error('Không nhận được trạng thái pipeline nhập kho.')
@@ -885,8 +1121,8 @@ export const legalImportApi = {
     return payload as LegalImportReadiness
   },
 
-  async fields(): Promise<LegalField[]> {
-    const response = await apiClient.get<{ fields: LegalField[] }>('/legal/import/fields')
+  async fields(timeout = 1800): Promise<LegalField[]> {
+    const response = await apiClient.get<{ fields: LegalField[] }>('/legal/import/fields', { timeout })
     return response.data.fields
   },
 
@@ -895,7 +1131,13 @@ export const legalImportApi = {
     return response.data
   },
 
-  async importDocument(payload: LegalImportPayload) {
+  async importDocument(payload: LegalImportPayload, file?: File | null) {
+    if (file) {
+      const data = new FormData()
+      data.append('metadata_json', JSON.stringify(payload))
+      data.append('file', file)
+      return (await apiClient.post('/legal/import/with-file', data)).data
+    }
     const response = await apiClient.post('/legal/import', payload)
     return response.data
   },
@@ -916,6 +1158,28 @@ export const legalImportApi = {
     extractor_fallback_reason?: string
     content_blocks?: number
     repo_path?: string
+    file_fingerprint?: string
+    total_pages?: number
+    processed_pages?: number
+    page_count?: number
+    complete?: boolean
+    truncated?: boolean
+    failed_pages?: number[]
+    pages_without_text?: number[]
+    table_count?: number
+    table_extracted_count?: number
+    native_text_pages?: number[]
+    ocr_requested_pages?: number[]
+    ocr_pages?: number[]
+    page_extractors?: Record<string, string>
+    coverage_percent?: number
+    ocr_status?: string
+    reason?: string
+    deferred_ocr?: boolean
+    cache_hit?: boolean
+    file_id?: string
+    extraction_job_id?: string
+    extraction_status?: 'processing' | 'complete' | 'partial' | 'error'
   }> {
     const formData = new FormData()
     formData.append('file', file)
@@ -947,17 +1211,17 @@ export const legalImportApi = {
     return response.data
   },
 
-  async crawlSummary(): Promise<LegalCrawlSummary> {
-    const response = await apiClient.get<LegalCrawlSummary>('/legal/crawl/summary')
+  async crawlSummary(timeout = 1800): Promise<LegalCrawlSummary> {
+    const response = await apiClient.get<LegalCrawlSummary>('/legal/crawl/summary', { timeout })
     return response.data
   },
 
-  async crawlSources(): Promise<LegalCrawlSource[]> {
-    const response = await apiClient.get<{ sources: LegalCrawlSource[] }>('/legal/crawl/sources')
+  async crawlSources(timeout = 1800): Promise<LegalCrawlSource[]> {
+    const response = await apiClient.get<{ sources: LegalCrawlSource[] }>('/legal/crawl/sources', { timeout })
     return response.data.sources
   },
 
-  async updateCrawlSource(sourceId: string, payload: Partial<Pick<LegalCrawlSource, 'name' | 'base_url' | 'sitemap_scope' | 'enabled' | 'interval_minutes' | 'lookback_days' | 'max_documents_per_run' | 'max_listing_pages_per_run' | 'rate_limit_seconds' | 'filter_keyword'>>) {
+  async updateCrawlSource(sourceId: string, payload: Partial<Pick<LegalCrawlSource, 'name' | 'base_url' | 'sitemap_scope' | 'enabled' | 'interval_minutes' | 'lookback_days' | 'max_documents_per_run' | 'max_listing_pages_per_run' | 'rate_limit_seconds' | 'filter_keyword' | 'website_type' | 'link_selector' | 'next_page_selector' | 'include_patterns' | 'exclude_patterns' | 'content_fetch_allowed' | 'compatibility_mode'>>) {
     const response = await apiClient.patch<{ source: LegalCrawlSource }>(`/legal/crawl/sources/${sourceId}`, payload)
     return response.data.source
   },
@@ -967,24 +1231,76 @@ export const legalImportApi = {
     return response.data.source
   },
 
-  async deleteCrawlSource(sourceId: string) {
-    const response = await apiClient.delete<{ id: string; deleted: boolean; name?: string }>(`/legal/crawl/sources/${sourceId}`)
+  async previewCrawlSource(payload: CrawlSourceCreatePayload): Promise<CrawlSourcePreview> {
+    const response = await apiClient.post<CrawlSourcePreview>('/legal/crawl/sources/preview', payload, {
+      timeout: 60_000,
+    })
     return response.data
   },
 
-  async scanNow(sourceId?: string) {
-    const response = await apiClient.post('/legal/crawl/scan', null, {
+  async extractionJob(jobId: string): Promise<{
+    job_id: string
+    file_id: string
+    extraction_status: 'processing' | 'complete' | 'partial' | 'error'
+    extracted_text?: string
+    char_count?: number
+    error?: string | null
+    warnings?: string[]
+    complete?: boolean
+    total_pages?: number
+    processed_pages?: number
+    page_count?: number
+    coverage_percent?: number
+    pages_without_text?: number[]
+    failed_pages?: number[]
+    native_text_pages?: number[]
+    ocr_pages?: number[]
+    page_extractors?: Record<string, string>
+    table_count?: number
+    table_extracted_count?: number
+    extractor_used?: string
+    extractor_version?: string
+  }> {
+    const response = await apiClient.get(`/media/extraction-jobs/${encodeURIComponent(jobId)}`)
+    return response.data
+  },
+
+  async deleteCrawlSource(sourceId: string) {
+    const response = await apiClient.delete<{ id: string; deleted: boolean; already_deleted?: boolean; name?: string }>(`/legal/crawl/sources/${encodeURIComponent(sourceId)}`)
+    return response.data
+  },
+
+  async scanNow(sourceId?: string): Promise<LegalCrawlScanResult> {
+    const response = await apiClient.post<LegalCrawlScanResult>('/legal/crawl/scan', null, {
       params: sourceId ? { source_id: sourceId } : undefined,
       timeout: 180_000,
     })
     return response.data
   },
 
-  async crawlCandidates(status = 'pending_review', limit = 100): Promise<LegalCrawlCandidate[]> {
+  async crawlCandidates(
+    status = 'pending_review',
+    limit = 100,
+    timeout = 1800,
+    sourceType = 'all',
+  ): Promise<LegalCrawlCandidate[]> {
     const response = await apiClient.get<{ candidates: LegalCrawlCandidate[] }>('/legal/crawl/candidates', {
-      params: { status, limit },
+      params: {
+        ...(status && status !== 'all' ? { status } : {}),
+        ...(sourceType && sourceType !== 'all' ? { source_type: sourceType } : {}),
+        limit,
+      },
+      timeout,
     })
     return response.data.candidates
+  },
+
+  async crawlCandidatePage(status = 'all', limit = 20, offset = 0, sourceType = 'all', origin = 'all', timeout = 1800) {
+    const response = await apiClient.get<{ candidates: LegalCrawlCandidate[]; total: number; limit: number; offset: number }>('/legal/crawl/candidates', {
+      params: { status, source_type: sourceType, origin, limit, offset },
+      timeout,
+    })
+    return response.data
   },
 
   async reviewCandidate(candidateId: string, decision: 'approved' | 'rejected' | 'changes_requested', review_note = '') {
@@ -993,6 +1309,15 @@ export const legalImportApi = {
       review_note,
     })
     return response.data.candidate
+  },
+
+  async resolveDuplicate(candidateId: string, payload: LegalDuplicateResolutionRequest) {
+    const response = await apiClient.post<{
+      candidate: LegalCrawlCandidate
+      resolution: LegalDuplicateResolution
+      idempotent: boolean
+    }>(`/legal/crawl/candidates/${encodeURIComponent(candidateId)}/duplicate-resolution`, payload, { timeout: 12_000 })
+    return response.data
   },
 
   async updateCandidateMetadata(candidateId: string, payload: LegalCandidateMetadataUpdate) {

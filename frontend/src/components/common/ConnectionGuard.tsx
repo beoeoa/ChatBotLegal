@@ -15,7 +15,7 @@ export function ConnectionGuard({ children }: ConnectionGuardProps) {
   // Use a ref to track checking status to avoid dependency cycles
   const isCheckingRef = useRef(false)
 
-  const checkConnection = useCallback(async () => {
+  const checkConnection = useCallback(async (force = false) => {
     // Prevent re-entry if already checking
     if (isCheckingRef.current) {
        return
@@ -26,8 +26,9 @@ export function ConnectionGuard({ children }: ConnectionGuardProps) {
     
     setError(null)
 
-    // Reset config cache to force a fresh fetch
-    resetConfig()
+    // Mount shares the in-flight configuration request with authentication.
+    // Only an explicit retry should invalidate it.
+    if (force) resetConfig()
 
     try {
       const config = await getConfig()
@@ -37,8 +38,7 @@ export function ConnectionGuard({ children }: ConnectionGuardProps) {
         const dbError: ConnectionError = {
           type: 'database-offline',
           details: {
-            message: 'Database is offline', // Fallback message, UI will translate
-            attemptedUrl: config.apiUrl,
+            message: 'Kho dữ liệu đang tạm thời không sẵn sàng.',
           },
         }
         setError(dbError)
@@ -51,21 +51,12 @@ export function ConnectionGuard({ children }: ConnectionGuardProps) {
       setError(null)
       isCheckingRef.current = false
       setIsChecking(false)
-    } catch (err) {
+    } catch {
       // API is unreachable
-      const errorMessage = err instanceof Error ? err.message : 'Unknown error'
-      const attemptedUrl =
-        typeof window !== 'undefined'
-          ? `${window.location.origin}/api/config`
-          : undefined
-
       const apiError: ConnectionError = {
         type: 'api-unreachable',
         details: {
-          message: 'Unable to connect to API', // Fallback message
-          technicalMessage: errorMessage,
-          stack: err instanceof Error ? err.stack : undefined,
-          attemptedUrl,
+          message: 'Không thể kết nối tới hệ thống lúc này.',
         },
       }
       
@@ -85,7 +76,7 @@ export function ConnectionGuard({ children }: ConnectionGuardProps) {
     const handleKeyPress = (e: KeyboardEvent) => {
       if (error && (e.key === 'r' || e.key === 'R')) {
         e.preventDefault()
-        checkConnection()
+        void checkConnection(true)
       }
     }
 
@@ -95,12 +86,14 @@ export function ConnectionGuard({ children }: ConnectionGuardProps) {
 
   // Show overlay if there's an error
   if (error) {
-    return <ConnectionErrorOverlay error={error} onRetry={checkConnection} />
+    return <ConnectionErrorOverlay error={error} onRetry={() => void checkConnection(true)} />
   }
 
-  // Show nothing while checking (prevents flash of content)
+  // Keep the app shell interactive while the connection check runs. The
+  // protected dashboard still gates its data behind authentication, while
+  // the login page can render immediately instead of showing a blank screen.
   if (isChecking) {
-    return null
+    return <>{children}</>
   }
 
   // Render children if connection is good

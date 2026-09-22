@@ -13,8 +13,17 @@ from api.auth import (
     configured_role_passwords,
     production_mode_enabled,
 )
+from api.firebase_auth_service import verify_firebase_id_token
+from api.totp_auth import (
+    build_provisioning_uri,
+    generate_totp_secret,
+    issue_mfa_ticket,
+    read_mfa_ticket,
+    verify_totp_code,
+)
 from api.user_service import (
     authenticate_user_account,
+    create_firebase_citizen_account,
     create_password_reset_request,
     enable_user_totp,
     ensure_bootstrap_admin_user,
@@ -22,18 +31,12 @@ from api.user_service import (
     get_user_with_profile,
     has_real_users,
     issue_user_session,
+    link_firebase_identity,
     record_failed_login,
     register_citizen_account,
     reset_password_with_token,
     revoke_session_token,
     verify_user_credentials,
-)
-from api.totp_auth import (
-    build_provisioning_uri,
-    generate_totp_secret,
-    issue_mfa_ticket,
-    read_mfa_ticket,
-    verify_totp_code,
 )
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -62,6 +65,7 @@ class LoginResponse(BaseModel):
 
 
 class RegisterRequest(BaseModel):
+    gender: Literal["male", "female", "unspecified"] = "unspecified"
     username: str = Field(min_length=3, max_length=80)
     email: str = Field(min_length=5, max_length=255)
     password: str = Field(min_length=6, max_length=256)
@@ -77,13 +81,26 @@ class ForgotPasswordRequest(BaseModel):
 class ForgotPasswordResponse(BaseModel):
     success: bool
     message: str
-    reset_token: Optional[str] = None
-    expires_in_minutes: Optional[int] = None
 
 
 class ResetPasswordRequest(BaseModel):
     token: str = Field(min_length=16)
     new_password: str = Field(min_length=12, max_length=256)
+
+
+class FirebaseSessionRequest(BaseModel):
+    gender: Literal["male", "female", "unspecified"] | None = None
+    id_token: str = Field(min_length=100, max_length=8192)
+    full_name: Optional[str] = Field(default=None, max_length=255)
+    phone: Optional[str] = Field(default=None, max_length=50)
+
+
+class FirebaseLinkRequest(BaseModel):
+    """Proof required to link a verified Google identity to a local account."""
+
+    id_token: str = Field(min_length=100, max_length=8192)
+    identifier: str = Field(min_length=3, max_length=255)
+    password: str = Field(min_length=1, max_length=256)
 
 
 class TotpSetupRequest(BaseModel):
@@ -99,7 +116,7 @@ def _set_production_session_cookies(response: Response, token: str) -> None:
     response.set_cookie(
         SESSION_COOKIE_NAME,
         token,
-        secure=True,
+        secure=production_mode_enabled(),
         httponly=True,
         samesite="strict",
         path="/",
@@ -107,7 +124,7 @@ def _set_production_session_cookies(response: Response, token: str) -> None:
     response.set_cookie(
         CSRF_COOKIE_NAME,
         build_csrf_token(token),
-        secure=True,
+        secure=production_mode_enabled(),
         httponly=False,
         samesite="strict",
         path="/",
@@ -195,13 +212,12 @@ async def login(payload: LoginRequest, response: Response):
             )
         user = auth_result["user"]
         production = production_mode_enabled()
-        if production:
-            _set_production_session_cookies(response, auth_result["token"])
+        _set_production_session_cookies(response, auth_result["token"])
         return LoginResponse(
             authenticated=True,
             role=auth_result["role"],
             token=None if production else auth_result["token"],
-            auth_mode="cookie_session" if production else "user_session",
+            auth_mode="cookie_session",
             user_id=user["id"],
             username=user["username"],
             email=user["email"],
@@ -354,13 +370,12 @@ async def register(payload: RegisterRequest, request: Request, response: Respons
         "citizen",
     )
     production = production_mode_enabled()
-    if production:
-        _set_production_session_cookies(response, auth_result["token"])
+    _set_production_session_cookies(response, auth_result["token"])
     return LoginResponse(
         authenticated=True,
         role="citizen",
         token=None if production else auth_result["token"],
-        auth_mode="cookie_session" if production else "user_session",
+        auth_mode="cookie_session",
         user_id=user["id"],
         username=user["username"],
         email=user["email"],
@@ -382,3 +397,91 @@ async def reset_password(payload: ResetPasswordRequest, request: Request):
         "success": True,
         "message": "Đã đặt lại mật khẩu. Bạn có thể đăng nhập bằng mật khẩu mới.",
     }
+
+
+@router.post("/firebase/session", response_model=LoginResponse)
+async def firebase_session(
+    payload: FirebaseSessionRequest,
+    request: Request,
+    response: Response,
+):
+    """Exchange a verified Firebase identity for the existing API session."""
+    claims = verify_firebase_id_token(payload.id_token)
+    firebase_uid = str(claims.get("uid") or "").strip()
+    email = str(claims.get("email") or "").strip().lower()
+    if not firebase_uid or not email or claims.get("email_verified") is not True:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "FIREBASE_EMAIL_NOT_VERIFIED",
+                "message": "Bạn cần xác minh email trước khi đăng nhập.",
+            },
+        )
+    provider = str((claims.get("firebase") or {}).get("sign_in_provider") or "firebase")
+    user = await create_firebase_citizen_account(
+        firebase_uid=firebase_uid,
+        email=email,
+        display_name=str(claims.get("name") or "").strip() or None,
+        full_name=payload.full_name,
+        phone=payload.phone,
+        gender=payload.gender,
+        provider=provider,
+        request=request,
+    )
+    auth_result = await issue_user_session(user)
+    _set_production_session_cookies(response, auth_result["token"])
+    return LoginResponse(
+        authenticated=True,
+        role=auth_result["role"],
+        token=None if production_mode_enabled() else auth_result["token"],
+        auth_mode="cookie_session",
+        user_id=user["id"],
+        username=user["username"],
+        email=user["email"],
+        must_change_password=False,
+    )
+
+
+@router.post("/firebase/link", response_model=LoginResponse)
+async def firebase_link(
+    payload: FirebaseLinkRequest,
+    request: Request,
+    response: Response,
+):
+    """Link Google to an already-created local citizen account.
+
+    This endpoint is intentionally separate from ``/firebase/session`` so an
+    email collision cannot silently merge accounts or transfer privileges.
+    """
+    claims = verify_firebase_id_token(payload.id_token)
+    firebase_uid = str(claims.get("uid") or "").strip()
+    email = str(claims.get("email") or "").strip().lower()
+    if not firebase_uid or not email or claims.get("email_verified") is not True:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "FIREBASE_EMAIL_NOT_VERIFIED",
+                "message": "Bạn cần xác minh email Google trước khi liên kết.",
+            },
+        )
+    provider = str((claims.get("firebase") or {}).get("sign_in_provider") or "google.com")
+    user = await link_firebase_identity(
+        firebase_uid=firebase_uid,
+        email=email,
+        provider=provider,
+        identifier=payload.identifier,
+        password=payload.password,
+        request=request,
+    )
+    auth_result = await issue_user_session(user)
+    _set_production_session_cookies(response, auth_result["token"])
+    return LoginResponse(
+        authenticated=True,
+        role=auth_result["role"],
+        token=None if production_mode_enabled() else auth_result["token"],
+        auth_mode="cookie_session",
+        user_id=user["id"],
+        username=user["username"],
+        email=user["email"],
+        must_change_password=bool((user.get("profile") or {}).get("must_change_password", False)),
+    )

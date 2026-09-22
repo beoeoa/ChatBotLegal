@@ -1,6 +1,8 @@
 ﻿import axios, { AxiosResponse } from 'axios'
 import { getApiUrl } from '@/lib/config'
 import { sessionSecurityHeaders } from '@/lib/api/session-security'
+import { formatApiError } from '@/lib/utils/error-handler'
+import { useAuthStore } from '@/lib/stores/auth-store'
 
 // API client with runtime-configurable base URL
 // The base URL is fetched from the API config endpoint on first request
@@ -24,22 +26,22 @@ apiClient.interceptors.request.use(async (config) => {
     config.baseURL = `${apiUrl}/api`
   }
 
-  let state: { role?: string; token?: string } | null = null
+  // Metadata pages should fail fast and let their existing retry/error UI
+  // recover. Long timeouts are reserved for model-generating POST requests;
+  // using the global 10-minute timeout for a simple GET made a disconnected
+  // dashboard or list page appear frozen.
+  if ((config.method || '').toLowerCase() === 'get' && config.timeout === 600000) {
+    config.timeout = 30000
+  }
+
+  let state: { role?: string | null; token?: string | null } | null = null
   if (typeof window !== 'undefined') {
-    const authStorage = localStorage.getItem('auth-storage')
-    if (authStorage) {
-      try {
-        const parsed = JSON.parse(authStorage)
-        state = parsed?.state || null
-        if (state?.token) {
-          config.headers.Authorization = `Bearer ${state.token}`
-        }
-        if (state?.role) {
-          config.headers['X-User-Role'] = state.role
-        }
-      } catch (error) {
-        console.error('Error parsing auth storage:', error)
-      }
+    state = useAuthStore.getState()
+    if (state.token) {
+      config.headers.Authorization = `Bearer ${state.token}`
+    }
+    if (state.role) {
+      config.headers['X-User-Role'] = state.role
     }
   }
 
@@ -95,6 +97,10 @@ apiClient.interceptors.response.use(
         window.location.href = '/login'
       }
     }
+    // Keep the raw response for programmatic branching, but make every direct
+    // `error.message` render safe Vietnamese instead of provider text or JSON.
+    error.userMessage = formatApiError(error)
+    error.message = error.userMessage
     return Promise.reject(error)
   }
 )

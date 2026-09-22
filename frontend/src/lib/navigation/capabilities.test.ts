@@ -29,6 +29,11 @@ describe('role navigation capabilities', () => {
     expect(navigationPaths('citizen')).not.toContain('/legal-management')
   })
 
+  it('keeps the chatbot out of the Admin navigation and route allow-list', () => {
+    expect(navigationPaths('admin')).not.toContain('/search')
+    expect(allowedPathsForRole('admin')).not.toContain('/search')
+  })
+
   it('removes live support from every Admin navigation surface', () => {
     expect(navigationPaths('admin')).not.toContain('/live-support')
     expect(allowedPathsForRole('admin')).not.toContain('/live-support')

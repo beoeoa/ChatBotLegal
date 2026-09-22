@@ -103,7 +103,6 @@ export const frFR = {
     searchTerms: "Termes de recherche",
     strategy: "Stratégie",
     individualAnswers: "Réponses individuelles ({count})",
-    finalAnswer: "Réponse finale",
     notebookLabel: "Carnet : {name}",
     itemNotFound: "Ce {type} est introuvable",
     accessibility: {
@@ -818,7 +817,6 @@ export const frFR = {
   },
   models: {
     embedding: "Modèles d'Embedding",
-    tts: "Synthèse vocale (TTS)",
     stt: "Transcription vocale (STT)",
     apiKey: "Clé API",
     deleteSuccess: "Modèle supprimé avec succès",
@@ -844,8 +842,6 @@ export const frFR = {
     largeContextModelDesc: "Utilisé pour le traitement de documents volumineux (Gemini recommandé)",
     embeddingModelLabel: "Modèle d'Embedding",
     embeddingModelDesc: "Utilisé pour la recherche sémantique et les index vectoriels",
-    ttsModelLabel: "Modèle de Synthèse Vocale (TTS)",
-    ttsModelDesc: "Utilisé pour la génération de podcasts",
     sttModelLabel: "Modèle de Transcription Vocale (STT)",
     sttModelDesc: "Utilisé pour la transcription audio",
     embeddingChangeTitle: "Changement de modèle d'embedding",

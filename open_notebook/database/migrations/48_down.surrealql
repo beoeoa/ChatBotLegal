@@ -1,0 +1,12 @@
+-- Rollback for the unactivated Session & Memory V1 schema.
+REMOVE FIELD IF EXISTS suggested_questions ON TABLE conversation_message;
+REMOVE INDEX IF EXISTS idx_user_memory_expiry ON TABLE user_memory_item;
+REMOVE INDEX IF EXISTS idx_user_memory_owner_role_key ON TABLE user_memory_item;
+REMOVE INDEX IF EXISTS idx_user_memory_owner_role_status ON TABLE user_memory_item;
+REMOVE TABLE IF EXISTS user_memory_item;
+REMOVE INDEX IF EXISTS idx_chat_memory_preference_owner_role ON TABLE chat_memory_preference;
+REMOVE TABLE IF EXISTS chat_memory_preference;
+REMOVE INDEX IF EXISTS idx_conversation_state_expiry ON TABLE conversation_state;
+REMOVE INDEX IF EXISTS idx_conversation_state_owner_role ON TABLE conversation_state;
+REMOVE INDEX IF EXISTS idx_conversation_state_conversation ON TABLE conversation_state;
+REMOVE TABLE IF EXISTS conversation_state;

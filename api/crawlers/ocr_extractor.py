@@ -11,7 +11,7 @@ from io import BytesIO
 import hashlib
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from loguru import logger
 
@@ -34,6 +34,7 @@ except ImportError:  # pragma: no cover - environment dependent
 
 
 HAS_OCR = fitz is not None and pytesseract is not None and Image is not None
+TESSERACT_VIE_CONFIG = "--oem 1 --psm 3 -c preserve_interword_spaces=1"
 
 
 def _ocr_line_blocks(
@@ -107,7 +108,7 @@ def _ocr_line_blocks(
             make_extraction_block(
                 block_type="ocr",
                 text=line,
-                extractor="tesseract",
+                extractor="tesseract-vie",
                 # Runtime readiness already probes the binary. Do not launch a
                 # second subprocess while normalizing returned layout data.
                 extractor_version="runtime-verified",
@@ -137,7 +138,6 @@ def _configure_local_ocr_runtime() -> None:
     if (
         not configured_data
         and (local_data / "vie.traineddata").is_file()
-        and (local_data / "eng.traineddata").is_file()
     ):
         os.environ["TESSDATA_PREFIX"] = str(local_data)
 
@@ -151,7 +151,7 @@ def _ocr_runtime_readiness() -> tuple[bool, str]:
         languages = set(pytesseract.get_languages(config=""))
     except Exception:  # pragma: no cover - binary/toolchain dependent
         return False, "TESSERACT_RUNTIME_UNAVAILABLE"
-    if not {"vie", "eng"}.issubset(languages):
+    if "vie" not in languages:
         return False, "OCR_REQUIRED_LANGUAGE_MISSING"
     return True, ""
 
@@ -169,12 +169,24 @@ def extract_ocr_from_pdf_bytes(
     pdf_bytes: bytes,
     max_pages: int | None = None,
     *,
+    page_numbers: Iterable[int] | None = None,
     resume_from_page: int = 0,
     dpi: int = 200,
     page_timeout_seconds: int = 90,
     collect_confidence: bool = True,
 ) -> dict[str, Any]:
-    """OCR a PDF page-by-page and report complete page coverage."""
+    """OCR a PDF page-by-page and report complete requested-page coverage.
+
+    ``page_numbers`` is 1-based and allows the hybrid PDF pipeline to OCR only
+    pages whose native text layer is missing or unusable.  Omitting it keeps
+    the historical whole-document/resume behavior.
+    """
+
+    requested_hint = (
+        sorted({int(page) for page in page_numbers if int(page) > 0})
+        if page_numbers is not None
+        else []
+    )
 
     ready, readiness_reason = _ocr_runtime_readiness()
     if not ready:
@@ -188,10 +200,13 @@ def extract_ocr_from_pdf_bytes(
             "complete": False,
             "truncated": False,
             "ocr_confidence": None,
-            "language": "vie+eng",
+            "language": "vie",
             "reason": readiness_reason,
             "extraction_blocks": [],
             "page_texts": {},
+            "requested_pages": requested_hint,
+            "covered_pages": [],
+            "page_extractors": {},
             "layout_status": "unavailable",
             "layout_reason": readiness_reason,
         }
@@ -200,33 +215,40 @@ def extract_ocr_from_pdf_bytes(
     try:
         document = fitz.open(stream=pdf_bytes, filetype="pdf")
         total_pages = int(document.page_count)
-        start_page = max(0, int(resume_from_page))
-        stop_page = total_pages
-        if max_pages is not None:
-            stop_page = min(total_pages, start_page + max(0, int(max_pages)))
-        truncated = stop_page < total_pages
+        if page_numbers is not None:
+            requested_pages = requested_hint
+            page_indexes = [page - 1 for page in requested_pages if page <= total_pages]
+            invalid_pages = [page for page in requested_pages if page > total_pages]
+            truncated = False
+        else:
+            start_page = max(0, int(resume_from_page))
+            stop_page = total_pages
+            if max_pages is not None:
+                stop_page = min(total_pages, start_page + max(0, int(max_pages)))
+            page_indexes = list(range(start_page, stop_page))
+            requested_pages = [index + 1 for index in page_indexes]
+            invalid_pages = []
+            truncated = stop_page < total_pages
         extracted: list[str] = []
         extraction_blocks: list[dict[str, Any]] = []
         page_texts: dict[int, str] = {}
         confidences: list[float] = []
-        failed_pages: list[int] = []
+        failed_pages: list[int] = list(invalid_pages)
         processed_pages = 0
         source_asset_sha256 = hashlib.sha256(pdf_bytes).hexdigest()
         layout_degraded = False
 
-        for index in range(start_page, stop_page):
+        for index in page_indexes:
             image = None
             try:
                 image = _render_page_image(document, index, dpi)
-                text = pytesseract.image_to_string(
-                    image,
-                    lang="vie+eng",
-                    timeout=page_timeout_seconds,
-                )
+                text = ""
+                data: dict[str, Any] = {}
                 if collect_confidence:
                     data = pytesseract.image_to_data(
                         image,
-                        lang="vie+eng",
+                        lang="vie",
+                        config=TESSERACT_VIE_CONFIG,
                         output_type=pytesseract.Output.DICT,
                         timeout=page_timeout_seconds,
                     )
@@ -243,6 +265,9 @@ def extract_ocr_from_pdf_bytes(
                         source_asset_sha256=source_asset_sha256,
                     )
                     if page_blocks:
+                        # TSV includes both text and confidence. Reuse it
+                        # instead of launching Tesseract twice per page.
+                        text = page_projection
                         extraction_blocks.extend(page_blocks)
                         page_texts[index + 1] = page_projection
                         if any(
@@ -250,11 +275,22 @@ def extract_ocr_from_pdf_bytes(
                             for item in page_blocks
                         ):
                             layout_degraded = True
-                    elif text.strip():
+                if not collect_confidence or "text" not in data:
+                    text = pytesseract.image_to_string(
+                        image,
+                        lang="vie",
+                        config=TESSERACT_VIE_CONFIG,
+                        timeout=page_timeout_seconds,
+                    )
+                    if text.strip():
+                        page_texts[index + 1] = text.strip()
                         layout_degraded = True
-                elif text.strip():
-                    layout_degraded = True
-                extracted.extend((f"--- Trang {index + 1} ---", text.strip()))
+                if text.strip():
+                    extracted.extend((f"--- Trang {index + 1} ---", text.strip()))
+                else:
+                    # OCR cannot distinguish a blank page from an unreadable
+                    # scan with certainty. Never certify full content coverage.
+                    failed_pages.append(index + 1)
             except Exception:  # pragma: no cover - binary/toolchain dependent
                 failed_pages.append(index + 1)
                 logger.warning("OCR page failure at page {}", index + 1)
@@ -266,8 +302,8 @@ def extract_ocr_from_pdf_bytes(
 
         result_text = "\n\n".join(extracted).strip()
         complete = (
-            start_page == 0
-            and processed_pages == total_pages
+            bool(requested_pages)
+            and len(page_texts) == len(requested_pages)
             and not failed_pages
             and not truncated
         )
@@ -297,10 +333,15 @@ def extract_ocr_from_pdf_bytes(
                 if confidences
                 else None
             ),
-            "language": "vie+eng",
+            "language": "vie",
             "reason": reason,
             "extraction_blocks": extraction_blocks,
             "page_texts": page_texts,
+            "requested_pages": requested_pages,
+            "covered_pages": sorted(page_texts),
+            "page_extractors": {
+                page: "tesseract-vie" for page in sorted(page_texts)
+            },
             "layout_status": (
                 "available"
                 if extraction_blocks and not layout_degraded and not failed_pages
@@ -324,16 +365,75 @@ def extract_ocr_from_pdf_bytes(
             "complete": False,
             "truncated": False,
             "ocr_confidence": None,
-            "language": "vie+eng",
+            "language": "vie",
             "reason": "OCR_DOCUMENT_OPEN_FAILED",
             "extraction_blocks": [],
             "page_texts": {},
+            "requested_pages": requested_hint,
+            "covered_pages": [],
+            "page_extractors": {},
             "layout_status": "unavailable",
             "layout_reason": "OCR_DOCUMENT_OPEN_FAILED",
         }
     finally:
         if document is not None:
             document.close()
+
+
+def extract_ocr_pages_with_fallback(
+    pdf_bytes: bytes,
+    page_numbers: Iterable[int],
+    *,
+    dpi: int = 200,
+) -> dict[str, Any]:
+    """Run one lightweight Vietnamese OCR engine on selected image pages.
+
+    The function name stays stable for existing callers. PyMuPDF owns native
+    PDF text/layout; Tesseract owns OCR and returns TSV coordinates. No second
+    OCR engine is loaded or retried in the normal request/worker path.
+    """
+
+    requested = sorted({int(page) for page in page_numbers if int(page) > 0})
+    if not requested:
+        return {
+            "status": "not_required",
+            "ocr_status": "not_required",
+            "text": "",
+            "page_count": 0,
+            "processed_pages": 0,
+            "total_pages": 0,
+            "requested_pages": [],
+            "covered_pages": [],
+            "failed_pages": [],
+            "complete": True,
+            "truncated": False,
+            "ocr_confidence": None,
+            "language": "vie",
+            "reason": "",
+            "fallback_reason": "",
+            "extraction_blocks": [],
+            "page_texts": {},
+            "page_extractors": {},
+            "table_count": 0,
+            "table_extracted_count": 0,
+            "layout_status": "not_required",
+            "layout_reason": "",
+            "extractor_used": "none",
+        }
+
+    result = extract_ocr_from_pdf_bytes(
+        pdf_bytes,
+        page_numbers=requested,
+        dpi=dpi,
+    )
+    return {
+        **result,
+        "ocr_status": str(result.get("status") or "failed"),
+        "fallback_reason": "",
+        "table_count": 0,
+        "table_extracted_count": 0,
+        "extractor_used": "tesseract-vie",
+    }
 
 
 def merge_ocr_batches(
@@ -414,7 +514,7 @@ def merge_ocr_batches(
             if confidence_weight
             else None
         ),
-        "language": "vie+eng",
+        "language": "vie",
         "reason": reason,
         "extraction_blocks": extraction_blocks,
         "page_texts": page_texts,

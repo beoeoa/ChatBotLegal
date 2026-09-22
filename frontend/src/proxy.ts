@@ -1,14 +1,8 @@
 import { NextResponse } from 'next/server'
-import type { NextRequest } from 'next/server'
 
-export function proxy(request: NextRequest) {
-  const { pathname } = request.nextUrl
-
-  // Redirect root to notebooks
-  if (pathname === '/') {
-    return NextResponse.redirect(new URL('/notebooks', request.url))
-  }
-
+export function proxy() {
+  // Root landing is handled by app/page.tsx (role-based home).
+  // Do not force a universal redirect to /notebooks or /legal-import.
   return NextResponse.next()
 }
 

@@ -529,7 +529,12 @@ def build_deterministic_problem_map(
         reviewed_routes = list(_reviewed_route_queries(item))
         semantic_query = " ".join(
             part
-            for part in (item.subject, item.title, item.text)
+            for part in (
+                item.retrieval_subject,
+                item.title,
+                *item.retrieval_facts,
+                item.text,
+            )
             if str(part or "").strip()
         ).strip()
         if not semantic_query or _fold(semantic_query) == _fold(item.query_text):

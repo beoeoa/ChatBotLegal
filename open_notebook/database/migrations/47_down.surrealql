@@ -1,0 +1,4 @@
+REMOVE INDEX IF EXISTS idx_user_account_firebase_uid ON TABLE user_account;
+REMOVE FIELD IF EXISTS email_verified ON TABLE user_account;
+REMOVE FIELD IF EXISTS firebase_uid ON TABLE user_account;
+REMOVE FIELD IF EXISTS auth_provider ON TABLE user_account;

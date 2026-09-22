@@ -4,15 +4,20 @@ import type { AskResponse } from '@/lib/types/search'
 type LegalCitation = NonNullable<AskResponse['citations']>[number]
 
 const PUBLIC_CITATION_FIELDS = new Set([
+  'evidence_ids',
   'law_number',
   'document_title',
   'article_number',
   'article_title',
+  'clause_number',
+  'point_number',
   'effective_status',
   'effective_date',
   'issuing_agency',
   'scope',
   'source_url',
+  'internal_url',
+  'viewer_url',
   'url',
   'title',
   'label',
@@ -34,10 +39,11 @@ const PUBLIC_VALIDITY_FIELDS = new Set([
 export type AskSseEvent =
   | { type: 'accepted'; turnId?: string; traceId?: string }
   | { type: 'status'; stage: string }
-  | { type: 'sources'; citations: LegalCitation[] }
+  | { type: 'sources'; citations: LegalCitation[]; provisional?: boolean; label?: string }
+  | { type: 'text_delta'; text: string; provisional: true }
   | { type: 'final'; response: AskResponse }
-  | { type: 'error'; message: string; code?: string }
-  | { type: 'complete' }
+  | { type: 'failed'; message: string; code?: string }
+  | { type: 'completed' }
 
 export interface AskSseHandlers {
   onEvent: (event: AskSseEvent) => void
@@ -127,11 +133,22 @@ function normalizeEvent(value: unknown): AskSseEvent | null {
         : Array.isArray(value.sources)
           ? value.sources
           : []
-      return {
+      const sourceEvent: Extract<AskSseEvent, { type: 'sources' }> = {
         type: 'sources',
         citations: rawCitations.filter(isRecord).map(sanitizePublicCitation),
       }
+      if (typeof value.provisional === 'boolean') {
+        sourceEvent.provisional = value.provisional
+      }
+      if (typeof value.label === 'string' && value.label.trim()) {
+        sourceEvent.label = value.label.trim().slice(0, 120)
+      }
+      return sourceEvent
     }
+    case 'answer_delta':
+    case 'text_delta':
+      return typeof value.text === 'string' && value.provisional === true
+        ? { type: 'text_delta', text: value.text, provisional: true } : null
     case 'final': {
       const nested = isRecord(value.response)
         ? value.response
@@ -148,15 +165,17 @@ function normalizeEvent(value: unknown): AskSseEvent | null {
       }
     }
     case 'error':
+    case 'failed':
       return {
-        type: 'error',
+        type: 'failed',
         message: typeof value.message === 'string' && value.message.trim()
           ? value.message
           : 'Luồng trả lời gặp lỗi.',
         code: typeof value.code === 'string' ? value.code : undefined,
       }
     case 'complete':
-      return { type: 'complete' }
+    case 'completed':
+      return { type: 'completed' }
     // Never expose legacy model drafts. Only the structured `final` event may
     // carry a user-visible legal answer.
     case 'answer':
@@ -255,10 +274,10 @@ export async function consumeAskSseStream(
     for (const event of events) {
       handlers.onEvent(event)
       if (event.type === 'final') finalResponse = event.response
-      if (event.type === 'error') {
+      if (event.type === 'failed') {
         throw new AskStreamTransportError(event.message, true)
       }
-      if (event.type === 'complete' && !finalResponse) {
+      if (event.type === 'completed' && !finalResponse) {
         throw new AskStreamTransportError('Luồng kết thúc trước khi có câu trả lời cuối.', true)
       }
     }

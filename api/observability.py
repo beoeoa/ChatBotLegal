@@ -34,8 +34,23 @@ _SAFE_METADATA_KEYS = {
     "supplemental_round",
     "removed_noise_count",
     "prompt_chars",
+    "role",
+    "canonical_domain",
+    "answer_status",
+    "answer_mode",
+    "fallback_tier",
+    "provider",
+    "model",
+    "clarification",
+    "procedure_ambiguity",
+    "zero_evidence",
+    "source_gap",
+    "form_mismatch",
+    "prompt_variant",
+    "reason_code",
+    "llm_used",
 }
-_SAFE_OUTCOMES = {"success", "error", "cancelled", "queued", "failed", "skipped"}
+_SAFE_OUTCOMES = {"success", "degraded", "error", "cancelled", "queued", "failed", "skipped"}
 _ASK_STAGES = (
     "queue",
     "retrieval",
@@ -66,6 +81,8 @@ class RuntimeTelemetry:
         route = (path or "").split("?", 1)[0]
         if route.startswith("/api/search/ask"):
             return "ask"
+        if route.startswith("/api/public/quick-chat"):
+            return "public_quick_chat"
         if route.startswith("/api/legal/docs/") and route.endswith("/download.pdf"):
             return "pdf_stream_export"
         if route.startswith("/api/legal/docs/"):
@@ -180,6 +197,19 @@ class RuntimeTelemetry:
         removed_noise_count: int,
         prompt_chars: int,
         outcome: str = "success",
+        role: str | None = None,
+        canonical_domain: str | None = None,
+        answer_status: str | None = None,
+        answer_mode: str | None = None,
+        fallback_tier: str | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+        clarification: bool | None = None,
+        procedure_ambiguity: bool | None = None,
+        zero_evidence: bool | None = None,
+        source_gap: bool | None = None,
+        form_mismatch: bool | None = None,
+        prompt_variant: str | None = None,
     ) -> None:
         """Record bounded multi-issue counters without legal or user content."""
 
@@ -197,6 +227,19 @@ class RuntimeTelemetry:
                 "supplemental_round": supplemental_round,
                 "removed_noise_count": removed_noise_count,
                 "prompt_chars": prompt_chars,
+                "role": role,
+                "canonical_domain": canonical_domain,
+                "answer_status": answer_status,
+                "answer_mode": answer_mode,
+                "fallback_tier": fallback_tier,
+                "provider": provider,
+                "model": model,
+                "clarification": clarification,
+                "procedure_ambiguity": procedure_ambiguity,
+                "zero_evidence": zero_evidence,
+                "source_gap": source_gap,
+                "form_mismatch": form_mismatch,
+                "prompt_variant": prompt_variant,
             },
         )
 
@@ -248,6 +291,34 @@ class RuntimeTelemetry:
             reverse=True,
         )[:50]
         issues = list(self._issues)
+        quality_dimensions = {
+            key: sum(1 for event in events if event.get(key) is True)
+            for key in (
+                "clarification",
+                "procedure_ambiguity",
+                "zero_evidence",
+                "source_gap",
+                "form_mismatch",
+            )
+        }
+        role_domain: dict[str, dict[str, int]] = {}
+        for event in events:
+            if event.get("category") != "ask.legal_orchestration":
+                continue
+            role = str(event.get("role") or "unknown")
+            domain = str(event.get("canonical_domain") or "unknown")
+            key = f"{role}:{domain}"
+            bucket = role_domain.setdefault(key, {"count": 0, "p50_ms": 0, "p95_ms": 0})
+            bucket["count"] += 1
+        for key in list(role_domain):
+            rows = [
+                int(event["duration_ms"])
+                for event in events
+                if event.get("category") == "ask.legal_orchestration"
+                and f"{event.get('role') or 'unknown'}:{event.get('canonical_domain') or 'unknown'}" == key
+            ]
+            role_domain[key]["p50_ms"] = self._nearest_rank_percentile(rows, 50)
+            role_domain[key]["p95_ms"] = self._nearest_rank_percentile(rows, 95)
         return {
             "event_count": len(events),
             "by_category": by_category,
@@ -262,6 +333,8 @@ class RuntimeTelemetry:
                 }
                 for kind, outcomes in _ASK_OUTCOMES.items()
             },
+            "quality_dimensions": quality_dimensions,
+            "role_domain_latency": role_domain,
             "privacy": "No request/answer content, identity, cookie, query string, file name or upload content is retained.",
         }
 
@@ -282,8 +355,26 @@ class RuntimeTelemetryMiddleware(BaseHTTPMiddleware):
             # Ask endpoints record one explicit total stage in the router so
             # aggregate counts are not doubled by this generic middleware.
             if not request.url.path.startswith("/api/search/ask/simple"):
-                telemetry.add(
-                    request.url.path,
-                    status_code,
-                    round((perf_counter() - started) * 1000),
-                )
+                metadata = None
+                if request.url.path.startswith("/api/public/quick-chat"):
+                    metadata = {
+                        "answer_mode": getattr(request.state, "quick_chat_answer_mode", None),
+                        "answer_status": getattr(request.state, "quick_chat_answer_status", None),
+                        "reason_code": getattr(request.state, "quick_chat_reason_code", None),
+                        "llm_used": getattr(request.state, "quick_chat_llm_used", None),
+                    }
+                if metadata:
+                    telemetry.record_operation(
+                        category=telemetry.category(request.url.path),
+                        route=request.url.path,
+                        status_code=status_code,
+                        duration_ms=round((perf_counter() - started) * 1000),
+                        outcome="error" if status_code >= 400 else "success",
+                        metadata=metadata,
+                    )
+                else:
+                    telemetry.add(
+                        request.url.path,
+                        status_code,
+                        round((perf_counter() - started) * 1000),
+                    )

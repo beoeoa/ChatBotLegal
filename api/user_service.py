@@ -1,30 +1,35 @@
 import base64
+import copy
 import hashlib
 import hmac
 import json
 import os
 import re
 import secrets
-import copy
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from threading import Lock
-from time import perf_counter, monotonic
+from time import monotonic, perf_counter
 from typing import Any, Literal, Optional
 
 from fastapi import HTTPException, Request
 from loguru import logger
 
 from api.observability import telemetry
-from open_notebook.database.repository import ensure_record_id, repo_create, repo_query, repo_update
-from open_notebook.utils.encryption import decrypt_value, encrypt_value, get_secret_from_env
+from open_notebook.database.repository import (
+    ensure_record_id,
+    repo_create,
+    repo_query,
+    repo_update,
+)
+from open_notebook.utils.encryption import (
+    decrypt_value,
+    encrypt_value,
+    get_secret_from_env,
+)
 
 UserRole = Literal["citizen", "officer", "admin"]
 ALLOWED_ROLES: tuple[UserRole, ...] = ("citizen", "officer", "admin")
 DEFAULT_WARD_SCOPE = "Phường Lê Chân, Hải Phòng"
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-PRIVATE_DATA_DIR = PROJECT_ROOT / "data" / "private"
-PASSWORD_RESET_STORE = PRIVATE_DATA_DIR / "password_reset_tokens.json"
 
 _SESSION_L1_TTL_SECONDS = 5.0
 _SESSION_L1_LOCK = Lock()
@@ -211,11 +216,31 @@ def _user_account_ref(value: str | None) -> Any:
     text = str(value).strip()
     if not text:
         return None
-    if text.startswith("user_account:"):
-        return ensure_record_id(text)
-    if ":" in text:
-        text = text.split(":", 1)[1]
-    return ensure_record_id(f"user_account:{text}")
+    # Authentication sources have historically returned all of the following
+    # shapes: ``admin``, ``user:admin`` and ``user_account:admin``.  Do not pass
+    # an arbitrary colon-containing value directly to SurrealDB: RecordID.parse
+    # treats every colon as a table/id separator and raises when an external
+    # identity contains a second colon.
+    if text.startswith("user_account:") and text.count(":") == 1:
+        candidate = text
+    elif text.startswith("user:") and text.count(":") == 1:
+        candidate = f"user_account:{text.split(':', 1)[1]}"
+    elif ":" not in text:
+        candidate = f"user_account:{text}"
+    else:
+        # Keep audit writes non-fatal for legacy/external identities.  The
+        # opaque tail is stable, safe as a record id and cannot be interpreted
+        # as another table/id pair by RecordID.parse.
+        import hashlib
+
+        opaque_id = hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]
+        candidate = f"user_account:external_{opaque_id}"
+    try:
+        return ensure_record_id(candidate)
+    except (TypeError, ValueError):
+        # Audit projection must not turn a committed business mutation into a
+        # 500.  Callers still retain the chain event written before projection.
+        return None
 
 
 def _sanitize_user_record(row: dict[str, Any]) -> dict[str, Any]:
@@ -229,6 +254,8 @@ def _sanitize_user_record(row: dict[str, Any]) -> dict[str, Any]:
         "created": str(row.get("created", "")),
         "updated": str(row.get("updated", "")),
         "last_login_at": str(row.get("last_login_at", "")) if row.get("last_login_at") else None,
+        "auth_provider": row.get("auth_provider") or "local",
+        "email_verified": bool(row.get("email_verified", False)),
     }
 
 
@@ -283,6 +310,7 @@ def _sanitize_profile_record(row: dict[str, Any] | None) -> dict[str, Any]:
         "ward": ward,
         "ward_scope": row.get("ward_scope") or ward,
         "department": row.get("department"),
+        "organization_unit_id": row.get("organization_unit_id"),
         "allowed_domains": row.get("allowed_domains") or [],
         "must_change_password": bool(row.get("must_change_password", False)),
         "job_title": row.get("job_title"),
@@ -325,6 +353,228 @@ async def get_user_by_identifier(identifier: str) -> Optional[dict[str, Any]]:
         {"identifier": normalized},
     )
     return result[0] if result else None
+
+
+async def get_user_by_firebase_uid(firebase_uid: str) -> Optional[dict[str, Any]]:
+    """Find a local account linked to one Firebase identity."""
+    normalized = str(firebase_uid or "").strip()
+    if not normalized:
+        return None
+    result = await repo_query(
+        "SELECT * FROM user_account WHERE firebase_uid = $firebase_uid LIMIT 1;",
+        {"firebase_uid": normalized},
+    )
+    return result[0] if result else None
+
+
+async def link_firebase_identity(
+    *,
+    firebase_uid: str,
+    email: str,
+    provider: str,
+    identifier: str,
+    password: str,
+    request: Request | None = None,
+) -> dict[str, Any]:
+    """Attach a verified Google/Firebase identity to an existing local account.
+
+    Linking is deliberately explicit: the caller must prove the local
+    password and the verified Firebase email must be the same email as the
+    local account.  In particular, an officer/admin account cannot be
+    converted into a citizen account by a Google login.
+    """
+    normalized_uid = str(firebase_uid or "").strip()
+    normalized_email = str(email or "").strip().lower()
+    if not normalized_uid or not normalized_email:
+        raise HTTPException(status_code=400, detail="Firebase identity thiếu uid/email")
+
+    user = await verify_user_credentials(identifier, password, None)
+    role = normalize_user_role(user.get("role"))
+    if role != "citizen":
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "FIREBASE_LINK_CITIZEN_ONLY",
+                "message": "Chỉ tài khoản công dân mới được liên kết Google tại màn hình đăng nhập này.",
+            },
+        )
+    local_email = str(user.get("email") or "").strip().lower()
+    if not local_email or local_email != normalized_email:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "FIREBASE_LINK_EMAIL_MISMATCH",
+                "message": "Email Google phải trùng email của tài khoản nội bộ.",
+            },
+        )
+
+    existing = await get_user_by_firebase_uid(normalized_uid)
+    current_id = _record_id_str(user.get("id"))
+    if existing and _record_id_str(existing.get("id")) != current_id:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "FIREBASE_UID_ALREADY_LINKED",
+                "message": "Tài khoản Google này đã được liên kết với một tài khoản khác.",
+            },
+        )
+    existing_other_uid = str(user.get("firebase_uid") or "").strip()
+    if existing_other_uid and existing_other_uid != normalized_uid:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "LOCAL_ACCOUNT_ALREADY_LINKED",
+                "message": "Tài khoản nội bộ đã liên kết với một tài khoản Google khác.",
+            },
+        )
+
+    now = _utcnow()
+    await repo_update(
+        "user_account",
+        str(user["id"]),
+        {
+            "firebase_uid": normalized_uid,
+            "auth_provider": provider or "google.com",
+            "email_verified": True,
+            "last_login_at": now,
+            "updated": now,
+        },
+    )
+    await write_audit_log(
+        action="auth.firebase.identity_linked",
+        entity_type="user_account",
+        entity_id=current_id,
+        actor_user_id=current_id,
+        actor_role="citizen",
+        target_user_id=current_id,
+        details={"provider": provider or "google.com", "email_verified": True},
+        request=request,
+    )
+    refreshed = await get_user_with_profile(current_id or str(user["id"]))
+    if not refreshed:
+        raise HTTPException(status_code=500, detail="Không đọc lại được tài khoản sau khi liên kết Google")
+    return refreshed
+
+
+def _firebase_username_base(email: str, firebase_uid: str) -> str:
+    base = re.sub(r"[^a-zA-Z0-9._-]+", "-", email.split("@", 1)[0]).strip("._-")
+    return (base or "citizen")[:60] + "-" + firebase_uid[:8].lower()
+
+
+async def create_firebase_citizen_account(
+    *,
+    firebase_uid: str,
+    email: str,
+    display_name: str | None,
+    full_name: str | None = None,
+    phone: str | None = None,
+    gender: str | None = None,
+    provider: str,
+    request: Request | None = None,
+) -> dict[str, Any]:
+    """Create a citizen account for a verified Firebase identity.
+
+    Existing local accounts are never silently merged by email. This protects
+    officer/admin accounts from accidental privilege transfer.
+    """
+    if gender not in {None, "male", "female", "unspecified"}:
+        raise HTTPException(status_code=400, detail="Giới tính không hợp lệ")
+    normalized_uid = str(firebase_uid or "").strip()
+    normalized_email = str(email or "").strip().lower()
+    if not normalized_uid or not normalized_email:
+        raise HTTPException(status_code=400, detail="Firebase identity thiếu uid/email")
+    validate_account_contacts(email=normalized_email, phone=phone)
+    normalized_full_name = str(full_name or display_name or "").strip() or None
+    normalized_phone = str(phone or "").strip() or None
+    existing_uid = await get_user_by_firebase_uid(normalized_uid)
+    if existing_uid:
+        if not existing_uid.get("is_active", True):
+            raise HTTPException(status_code=403, detail="Tài khoản đã bị khóa")
+        existing_user_id = _record_id_str(existing_uid.get("id"))
+        if str(existing_uid.get("email") or "").strip().lower() != normalized_email:
+            conflicting_email = await get_user_by_identifier(normalized_email)
+            if conflicting_email and _record_id_str(conflicting_email.get("id")) != existing_user_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "FIREBASE_EMAIL_EXISTS_LOCAL",
+                        "message": "Email mới đã được sử dụng bởi tài khoản khác.",
+                    },
+                )
+            await repo_update(
+                "user_account",
+                existing_user_id,
+                {
+                    "email": normalized_email,
+                    "email_verified": True,
+                    "last_login_at": _utcnow(),
+                },
+            )
+        existing_profile = (await get_user_with_profile(existing_user_id) or {}).get("profile") or {}
+        if normalized_full_name or normalized_phone or gender is not None:
+            await upsert_user_profile(
+                existing_user_id,
+                {
+                    **existing_profile,
+                    "preferences": {**(existing_profile.get("preferences") or {}), **({"gender": gender} if gender is not None else {})},
+                    **({"full_name": normalized_full_name} if normalized_full_name else {}),
+                    **({"phone": normalized_phone} if normalized_phone else {}),
+                },
+            )
+        return await get_user_with_profile(existing_user_id) or existing_uid
+    existing_email = await get_user_by_identifier(normalized_email)
+    if existing_email:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "FIREBASE_EMAIL_EXISTS_LOCAL",
+                "message": "Email đã tồn tại. Hãy đăng nhập tài khoản hiện tại để liên kết Google.",
+            },
+        )
+
+    username = _firebase_username_base(normalized_email, normalized_uid)
+    now = _utcnow()
+    created = await repo_create(
+        "user_account",
+        {
+            "username": username,
+            "email": normalized_email,
+            "role": "citizen",
+            "password_hash": hash_password(secrets.token_urlsafe(32)),
+            "is_active": True,
+            "legacy_password_login": False,
+            "last_login_at": now,
+            "auth_provider": provider,
+            "firebase_uid": normalized_uid,
+            "email_verified": True,
+        },
+    )
+    user = created[0] if isinstance(created, list) else created
+    await upsert_user_profile(
+        str(user["id"]),
+        {
+            "preferences": {"gender": gender or "unspecified"},
+            "full_name": normalized_full_name,
+            "phone": normalized_phone,
+            "ward": DEFAULT_WARD_SCOPE,
+            "ward_scope": DEFAULT_WARD_SCOPE,
+            "must_change_password": False,
+        },
+    )
+    await write_audit_log(
+        action="auth.firebase.account_created",
+        entity_type="user_account",
+        entity_id=_record_id_str(user.get("id")),
+        actor_user_id=None,
+        actor_role="citizen",
+        target_user_id=_record_id_str(user.get("id")),
+        details={"provider": provider, "email_verified": True},
+        request=request,
+    )
+    result = await get_user_with_profile(str(user["id"]))
+    if not result:
+        raise HTTPException(status_code=500, detail="Không đọc lại được tài khoản Firebase")
+    return result
 
 
 async def get_user_profile(user_id: str) -> Optional[dict[str, Any]]:
@@ -555,7 +805,11 @@ async def change_own_password(
     if current_password == new_password:
         raise HTTPException(status_code=400, detail="Mật khẩu mới phải khác mật khẩu hiện tại")
     await repo_update("user_account", user_id, {"password_hash": hash_password(new_password), "updated": _utcnow()})
-    await upsert_user_profile(user_id, {**user.get("profile", {}), "must_change_password": False})
+    await upsert_user_profile(
+        user_id,
+        {**user.get("profile", {}), "must_change_password": False},
+        resolved=True,
+    )
     await _revoke_active_sessions(user_id)
     await write_audit_log(
         action="user.password.change",
@@ -584,7 +838,11 @@ async def admin_reset_user_password(
     if not target:
         raise HTTPException(status_code=404, detail="Không tìm thấy tài khoản")
     await repo_update("user_account", target_user_id, {"password_hash": hash_password(new_password), "updated": _utcnow()})
-    await upsert_user_profile(target_user_id, {**target.get("profile", {}), "must_change_password": True})
+    await upsert_user_profile(
+        target_user_id,
+        {**target.get("profile", {}), "must_change_password": True},
+        resolved=True,
+    )
     await _revoke_active_sessions(target_user_id)
     await write_audit_log(
         action="user.password.reset_by_admin",
@@ -690,7 +948,7 @@ def _profile_payload(payload: dict[str, Any]) -> dict[str, Any]:
     allowed_domains = payload.get("allowed_domains")
 
     # Auto map department to allowed_domains if not explicitly provided
-    if not allowed_domains and dept:
+    if allowed_domains is None and dept:
         allowed_domains = get_domains_for_department(dept)
 
     ward = payload.get("ward") or payload.get("ward_scope") or "Phường Lê Chân, Hải Phòng"
@@ -700,6 +958,7 @@ def _profile_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "ward": ward,
         "ward_scope": payload.get("ward_scope") or ward,
         "department": dept,
+        "organization_unit_id": payload.get("organization_unit_id"),
         "allowed_domains": allowed_domains or [],
         "must_change_password": bool(payload.get("must_change_password", False)),
         "job_title": payload.get("job_title"),
@@ -708,16 +967,48 @@ def _profile_payload(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def upsert_user_profile(user_id: str, payload: dict[str, Any]) -> None:
+async def _resolve_profile_payload(payload: dict[str, Any], *, retained_unit_id: str | None = None) -> dict[str, Any]:
+    resolved_payload = dict(payload)
+    try:
+        from api.organization_service import derive_profile_projection
+        from api.system_settings import active_organization_units, active_settings
+
+        settings = await active_settings()
+        mode = getattr(settings, "organization_routing_mode", "legacy")
+        units = await active_organization_units(settings)
+        resolved_payload = derive_profile_projection(payload, units, mode=mode, retained_unit_id=retained_unit_id)
+        if (
+            normalize_user_role(payload.get("role")) == "officer"
+            and not resolved_payload.get("organization_unit_id")
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="Cán bộ phải được gán một phòng ban chính trước khi lưu.",
+            )
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        if str(exc) in {"organization_unit_not_found", "organization_unit_inactive"}:
+            raise HTTPException(
+                status_code=422,
+                detail="Phòng ban được chọn không tồn tại hoặc đã ngừng hoạt động.",
+            ) from exc
+        raise
+    return resolved_payload
+
+
+async def upsert_user_profile(user_id: str, payload: dict[str, Any], *, resolved: bool = False) -> None:
     existing = await get_user_profile(user_id)
+    resolved_payload = payload if resolved else await _resolve_profile_payload(payload)
     profile_data = {
         "user": _record_ref(user_id),
-        **_profile_payload(payload),
+        **_profile_payload(resolved_payload),
     }
     if existing:
         await repo_update("user_profile", str(existing["id"]), profile_data)
     else:
         await repo_create("user_profile", profile_data)
+    clear_session_l1_cache(user_id=user_id)
 
 
 def _request_meta(request: Request | None) -> dict[str, Any]:
@@ -830,6 +1121,7 @@ async def create_user_account(
     if existing_email:
         raise HTTPException(status_code=409, detail="Email đã tồn tại")
 
+    resolved_profile = await _resolve_profile_payload({**payload, "role": role})
     created = await repo_create(
         "user_account",
         {
@@ -843,7 +1135,7 @@ async def create_user_account(
         },
     )
     user = created[0] if isinstance(created, list) else created
-    await upsert_user_profile(str(user["id"]), payload)
+    await upsert_user_profile(str(user["id"]), resolved_profile, resolved=True)
     await write_audit_log(
         action="user.create",
         entity_type="user_account",
@@ -868,6 +1160,7 @@ async def register_citizen_account(
     """Public self-registration. A public user can only become a citizen."""
     clean_payload = {
         **payload,
+        "preferences": {"gender": payload.get("gender") if payload.get("gender") in {"male", "female"} else "unspecified"},
         "role": "citizen",
         "is_active": True,
         "department": None,
@@ -884,75 +1177,16 @@ async def register_citizen_account(
     )
 
 
-def _load_password_reset_store() -> list[dict[str, Any]]:
-    if not PASSWORD_RESET_STORE.exists():
-        return []
-    try:
-        with PASSWORD_RESET_STORE.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, list) else []
-    except (OSError, json.JSONDecodeError):
-        return []
-
-
-def _save_password_reset_store(records: list[dict[str, Any]]) -> None:
-    PRIVATE_DATA_DIR.mkdir(parents=True, exist_ok=True)
-    with PASSWORD_RESET_STORE.open("w", encoding="utf-8") as f:
-        json.dump(records, f, ensure_ascii=False, indent=2)
-
-
-def _password_reset_return_token_enabled() -> bool:
-    # Local pilot default: return the one-use token because no email service is
-    # configured. Production can set this false after SMTP delivery is added.
-    raw = os.getenv("OPEN_NOTEBOOK_RETURN_RESET_TOKEN", "true").strip().lower()
-    return raw not in {"0", "false", "no"}
-
-
 async def create_password_reset_request(
     identifier: str,
     *,
     request: Request | None = None,
 ) -> dict[str, Any]:
-    """Create a one-use reset token without revealing account existence."""
-    generic = {
+    """Keep the legacy route non-disclosing until verified email delivery exists."""
+    return {
         "success": True,
-        "message": "Nếu tài khoản tồn tại, hệ thống đã tạo hướng dẫn đặt lại mật khẩu.",
+        "message": "Tài khoản nội bộ cần liên hệ quản trị viên để đặt lại mật khẩu.",
     }
-    user = await get_user_by_identifier(identifier)
-    if not user or not user.get("is_active", True):
-        return generic
-
-    token = secrets.token_urlsafe(32)
-    now = _utcnow()
-    expires_at = now + timedelta(minutes=15)
-    records = [
-        item for item in _load_password_reset_store()
-        if item.get("used_at") is None and item.get("expires_at", "") > now.isoformat()
-    ]
-    user_id = _record_id_str(user.get("id"))
-    records.append(
-        {
-            "user_id": user_id,
-            "token_hash": _hash_session_token(token),
-            "created_at": now.isoformat(),
-            "expires_at": expires_at.isoformat(),
-            "used_at": None,
-        }
-    )
-    _save_password_reset_store(records)
-    await write_audit_log(
-        action="user.password.reset_requested",
-        entity_type="user_account",
-        entity_id=user_id,
-        actor_user_id=None,
-        actor_role="public",
-        target_user_id=user_id,
-        details={"delivery": "local_token" if _password_reset_return_token_enabled() else "out_of_band"},
-        request=request,
-    )
-    if _password_reset_return_token_enabled():
-        return {**generic, "reset_token": token, "expires_in_minutes": 15}
-    return generic
 
 
 async def reset_password_with_token(
@@ -961,40 +1195,11 @@ async def reset_password_with_token(
     *,
     request: Request | None = None,
 ) -> None:
-    if len(new_password) < 12:
-        raise HTTPException(status_code=400, detail="Mật khẩu mới phải có ít nhất 12 ký tự")
-
-    token_hash = _hash_session_token(token)
-    now = _utcnow()
-    records = _load_password_reset_store()
-    matched: dict[str, Any] | None = None
-    for item in records:
-        if item.get("token_hash") == token_hash:
-            matched = item
-            break
-
-    if not matched or matched.get("used_at") is not None or matched.get("expires_at", "") <= now.isoformat():
-        raise HTTPException(status_code=400, detail="Mã đặt lại mật khẩu không hợp lệ hoặc đã hết hạn")
-
-    user_id = matched.get("user_id")
-    user = await get_user_with_profile(user_id)
-    if not user or not user.get("is_active", True):
-        raise HTTPException(status_code=400, detail="Mã đặt lại mật khẩu không hợp lệ hoặc đã hết hạn")
-
-    await repo_update("user_account", user_id, {"password_hash": hash_password(new_password), "updated": now})
-    await upsert_user_profile(user_id, {**user.get("profile", {}), "must_change_password": False})
-    await _revoke_active_sessions(user_id)
-    matched["used_at"] = now.isoformat()
-    _save_password_reset_store(records)
-    await write_audit_log(
-        action="user.password.reset_by_token",
-        entity_type="user_account",
-        entity_id=user_id,
-        actor_user_id=user_id,
-        actor_role=user.get("role"),
-        target_user_id=user_id,
-        details={"self_service": True},
-        request=request,
+    # Previously issued public tokens had no proof that the account owner
+    # received them. Reject them, including tokens still within their TTL.
+    raise HTTPException(
+        status_code=410,
+        detail="Mã đặt lại mật khẩu nội bộ không còn hỗ trợ. Hãy liên hệ quản trị viên.",
     )
 
 
@@ -1046,12 +1251,16 @@ async def update_user_account(
             raise HTTPException(status_code=400, detail="Mật khẩu phải có ít nhất 12 ký tự")
         update_data["password_hash"] = hash_password(payload["password"])
 
+    # Reject invalid department changes before changing account role/password.
+    profile_payload = await _resolve_profile_payload({
+        **existing.get("profile", {}), "role": existing.get("role"), **payload,
+    }, retained_unit_id=existing.get("profile", {}).get("organization_unit_id"))
     if update_data:
         await repo_update("user_account", user_id, update_data)
         if {"role", "is_active", "password_hash"}.intersection(update_data):
             await _revoke_active_sessions(user_id)
 
-    await upsert_user_profile(user_id, {**existing.get("profile", {}), **payload})
+    await upsert_user_profile(user_id, profile_payload, resolved=True)
     audit_action = "user.update"
     if payload.get("is_active") is not None:
         was_active = bool(existing.get("is_active", True))
@@ -1070,6 +1279,14 @@ async def update_user_account(
         details={
             "updated_fields": sorted(key for key in payload.keys() if key != "_business_reason"),
             "reason": payload.get("_business_reason"),
+            "organization_assignment_before": {
+                key: existing.get("profile", {}).get(key)
+                for key in ("organization_unit_id", "department", "allowed_domains")
+            },
+            "organization_assignment_after": {
+                key: profile_payload.get(key)
+                for key in ("organization_unit_id", "department", "allowed_domains")
+            },
         },
         request=request,
     )

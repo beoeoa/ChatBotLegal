@@ -7,10 +7,18 @@ describe('ask turn protection', () => {
       'src/app/(dashboard)/search/page.tsx',
       'utf8',
     )
+    const pagination = await source.readFile(
+      'src/lib/utils/conversation-message-pages.ts',
+      'utf8',
+    )
     expect(page).toContain('askSubmitLockRef')
     expect(page).toContain('askSubmitLockRef.current = true')
-    expect(page).toContain('currentSessionIdRef.current = conversation.id')
-    expect(page).toContain('currentSessionIdRef.current || currentSessionId')
-    expect(page).toContain("previous?.role === 'assistant'")
+    expect(page).toContain("e.key === 'Enter'")
+    expect(page).toContain('!e.shiftKey')
+    expect(page).toContain('!e.nativeEvent.isComposing')
+    expect(page).toContain('setCurrentSessionId(conversation.id)')
+    expect(page).toContain('activeSessionId = currentSessionId')
+    expect(page).toContain('normalizeConversationMessages(conversation.messages)')
+    expect(pagination).toContain("previous?.role === 'assistant'")
   })
 })

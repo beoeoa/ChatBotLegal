@@ -1,0 +1,1 @@
+REMOVE FIELD IF EXISTS compatibility_mode ON TABLE legal_crawl_source;

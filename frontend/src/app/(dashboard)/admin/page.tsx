@@ -1,6 +1,8 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { readAdminSnapshot, writeAdminSnapshot } from '@/lib/utils/admin-snapshot-cache'
+
+import { useCallback, useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
 import type { LucideIcon } from 'lucide-react'
 import {
@@ -8,30 +10,22 @@ import {
   AlertCircle,
   AlertTriangle,
   ArrowRight,
-  BookOpen,
   Bot,
+  Building2,
   CheckCircle2,
   Clock3,
   Cpu,
   Database,
   DatabaseZap,
-  ExternalLink,
-  FileCheck2,
-  FileCode,
-  FileSearch,
-  FileText,
   FolderTree,
   Gauge,
   History,
   Layers,
-  LayoutDashboard,
   LibraryBig,
   MessageCircleQuestion,
-  MessageSquare,
   RefreshCw,
   Server,
   Settings,
-  Shield,
   ShieldAlert,
   ShieldCheck,
   Sparkles,
@@ -40,7 +34,6 @@ import {
   Users,
   UserX,
   Workflow,
-  XCircle,
 } from 'lucide-react'
 
 import { AppShell } from '@/components/layout/AppShell'
@@ -52,8 +45,6 @@ import { Progress } from '@/components/ui/progress'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import {
   adminDashboardApi,
-  type AdminOperationalAlert,
-  type AdminDashboardSection,
   type AdminDashboardSnapshot,
 } from '@/lib/api/admin-dashboard'
 
@@ -73,13 +64,6 @@ function numberFrom(record: UnknownRecord | undefined, ...keys: string[]): numbe
   return null
 }
 
-function sumNumbers(record: UnknownRecord | undefined): number | null {
-  const values = Object.values(record || {}).filter(
-    (value): value is number => typeof value === 'number' && Number.isFinite(value),
-  )
-  return values.length > 0 ? values.reduce((total, value) => total + value, 0) : null
-}
-
 function metric(value: number | null | undefined, suffix = ''): string {
   if (value === null || value === undefined || !Number.isFinite(value)) return '—'
   return `${value.toLocaleString('vi-VN')}${suffix}`
@@ -93,29 +77,40 @@ function formatDateTime(value?: string | null): string {
     : parsed.toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' })
 }
 
-function sectionAvailable(section: AdminDashboardSection | undefined) {
-  return Boolean(section && section.status !== 'unavailable')
-}
-
 const componentMeta: Record<string, { label: string; icon: LucideIcon; desc: string }> = {
-  api: { label: 'Máy chủ API', icon: Server, desc: 'Tiếp nhận và xử lý request' },
+  api: { label: 'Máy chủ ứng dụng', icon: Server, desc: 'Tiếp nhận và xử lý yêu cầu' },
   ask_retrieval: { label: 'Trợ lý hỏi đáp AI', icon: Bot, desc: 'Tìm kiếm & sinh câu trả lời' },
-  import_worker: { label: 'Tiến trình nạp dữ liệu', icon: DatabaseZap, desc: 'Xử lý file & tạo chỉ mục' },
-  embedding: { label: 'Kho tìm kiếm Vector', icon: Cpu, desc: 'Truy vấn tương đồng ngữ nghĩa' },
+  import_worker: { label: 'Tiến trình nạp dữ liệu', icon: DatabaseZap, desc: 'Xử lý tệp và lập chỉ mục' },
+    embedding: { label: 'Kho tìm kiếm ngữ nghĩa', icon: Cpu, desc: 'Tìm các đoạn văn bản có nội dung phù hợp' },
   crawler: { label: 'Thu thập văn bản', icon: Workflow, desc: 'Tự động quét cổng VBPL' },
-  database: { label: 'Cơ sở dữ liệu lõi', icon: Database, desc: 'SurrealDB & PostgreSQL' },
+    database: { label: 'Cơ sở dữ liệu lõi', icon: Database, desc: 'Lưu trữ dữ liệu vận hành của hệ thống' },
   effectivity_monitor: { label: 'Theo dõi hiệu lực', icon: Activity, desc: 'Quét hạn văn bản định kỳ' },
 }
 
 const DOMAIN_MAP: Record<string, { label: string; color: string }> = {
-  ho_tich_chung_thuc: { label: 'Hộ tịch - Chứng thực', color: 'bg-blue-500/10 text-blue-600 border-blue-200' },
+  ho_tich_chung_thuc: { label: 'Hộ tịch - Chứng thực', color: 'bg-red-500/10 text-red-800 border-red-200' },
   dat_dai_xay_dung: { label: 'Đất đai - Xây dựng', color: 'bg-emerald-500/10 text-emerald-600 border-emerald-200' },
-  hanh_chinh_cong: { label: 'Hành chính công', color: 'bg-purple-500/10 text-purple-600 border-purple-200' },
+  hanh_chinh_cong: { label: 'Hành chính công', color: 'bg-violet-500/10 text-violet-700 border-violet-200' },
   trat_tu_do_thi: { label: 'Trật tự đô thị', color: 'bg-amber-500/10 text-amber-600 border-amber-200' },
   cu_tru_an_ninh: { label: 'Cư trú - An ninh trật tự', color: 'bg-cyan-500/10 text-cyan-600 border-cyan-200' },
   khieu_nai_to_cao_xu_phat: { label: 'Khiếu nại - Tố cáo - Xử phạt', color: 'bg-rose-500/10 text-rose-600 border-rose-200' },
-  an_sinh_y_te_giao_duc: { label: 'An sinh - Y tế - Giáo dục', color: 'bg-indigo-500/10 text-indigo-600 border-indigo-200' },
+  an_sinh_y_te_giao_duc: { label: 'An sinh - Y tế - Giáo dục', color: 'bg-teal-500/10 text-teal-700 border-teal-200' },
 }
+
+const DOMAIN_COLORS = [
+  'bg-red-500/10 text-red-800 border-red-200',
+  'bg-emerald-500/10 text-emerald-600 border-emerald-200',
+  'bg-violet-500/10 text-violet-700 border-violet-200',
+  'bg-amber-500/10 text-amber-600 border-amber-200',
+  'bg-cyan-500/10 text-cyan-600 border-cyan-200',
+  'bg-rose-500/10 text-rose-600 border-rose-200',
+  'bg-teal-500/10 text-teal-700 border-teal-200',
+  'bg-blue-500/10 text-blue-700 border-blue-200',
+  'bg-orange-500/10 text-orange-700 border-orange-200',
+  'bg-fuchsia-500/10 text-fuchsia-700 border-fuchsia-200',
+  'bg-lime-500/10 text-lime-700 border-lime-200',
+  'bg-slate-500/10 text-slate-700 border-slate-200',
+]
 
 function StatusBadge({ status }: { status?: string }) {
   if (status === 'healthy' || status === 'available') {
@@ -157,7 +152,10 @@ export default function AdminDashboardPage() {
     setError('')
     try {
       const next = await adminDashboardApi.snapshot(manual)
-      if (mounted.current) setSnapshot(next)
+      if (mounted.current) {
+        setSnapshot(next)
+        writeAdminSnapshot('dashboard', next)
+      }
     } catch {
       if (mounted.current) setError('Không thể kết nối lấy dữ liệu mới. Đang sử dụng dữ liệu lưu gần nhất.')
     } finally {
@@ -171,9 +169,28 @@ export default function AdminDashboardPage() {
 
   useEffect(() => {
     mounted.current = true
+    const cached = readAdminSnapshot<AdminDashboardSnapshot>('dashboard')
+    if (cached) {
+      setSnapshot({ ...cached, freshness: { ...cached.freshness, cached: true, stale: true, refreshing: true } })
+      setLoading(false)
+    }
     void load()
     return () => { mounted.current = false }
   }, [load])
+
+  // The API deliberately returns a tiny warming/stale envelope for the first
+  // paint while the aggregate projection is prepared. Keep polling until the
+  // background refresh has actually produced a fresh snapshot.
+  useEffect(() => {
+    const shouldPoll = snapshot?.health?.status === 'warming'
+      || snapshot?.freshness?.refreshing === true
+      || snapshot?.freshness?.stale === true
+    if (!shouldPoll) return
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void load()
+    }, 1200)
+    return () => window.clearInterval(timer)
+  }, [snapshot?.health?.status, snapshot?.freshness?.refreshing, snapshot?.freshness?.stale, load])
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -185,8 +202,12 @@ export default function AdminDashboardPage() {
   if (loading && !snapshot) {
     return (
       <AppShell>
-        <div className="min-h-0 flex-1 overflow-auto bg-muted/20">
+        <div className="min-h-0 flex-1 overflow-auto bg-muted/20" aria-busy="true">
           <div className="mx-auto max-w-7xl space-y-6 p-4 pt-16 md:p-8 md:pt-8">
+            <h1 className="font-display text-3xl font-bold tracking-tight text-foreground md:text-4xl">
+              Đang tải tổng quan hệ thống
+            </h1>
+            <p className="sr-only">Đang tải dữ liệu tổng quan hệ thống.</p>
             <div className="h-24 animate-pulse rounded-2xl bg-muted" />
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
               {Array.from({ length: 4 }, (_, i) => (
@@ -206,9 +227,28 @@ export default function AdminDashboardPage() {
         <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto bg-muted/20 p-4">
           <Alert variant="destructive" className="max-w-xl">
             <AlertTriangle className="h-4 w-4" />
-            <AlertTitle>Chưa thể tải tổng quan hệ thống</AlertTitle>
-            <AlertDescription>{error || 'Vui lòng kiểm tra lại dịch vụ Backend.'}</AlertDescription>
+            <AlertTitle><h1>Chưa thể tải tổng quan hệ thống</h1></AlertTitle>
+            <AlertDescription>{error || 'Vui lòng kiểm tra lại máy chủ ứng dụng.'}</AlertDescription>
           </Alert>
+        </div>
+      </AppShell>
+    )
+  }
+
+  if (snapshot.health?.status === 'warming') {
+    return (
+      <AppShell>
+        <div className="min-h-0 flex-1 overflow-auto bg-muted/20" aria-busy="true">
+          <div className="mx-auto max-w-7xl space-y-6 p-4 pt-16 md:p-8 md:pt-8">
+            <h1 className="font-display text-3xl font-bold tracking-tight text-foreground md:text-4xl">
+              Đang tổng hợp tổng quan hệ thống
+            </h1>
+            <p className="text-sm text-muted-foreground">Các số liệu đang được cập nhật nền. Bạn vẫn có thể mở các chức năng khác ngay lúc này.</p>
+            <div className="h-24 animate-pulse rounded-2xl bg-muted" />
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              {Array.from({ length: 4 }, (_, i) => <div key={i} className="h-32 animate-pulse rounded-2xl bg-muted" />)}
+            </div>
+          </div>
         </div>
       </AppShell>
     )
@@ -217,42 +257,80 @@ export default function AdminDashboardPage() {
   const documents = snapshot.legal_repository.documents
   const structure = snapshot.legal_repository.structure
   const vectors = snapshot.legal_repository.vectors
-  const totalDocs = numberFrom(documents, 'total', 'documents') || 0
-  const activeDocs = numberFrom(documents, 'active') || 0
-  const expiredDocs = numberFrom(documents, 'expired') || 0
-  const vectorCount = sumNumbers(asRecord(vectors?.collections))
-    ?? numberFrom(vectors, 'indexed_records', 'vector_count', 'database_chunks')
-  const chunkCount = numberFrom(structure, 'chunks', 'chunk_count') || 0
-  const vectorCoverage = vectorCount !== null && chunkCount > 0
-    ? Math.min(100, Math.round((vectorCount / chunkCount) * 100))
-    : numberFrom(vectors, 'coverage_percent') ?? 100
+  const releaseCards = asRecord(snapshot.legal_repository.serving_release?.cards)
+  const totalDocs = numberFrom(releaseCards, 'total_retrievable')
+    ?? numberFrom(documents, 'total', 'documents')
+  const inventoryDocs = numberFrom(documents, 'total', 'documents')
+  const activeDocs = numberFrom(releaseCards, 'current_effective')
+    ?? numberFrom(documents, 'active')
+  const expiredDocs = numberFrom(releaseCards, 'expired_total')
+    ?? numberFrom(documents, 'expired', 'expired_by_date')
+  const chunkCount = numberFrom(structure, 'chunks', 'chunk_count')
+  // Current and historical collections overlap and may belong to another
+  // release than SQL counters. Their sum is not a valid coverage denominator.
+  const vectorCoverage = numberFrom(vectors, 'coverage_percent')
+  const vectorExpected = numberFrom(vectors, 'expected') ?? chunkCount
+  const vectorPresent = numberFrom(vectors, 'present')
+  const vectorMissing = vectorExpected !== null && vectorPresent !== null
+    ? Math.max(vectorExpected - vectorPresent, 0)
+    : null
   const alerts = snapshot.operational_alerts || []
   const criticalAlerts = alerts.filter((item) => item.severity === 'critical').length
   const warningAlerts = alerts.filter((item) => item.severity === 'warning').length
   const healthComponents = snapshot.health.components || {}
   const usersData = snapshot.users || {}
+  const organizationData = snapshot.organization || {}
   const crawlData = snapshot.crawl_import || {}
   const knowledgeData = snapshot.knowledge || {}
   const modelsData = snapshot.models || {}
   const supportData = snapshot.support || {}
 
-  const domainDocs = (crawlData.by_domain as Record<string, number>) || {}
+  const organizationUnits = organizationData.units || []
+  const documentsByUnit = documents?.by_primary_organization_unit || {}
+  const officersByUnit = usersData.officers_by_organization_unit || {}
+  const supportByUnit = supportData.by_organization_unit || {}
+  const candidatesByUnit = crawlData.by_organization_unit || {}
+
+  const domainDocs = (documents?.by_primary_domain as Record<string, number>) || {}
+  const domainDenominator = numberFrom(documents, 'domain_denominator') ?? totalDocs
+  const classifiedTotal = numberFrom(documents, 'classified_total') ?? 0
+  const unclassifiedTotal = numberFrom(documents, 'unclassified') ?? (domainDenominator === null ? null : Math.max(domainDenominator - classifiedTotal, 0))
+  const configuredDomains = (organizationData.domains || [])
+    .filter((domain) => domain.is_active)
+    .sort((left, right) => left.sort_order - right.sort_order || left.name.localeCompare(right.name, 'vi'))
+    .map((domain, index) => ({
+      key: domain.code,
+      label: domain.name,
+      color: DOMAIN_COLORS[index % DOMAIN_COLORS.length],
+    }))
+  const dashboardDomains = configuredDomains.length > 0
+    ? configuredDomains
+    : Object.entries(DOMAIN_MAP).map(([key, info]) => ({ key, ...info }))
+  const assignmentStates = (documents?.organization_assignment_states as Record<string, number>) || {}
+  const assignedDocuments = assignmentStates.assigned || 0
+  const sharedDocuments = assignmentStates.shared || 0
+  const unassignedDocuments = assignmentStates.unassigned || 0
+  const assignedOrSharedDocuments = assignedDocuments + sharedDocuments
+  const assignmentComplete = domainDenominator !== null
+    && unassignedDocuments === 0
+    && assignedOrSharedDocuments >= domainDenominator
+  const procedureData = asRecord(knowledgeData.procedures)
+  const formData = asRecord(knowledgeData.forms)
 
   return (
     <AppShell>
-      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain bg-muted/10 p-4 pb-16 md:p-8 md:pb-20">
+      <div className="app-main-gradient min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 pb-16 md:p-7 md:pb-20">
         <div className="mx-auto max-w-7xl space-y-6">
 
           {/* 🌟 Header Section */}
-          <section className="relative overflow-hidden rounded-2xl border border-border/60 bg-gradient-to-br from-card via-card to-primary/[0.04] p-5 shadow-sm md:p-7">
-            <div className="pointer-events-none absolute -right-16 -top-20 h-64 w-64 rounded-full bg-primary/10 blur-3xl" />
+          <section className="relative overflow-hidden rounded-2xl border border-border/80 bg-card p-5 shadow-sm md:p-7">
             <div className="relative flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
               <div className="space-y-1.5">
                 <div className="flex flex-wrap items-center gap-2.5">
                   <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary text-primary-foreground shadow-md shadow-primary/20">
                     <Gauge className="h-5 w-5" />
                   </div>
-                  <h1 className="text-2xl font-bold tracking-tight md:text-3xl">Tổng quan hệ thống</h1>
+                  <h1 className="font-display text-3xl font-bold tracking-tight text-foreground md:text-4xl">Tổng quan hệ thống</h1>
                   <StatusBadge status={snapshot.health.status} />
                 </div>
                 <p className="text-sm text-muted-foreground">
@@ -262,6 +340,11 @@ export default function AdminDashboardPage() {
                   <span className="inline-block h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
                   <span>Dữ liệu quan trắc lúc: <b>{formatDateTime(snapshot.observed_at)}</b></span>
                 </div>
+                {snapshot.freshness.stale && (
+                  <p role="status" className="text-xs text-amber-800 dark:text-amber-200">
+                    Đang hiển thị số liệu đã lưu; bản cập nhật mới chưa hoàn tất.
+                  </p>
+                )}
               </div>
               <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
                 <Button
@@ -296,17 +379,17 @@ export default function AdminDashboardPage() {
           {/* 📊 4 Hero KPI Cards */}
           <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             {/* Card 1: Kho văn bản */}
-            <Card className="group relative overflow-hidden transition-all hover:-translate-y-0.5 hover:shadow-md">
+            <Card className="group relative overflow-hidden transition-shadow hover:shadow-md">
               <CardContent className="p-5">
                 <div className="flex items-center justify-between gap-3">
                   <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Kho văn bản pháp luật</span>
-                  <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-blue-500/10 text-blue-600 dark:text-blue-400">
+                  <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-primary/10 text-primary">
                     <LibraryBig className="h-5 w-5" />
                   </span>
                 </div>
                 <div className="mt-3 flex items-baseline gap-2">
                   <span className="text-3xl font-bold tracking-tight tabular-nums text-foreground">{metric(totalDocs)}</span>
-                  <span className="text-xs text-muted-foreground">văn bản</span>
+                  <span className="text-xs text-muted-foreground">văn bản đang phục vụ</span>
                 </div>
                 <div className="mt-3 flex items-center justify-between border-t pt-2.5 text-xs text-muted-foreground">
                   <span className="flex items-center gap-1 text-emerald-600 font-medium">
@@ -314,33 +397,52 @@ export default function AdminDashboardPage() {
                   </span>
                   <span>{metric(expiredDocs)} hết hiệu lực</span>
                 </div>
+                {inventoryDocs !== null && totalDocs !== null && inventoryDocs !== totalDocs && (
+                  <p className="mt-2 text-[11px] text-muted-foreground">
+                    Kho lưu {metric(inventoryDocs)} bản; {metric(totalDocs)} bản thuộc phạm vi truy xuất hiện tại.
+                  </p>
+                )}
                 <Link href="/legal-management" className="absolute inset-0" aria-label="Đến quản lý kho văn bản" />
               </CardContent>
             </Card>
 
             {/* Card 2: Độ phủ Vector AI */}
-            <Card className="group relative overflow-hidden transition-all hover:-translate-y-0.5 hover:shadow-md">
+            <Card className="group relative overflow-hidden transition-shadow hover:shadow-md">
               <CardContent className="p-5">
                 <div className="flex items-center justify-between gap-3">
-                  <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Độ phủ AI & Vector</span>
+                  <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Độ phủ dữ liệu tra cứu</span>
                   <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
                     <Cpu className="h-5 w-5" />
                   </span>
                 </div>
                 <div className="mt-3 flex items-baseline gap-2">
-                  <span className="text-3xl font-bold tracking-tight tabular-nums text-foreground">{metric(vectorCoverage, '%')}</span>
-                  <span className="text-xs text-emerald-600 font-medium">Sẵn sàng tra cứu</span>
+                  <span className="text-3xl font-bold tracking-tight tabular-nums text-foreground">{vectorCoverage == null ? 'Chưa xác định' : metric(vectorCoverage, '%')}</span>
+                  <span className="text-xs text-muted-foreground font-medium">{vectorCoverage == null ? 'Chưa có số liệu xác nhận' : 'Dữ liệu đã lập chỉ mục'}</span>
                 </div>
                 <div className="mt-3 flex items-center justify-between border-t pt-2.5 text-xs text-muted-foreground">
-                  <span>{metric(chunkCount)} đoạn (chunks)</span>
-                  <span className="text-primary font-medium">{modelsData.ready_for_answers ? 'AI Hoạt động tốt' : 'Cần cài AI'}</span>
+                  <span>
+                    {vectorPresent !== null && vectorExpected !== null
+                      ? `${metric(vectorPresent)}/${metric(vectorExpected)} đoạn đã xác nhận`
+                      : `${metric(chunkCount)} đoạn văn bản`}
+                  </span>
+                  <span className="text-primary font-medium">{modelsData.ready_for_answers === true ? 'Đã cấu hình AI' : modelsData.ready_for_answers === false ? 'Cần kiểm tra cấu hình AI' : 'Chưa có trạng thái AI'}</span>
                 </div>
+                {vectorMissing !== null && vectorMissing > 0 && (
+                  <p className="mt-2 text-[11px] text-amber-700">
+                    Còn {metric(vectorMissing)} đoạn chưa có trong chỉ mục phục vụ.
+                  </p>
+                )}
+                {vectorExpected !== null && (
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    Tỷ lệ này tính theo manifest đoạn văn bản; phần thiếu cần đồng bộ lại chỉ mục phục vụ, không tự gán bằng AI.
+                  </p>
+                )}
                 <Link href="/settings/api-keys" className="absolute inset-0" aria-label="Đến cấu hình AI" />
               </CardContent>
             </Card>
 
             {/* Card 3: Cảnh báo & Việc cần xử lý */}
-            <Card className="group relative overflow-hidden transition-all hover:-translate-y-0.5 hover:shadow-md">
+            <Card className="group relative overflow-hidden transition-shadow hover:shadow-md">
               <CardContent className="p-5">
                 <div className="flex items-center justify-between gap-3">
                   <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Việc cần xử lý</span>
@@ -368,7 +470,7 @@ export default function AdminDashboardPage() {
             </Card>
 
             {/* Card 4: Người dùng & Hỗ trợ */}
-            <Card className="group relative overflow-hidden transition-all hover:-translate-y-0.5 hover:shadow-md">
+            <Card className="group relative overflow-hidden transition-shadow hover:shadow-md">
               <CardContent className="p-5">
                 <div className="flex items-center justify-between gap-3">
                   <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Người dùng & Hỗ trợ</span>
@@ -381,7 +483,7 @@ export default function AdminDashboardPage() {
                   <span className="text-xs text-muted-foreground">tài khoản</span>
                 </div>
                 <div className="mt-3 flex items-center justify-between border-t pt-2.5 text-xs text-muted-foreground">
-                  <span className="text-foreground font-medium">{metric(usersData.by_role?.officer || 0)} cán bộ trực</span>
+                  <span className="text-foreground font-medium">{metric(usersData.active_by_role?.officer ?? null)} tài khoản cán bộ đang hoạt động</span>
                   <span className={supportData.overdue ? 'text-destructive font-medium' : ''}>{metric(supportData.waiting || 0)} phiên chờ</span>
                 </div>
                 <Link href="/users" className="absolute inset-0" aria-label="Đến quản lý người dùng" />
@@ -398,11 +500,11 @@ export default function AdminDashboardPage() {
             </div>
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
               {[
-                { title: 'Nạp dữ liệu luật', desc: 'Thêm URL / PDF / Crawl', href: '/legal-import', icon: DatabaseZap, color: 'text-blue-600 bg-blue-500/10 hover:border-blue-300' },
+                { title: 'Nạp dữ liệu luật', desc: 'Thêm liên kết, PDF hoặc quét web', href: '/legal-import', icon: DatabaseZap, color: 'text-primary bg-primary/10 hover:border-primary/40' },
                 { title: 'Kho văn bản', desc: 'Hiệu lực & Chỉ mục', href: '/legal-management', icon: LibraryBig, color: 'text-emerald-600 bg-emerald-500/10 hover:border-emerald-300' },
-                { title: 'Quản lý FAQ', desc: 'Câu hỏi & Biểu mẫu', href: '/faq-management', icon: MessageCircleQuestion, color: 'text-amber-600 bg-amber-500/10 hover:border-amber-300' },
+                { title: 'Quản lý thủ tục', desc: 'Thủ tục & Biểu mẫu', href: '/faq-management', icon: MessageCircleQuestion, color: 'text-amber-600 bg-amber-500/10 hover:border-amber-300' },
                 { title: 'Tài khoản', desc: 'Phân quyền cán bộ', href: '/users', icon: UserCog, color: 'text-purple-600 bg-purple-500/10 hover:border-purple-300' },
-                { title: 'Model & API Key', desc: 'Cấu hình AI', href: '/settings/api-keys', icon: Bot, color: 'text-cyan-600 bg-cyan-500/10 hover:border-cyan-300' },
+                { title: 'Mô hình và khóa kết nối', desc: 'Cấu hình trợ lý AI', href: '/settings/api-keys', icon: Bot, color: 'text-cyan-600 bg-cyan-500/10 hover:border-cyan-300' },
                 { title: 'Nhật ký kiểm toán', desc: 'Lịch sử thao tác', href: '/admin/activity', icon: History, color: 'text-rose-600 bg-rose-500/10 hover:border-rose-300' },
               ].map((item) => {
                 const Icon = item.icon
@@ -410,7 +512,7 @@ export default function AdminDashboardPage() {
                   <Link
                     key={item.href}
                     href={item.href}
-                    className={`group flex flex-col justify-between rounded-xl border border-border/70 bg-card p-3.5 transition-all hover:-translate-y-0.5 hover:shadow-sm ${item.color.split(' ').pop()}`}
+                    className={`group flex flex-col justify-between rounded-xl border border-border/70 bg-card p-3.5 transition-shadow hover:shadow-sm ${item.color.split(' ').pop()}`}
                   >
                     <div className="flex items-center justify-between">
                       <span className={`flex h-8 w-8 items-center justify-center rounded-lg ${item.color.split(' ').slice(0, 2).join(' ')}`}>
@@ -435,10 +537,10 @@ export default function AdminDashboardPage() {
                 <ShieldAlert className="h-4 w-4" /> Cảnh báo & Dịch vụ ({alerts.length})
               </TabsTrigger>
               <TabsTrigger value="legal_domains" className="gap-2 py-2.5 text-xs md:text-sm font-medium">
-                <FolderTree className="h-4 w-4" /> 7 Lĩnh vực & Dữ liệu
+                <Building2 className="h-4 w-4" /> Phòng ban & Dữ liệu
               </TabsTrigger>
               <TabsTrigger value="ai_knowledge" className="gap-2 py-2.5 text-xs md:text-sm font-medium">
-                <Bot className="h-4 w-4" /> AI Engine & Tri thức
+                <Bot className="h-4 w-4" /> Trợ lý AI & Kho tri thức
               </TabsTrigger>
               <TabsTrigger value="users_audit" className="gap-2 py-2.5 text-xs md:text-sm font-medium">
                 <Users className="h-4 w-4" /> Người dùng & Kiểm toán
@@ -456,7 +558,7 @@ export default function AdminDashboardPage() {
                         <CardTitle className="text-base flex items-center gap-2">
                           <ShieldAlert className="h-5 w-5 text-primary" /> Việc cần xử lý theo mức độ ưu tiên
                         </CardTitle>
-                        <CardDescription>Các sự kiện nghiệp vụ và kỹ thuật cần Admin rà soát.</CardDescription>
+                        <CardDescription>Các sự kiện nghiệp vụ và vận hành cần quản trị viên rà soát.</CardDescription>
                       </div>
                       <Badge variant="outline" className="tabular-nums">{alerts.length} việc</Badge>
                     </div>
@@ -544,36 +646,91 @@ export default function AdminDashboardPage() {
               </div>
             </TabsContent>
 
-            {/* ── TAB 2: 7 Lĩnh vực & Dữ liệu ── */}
+            {/* ── TAB 2: Phòng ban & Dữ liệu ── */}
             <TabsContent value="legal_domains" className="space-y-5">
               <Card className="shadow-sm">
                 <CardHeader>
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div>
+                      <CardTitle className="text-base flex items-center gap-2">
+                        <Building2 className="h-5 w-5 text-primary" /> Khối lượng nghiệp vụ theo phòng ban
+                      </CardTitle>
+                      <CardDescription>Phòng ban quản lý hàng việc; lĩnh vực bên dưới vẫn dùng để phân loại nội dung.</CardDescription>
+                    </div>
+                    <Badge variant={assignmentComplete ? 'secondary' : 'outline'}>
+                      {assignmentComplete
+                        ? `${metric(assignedOrSharedDocuments)}/${metric(domainDenominator)} văn bản đã phân công`
+                        : `${metric(unassignedDocuments)} văn bản chưa phân công`}
+                    </Badge>
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  {organizationUnits.length === 0 ? (
+                    <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">Danh mục phòng ban chưa tải xong ở lượt này. Số liệu phân công không bị xóa; hãy làm mới sau ít giây.</p>
+                  ) : (
+                    <>
+                      <p className="mb-3 text-xs text-muted-foreground">
+                        {metric(assignedDocuments)} phân công chính · {metric(sharedDocuments)} dùng chung · {metric(unassignedDocuments)} chưa phân công. Phòng ban chịu trách nhiệm và nhãn lĩnh vực là hai lớp dữ liệu độc lập.
+                      </p>
+                      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                        {organizationUnits.filter((unit) => unit.is_active).map((unit) => (
+                          <div key={unit.id} className="rounded-xl border bg-card p-4">
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="min-w-0">
+                                <p className="truncate text-sm font-semibold">{unit.short_name || unit.name}</p>
+                                {unit.short_name && <p className="mt-0.5 truncate text-xs text-muted-foreground">{unit.name}</p>}
+                              </div>
+                              <Badge variant="outline">{documentsByUnit[unit.id] || 0} văn bản</Badge>
+                            </div>
+                            <dl className="mt-3 grid grid-cols-3 gap-2 border-t pt-3 text-center">
+                              <div><dt className="text-[11px] text-muted-foreground">Cán bộ</dt><dd className="font-semibold tabular-nums">{officersByUnit[unit.id] || 0}</dd></div>
+                              <div><dt className="text-[11px] text-muted-foreground">Hỗ trợ</dt><dd className="font-semibold tabular-nums">{supportByUnit[unit.id] || 0}</dd></div>
+                              <div><dt className="text-[11px] text-muted-foreground">Đề xuất</dt><dd className="font-semibold tabular-nums">{candidatesByUnit[unit.id] || 0}</dd></div>
+                            </dl>
+                            <Link href={`/legal-management?organization_unit_id=${encodeURIComponent(unit.id)}`} className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline">Xem văn bản <ArrowRight className="h-3 w-3" /></Link>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </CardContent>
+              </Card>
+
+              <Card className="shadow-sm">
+                <CardHeader>
                   <CardTitle className="text-base flex items-center gap-2">
-                    <FolderTree className="h-5 w-5 text-primary" /> Phân bố văn bản theo 7 Lĩnh vực hành chính Hải Phòng
+                    <FolderTree className="h-5 w-5 text-primary" /> Phân loại nội dung theo lĩnh vực
                   </CardTitle>
-                  <CardDescription>Tổng hợp số lượng văn bản, quy trình và hướng dẫn được phân loại theo lĩnh vực phụ trách.</CardDescription>
+                  <CardDescription>Lĩnh vực hỗ trợ tìm kiếm và phân loại; không thay thế phòng ban chịu trách nhiệm.</CardDescription>
                 </CardHeader>
                 <CardContent>
                   <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                    {Object.entries(DOMAIN_MAP).map(([key, info]) => {
-                      const count = domainDocs[key] || 0
-                      const percentage = totalDocs > 0 ? Math.round((count / totalDocs) * 100) : 0
+                    {dashboardDomains.map((domain) => {
+                      const count = domainDocs[domain.key] || 0
+                      const rawPercentage = domainDenominator !== null && domainDenominator > 0 ? (count / domainDenominator) * 100 : 0
+                      const percentage = rawPercentage > 0 && rawPercentage < 0.1 ? 0.1 : Number(rawPercentage.toFixed(1))
                       return (
-                        <div key={key} className="rounded-xl border p-4 bg-card space-y-3 hover:border-primary/40 transition-colors">
+                        <div key={domain.key} className="rounded-xl border p-4 bg-card space-y-3 hover:border-primary/40 transition-colors">
                           <div className="flex items-center justify-between">
-                            <span className="text-xs font-semibold text-foreground">{info.label}</span>
-                            <Badge variant="outline" className={`text-xs ${info.color}`}>{count} văn bản</Badge>
+                            <span className="text-xs font-semibold text-foreground">{domain.label}</span>
+                            <Badge variant="outline" className={`text-xs ${domain.color}`}>{count} văn bản</Badge>
                           </div>
                           <Progress value={percentage} className="h-2" />
                           <div className="flex items-center justify-between text-xs text-muted-foreground">
-                            <span>Tỷ trọng: {percentage}%</span>
-                            <Link href={`/legal-management?domain=${key}`} className="text-primary hover:underline flex items-center gap-1">
+                            <span>Tỷ trọng: {rawPercentage > 0 && rawPercentage < 0.1 ? '<0,1%' : `${percentage}%`}</span>
+                            <Link href={`/legal-management?domain=${domain.key}`} className="text-primary hover:underline flex items-center gap-1">
                               Xem kho <ArrowRight className="h-3 w-3" />
                             </Link>
                           </div>
                         </div>
                       )
                     })}
+                  </div>
+                  <div className="mt-4 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+                    <span>Độ phủ phân loại: {metric(classifiedTotal)}/{metric(domainDenominator)} văn bản</span>
+                    <Link href="/legal-management?data_quality=unclassified" className="text-primary hover:underline">
+                      Chưa phân loại: {metric(unclassifiedTotal)}
+                    </Link>
                   </div>
                 </CardContent>
               </Card>
@@ -604,8 +761,8 @@ export default function AdminDashboardPage() {
                   <CardContent className="p-4 flex items-center justify-between">
                     <div>
                       <p className="text-xs text-muted-foreground uppercase font-semibold">Chất lượng dữ liệu</p>
-                      <p className="text-xl font-bold mt-1 text-emerald-600">100% Đầy đủ nguồn</p>
-                      <p className="text-xs text-muted-foreground mt-0.5">Đã gắn link VBPL chuẩn</p>
+                      <p className="text-xl font-bold mt-1 text-emerald-600">{documents?.classification_coverage_percent == null ? 'Chưa xác định' : `${documents.classification_coverage_percent}% phân loại`}</p>
+                      <p className="text-xs text-muted-foreground mt-0.5">{metric(unclassifiedTotal)} văn bản chưa phân loại</p>
                     </div>
                     <ShieldCheck className="h-8 w-8 text-blue-500/30" />
                   </CardContent>
@@ -628,25 +785,37 @@ export default function AdminDashboardPage() {
                     <div className="rounded-xl border p-4 bg-muted/20 space-y-3">
                       <div className="flex items-center justify-between">
                         <span className="text-sm font-medium">Model Hỏi đáp chính (Chat)</span>
-                        <Badge variant="secondary" className="font-mono text-xs">{String(modelsData.defaults?.chat || 'Gemini 2.5 Flash')}</Badge>
+                        <Badge variant="secondary" className="font-mono text-xs">{modelsData.resolved_defaults?.chat?.display_name || 'Chưa cấu hình'}</Badge>
                       </div>
                       <div className="flex items-center justify-between">
                         <span className="text-sm font-medium">Model Tìm kiếm (Embedding)</span>
-                        <Badge variant="secondary" className="font-mono text-xs">{String(modelsData.defaults?.embedding || 'Text-Embedding-004')}</Badge>
+                        <Badge variant="secondary" className="font-mono text-xs">{modelsData.resolved_defaults?.embedding?.display_name || 'Chưa cấu hình'}</Badge>
                       </div>
                       <div className="flex items-center justify-between">
                         <span className="text-sm font-medium">Nhà cung cấp đã kích hoạt</span>
                         <div className="flex gap-1.5">
-                          {(modelsData.providers as string[] || ['Google AI', 'OpenAI']).map((p) => (
+                          {(modelsData.available_providers || []).map((p) => (
                             <Badge key={p} variant="outline" className="text-xs">{p}</Badge>
                           ))}
+                          {(modelsData.available_providers || []).length === 0 && <span className="text-xs text-muted-foreground">Chưa có provider</span>}
                         </div>
                       </div>
+                      <div className="flex items-center justify-between text-xs text-muted-foreground">
+                        <span>Mô hình tìm kiếm đang phục vụ</span>
+                        <span className="font-mono">{modelsData.active_vector_embedding?.display_name || 'Chưa xác định'}</span>
+                      </div>
+                      <div className="flex items-center justify-between text-xs text-muted-foreground">
+                        <span>Phiên cấu hình</span>
+                        <span className="font-mono">{modelsData.config_revision || 'Chưa có'}</span>
+                      </div>
+                      {modelsData.embedding_index_warning && (
+                        <p className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">Kho tìm kiếm chưa đồng bộ với mô hình hiện tại; hệ thống chưa tự tạo lại dữ liệu tra cứu.</p>
+                      )}
                     </div>
                     <div className="flex justify-end">
                       <Button asChild size="sm" variant="outline" className="gap-2">
                         <Link href="/settings/api-keys">
-                          <Settings className="h-4 w-4" /> Cấu hình API Key & Models
+                          <Settings className="h-4 w-4" /> Cấu hình mô hình và khóa kết nối
                         </Link>
                       </Button>
                     </div>
@@ -659,25 +828,25 @@ export default function AdminDashboardPage() {
                     <CardTitle className="text-base flex items-center gap-2">
                       <MessageCircleQuestion className="h-5 w-5 text-primary" /> Tri thức Thủ tục & Biểu mẫu
                     </CardTitle>
-                    <CardDescription>Tình trạng chuẩn hóa câu hỏi thường gặp và biểu mẫu hành chính.</CardDescription>
+                    <CardDescription>Tình trạng phát hành thủ tục hành chính và biểu mẫu chính thức.</CardDescription>
                   </CardHeader>
                   <CardContent className="space-y-4">
                     <div className="grid grid-cols-2 gap-3">
                       <div className="rounded-xl border p-3.5 bg-card">
-                        <p className="text-xs text-muted-foreground">FAQ Đã phát hành</p>
-                        <p className="text-2xl font-bold mt-1 text-emerald-600">{metric(numberFrom(knowledgeData.faqs as UnknownRecord, 'released') || 10)}</p>
+                        <p className="text-xs text-muted-foreground">Thủ tục đã phát hành</p>
+                        <p className="text-2xl font-bold mt-1 text-emerald-600">{metric(numberFrom(procedureData, 'released'))}</p>
                         <p className="text-[11px] text-muted-foreground mt-0.5">Sẵn sàng cho người dân</p>
                       </div>
                       <div className="rounded-xl border p-3.5 bg-card">
                         <p className="text-xs text-muted-foreground">Biểu mẫu chính thức</p>
-                        <p className="text-2xl font-bold mt-1 text-blue-600">{metric(numberFrom(knowledgeData.forms as UnknownRecord, 'total') || 28)}</p>
+                        <p className="text-2xl font-bold mt-1 text-blue-600">{metric(numberFrom(formData, 'released', 'official', 'total'))}</p>
                         <p className="text-[11px] text-muted-foreground mt-0.5">Đã gắn kèm quy trình</p>
                       </div>
                     </div>
                     <div className="flex justify-end gap-2">
                       <Button asChild size="sm" variant="outline" className="gap-2">
                         <Link href="/faq-management">
-                          <MessageCircleQuestion className="h-4 w-4" /> Quản lý FAQ
+                          <MessageCircleQuestion className="h-4 w-4" /> Quản lý thủ tục
                         </Link>
                       </Button>
                     </div>
@@ -749,7 +918,7 @@ export default function AdminDashboardPage() {
                       <div className="rounded-xl border p-3 bg-muted/20 flex items-center justify-between text-xs">
                         <div>
                           <p className="font-medium text-foreground">Hệ thống khởi động & kiểm tra tự động</p>
-                          <p className="text-muted-foreground mt-0.5">Tất cả chỉ mục vector và pipeline sẵn sàng</p>
+                          <p className="text-muted-foreground mt-0.5">Kho tìm kiếm và các bước xử lý đã sẵn sàng</p>
                         </div>
                         <Badge variant="outline" className="text-[10px]">Hệ thống</Badge>
                       </div>

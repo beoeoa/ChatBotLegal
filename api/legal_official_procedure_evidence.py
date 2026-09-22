@@ -76,6 +76,15 @@ class _ProcedureRoute:
 
 _PROCEDURE_ROUTES = (
     _ProcedureRoute(
+        code="1.004884",
+        procedure_id="019d2bfd-6eac-7598-b88b-15f8a61b366a",
+        canonical_procedure_id="1.004884",
+        exact_name="Thủ tục đăng ký lại khai sinh",
+        domain="ho_tich_chung_thuc",
+        topic_markers=("dang ky lai khai sinh",),
+        form_markers=("mau ho tich dien tu tuong tac dang ky lai khai sinh",),
+    ),
+    _ProcedureRoute(
         code="1.001193",
         procedure_id="019d2bfd-3fe0-70ac-b9d6-5e9e20d6eef7",
         canonical_procedure_id="dang_ky_khai_sinh",
@@ -121,6 +130,25 @@ _PROCEDURE_ROUTES = (
         form_markers=("mau so 01", "van ban de nghi huong tro cap huu tri xa hoi"),
     ),
 )
+
+
+_PROCEDURE_FACET_ALIASES = {
+    "eligibility": "condition",
+    "submission_place": "authority",
+    "processing_time": "deadline",
+    "steps": "procedure",
+    "process": "procedure",
+    "official_forms": "form",
+    "forms": "form",
+    "legal_basis": "rule",
+}
+
+
+def _procedure_facet(value: object) -> str:
+    facet = str(value or "").strip()
+    if facet == "next_action":
+        return "procedure"
+    return _PROCEDURE_FACET_ALIASES.get(facet, facet)
 
 
 def _fold(value: Any) -> str:
@@ -330,8 +358,6 @@ def _document_text(procedure: Mapping[str, Any], route: _ProcedureRoute) -> str:
             continue
         seen.add(key)
         lines.append(f"- {text.lstrip('- ').strip()}")
-        if len(lines) >= 9:
-            break
     return "Thành phần hồ sơ do Cổng Dịch vụ công Quốc gia công bố:\n" + "\n".join(lines)
 
 
@@ -381,7 +407,19 @@ def _deadline_text(
             continue
         if text not in descriptions:
             descriptions.append(text)
-    return descriptions[0] if descriptions else ""
+    if not descriptions:
+        # The public API also represents durations on named execution cases.
+        # Read only an explicit number and unit; never infer from free text.
+        for case in procedure.get("cases") or []:
+            if not isinstance(case, Mapping):
+                continue
+            processing = case.get("processingDay") or {}
+            if not isinstance(processing, Mapping):
+                continue
+            amount = processing.get("qty")
+            if processing.get("type") == "WORKING_DAY" and type(amount) in (int, float) and amount > 0:
+                descriptions.append(f"{_compact(case.get('name'))}: thời hạn giải quyết {amount:g} ngày làm việc.")
+    return "\n".join(dict.fromkeys(descriptions))
 
 
 def _fee_text(procedure: Mapping[str, Any]) -> str:
@@ -411,7 +449,9 @@ def _procedure_text(procedure: Mapping[str, Any]) -> str:
         for item in procedure.get("executionSteps") or []
         if isinstance(item, Mapping) and _compact(item.get("description"))
     ]
-    return steps[0][:2400] if steps else ""
+    # Preserve published steps in source order. The shared packet builder
+    # applies the budget and labels truncation; do not silently cut at 2400.
+    return "\n\n".join(dict.fromkeys(steps))
 
 
 def _legal_basis_text(procedure: Mapping[str, Any]) -> str:
@@ -477,6 +517,12 @@ def _dvc_facet_text(
         return _deadline_text(procedure, route), extra
     if facet == "fee":
         return _fee_text(procedure), extra
+    if facet == "result":
+        names = list(dict.fromkeys(
+            _compact(item.get("name")) for item in procedure.get("resultsDetails") or []
+            if isinstance(item, Mapping) and _compact(item.get("name"))
+        ))
+        return ("Kết quả thực hiện thủ tục: " + "; ".join(names) if names else ""), extra
     if facet == "condition":
         text = _preserve_lines(
             procedure.get("description") or procedure.get("requirementsAndConditions")
@@ -964,11 +1010,7 @@ def _build_release_confirmed_procedure_evidence(
                 )
             )
             for requested_facet in facets:
-                facet = (
-                    "procedure"
-                    if requested_facet == "next_action"
-                    else requested_facet
-                )
+                facet = _procedure_facet(requested_facet)
                 facet_issue = (
                     issue
                     if facet == issue.intent
@@ -1046,11 +1088,7 @@ def build_official_procedure_evidence(
                 )
             )
             for requested_facet in facets:
-                facet = (
-                    "procedure"
-                    if requested_facet == "next_action"
-                    else requested_facet
-                )
+                facet = _procedure_facet(requested_facet)
                 facet_issue = (
                     issue
                     if facet == issue.intent
@@ -1127,7 +1165,7 @@ def build_official_procedure_evidence(
         procedure = _validated_procedure(snapshot, route)
         if procedure is None:
             continue
-        facet = "procedure" if issue.intent == "next_action" else str(issue.intent or "")
+        facet = _procedure_facet(issue.intent)
         content, extra = _dvc_facet_text(procedure, route, facet)
         if not _compact(content):
             continue
@@ -1155,3 +1193,32 @@ def build_official_procedure_evidence(
             str(snapshot.get("legal_as_of") or "") if snapshot else None
         ),
     }
+
+
+def official_procedure_document(code: str) -> dict[str, Any] | None:
+    """Expose the same verified local publication used by answer evidence."""
+    snapshot, error = _load_snapshot(DEFAULT_DVC_SNAPSHOT)
+    if error or not snapshot:
+        return None
+    route = next((row for row in _PROCEDURE_ROUTES if row.code == code), None)
+    if route is None:
+        route = _release_confirmed_snapshot_route(snapshot, procedure_id=code, domain="")
+    if route is None:
+        return None
+    procedure = _validated_procedure(snapshot, route)
+    if procedure is None:
+        return None
+    sections = []
+    for facet, title in (("documents", "Thành phần hồ sơ"), ("authority", "Cơ quan tiếp nhận"),
+                         ("deadline", "Thời hạn"), ("fee", "Phí, lệ phí"), ("procedure", "Trình tự")):
+        content, _ = _dvc_facet_text(procedure, route, facet)
+        if content:
+            sections.append(title + "\n" + content)
+    if not sections:
+        return None
+    return {"doc_id": "dvc:" + code, "document_title": route.exact_name,
+            "document_type": "Bản công bố thủ tục hành chính", "law_number": "",
+            "source_url": _DVC_PAGE.format(procedure_id=route.procedure_id),
+            "content": "\n\n".join(sections), "articles": [], "article_index": [],
+            "effective_status": "active", "legal_as_of": snapshot.get("legal_as_of"),
+            "snapshot_retrieved_at": snapshot.get("retrieved_at"), "source_file_available": False}

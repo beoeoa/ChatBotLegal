@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any, Literal, Optional
 from urllib.parse import unquote
 
@@ -34,6 +35,7 @@ class UserProfilePayload(BaseModel):
     phone: Optional[str] = None
     ward: Optional[str] = Field("Phường Lê Chân, Hải Phòng", description="Phường pilot áp dụng")
     department: Optional[str] = None
+    organization_unit_id: Optional[str] = Field(default=None, max_length=120)
     allowed_domains: Optional[list[str]] = Field(default_factory=list, description="Lĩnh vực được phép")
     job_title: Optional[str] = None
     notes: Optional[str] = None
@@ -79,6 +81,13 @@ class AdminResetPasswordRequest(BaseModel):
     new_password: str = Field(min_length=12, max_length=256)
 
 
+class OfficerUnitGrantRequest(BaseModel):
+    organization_unit_id: str = Field(..., min_length=1, max_length=120)
+    domain_codes: list[str] = Field(default_factory=list, max_length=20)
+    reason: str = Field(..., min_length=5, max_length=1000)
+    expires_at: datetime
+
+
 def _require_business_reason(reason: str | None) -> str:
     value = unquote(reason or "").strip()
     if len(value) < 3:
@@ -116,6 +125,52 @@ async def get_me(request: Request):
     if not user:
         raise HTTPException(status_code=404, detail="Không tìm thấy người dùng")
     return {**user, "auth_mode": get_request_auth_mode(request)}
+
+
+@router.get("/me/operating-scope")
+async def get_my_operating_scope(request: Request):
+    from api.organization_service import resolve_officer_scope
+    from api.system_settings import (
+        active_organization_units,
+        active_settings,
+        legal_domain_labels,
+        normalize_legal_domains,
+    )
+
+    user_id = get_request_user_id(request)
+    if get_request_role(request) != "officer" or not user_id:
+        raise HTTPException(status_code=403, detail="Cần đăng nhập bằng tài khoản cán bộ.")
+    user = await get_user_with_profile(user_id)
+    if not user or user.get("role") != "officer" or user.get("is_active") is False or user.get("is_deleted"):
+        raise HTTPException(status_code=403, detail="Tài khoản cán bộ không hoạt động.")
+    settings = await active_settings()
+    units = await active_organization_units(settings)
+    scope = await resolve_officer_scope(user_id=user_id, profile=user.get("profile") or {}, units=units, mode=getattr(settings, "organization_routing_mode", "legacy"))
+    support_scope = await resolve_officer_scope(user_id=user_id, profile=user.get("profile") or {}, units=units, mode=scope.mode, support_only=True)
+    names = {unit.id: unit.name for unit in units}
+    domain_labels = legal_domain_labels(
+        normalize_legal_domains(getattr(settings, "legal_domains", None))
+    )
+    return {
+        "mode": scope.mode,
+        "primary_organization_unit_id": scope.primary_organization_unit_id,
+        "primary_organization_unit_name": names.get(scope.primary_organization_unit_id),
+        "domains": list(scope.domains),
+        # Include every retained label, not only active assignments. Proposal
+        # history continues to show an administrator's latest rename after a
+        # domain has been retired, while authorization still comes from
+        # ``scope.domains`` above.
+        "domain_labels": domain_labels,
+        "can_manage_content": bool(scope.domains),
+        "can_receive_support": bool(support_scope.domains) and ((user.get("profile") or {}).get("preferences") or {}).get("can_receive_live_support") is not False,
+        "organization_unit_ids": list(scope.organization_unit_ids),
+        "organization_unit_domain_grants": list(scope.organization_unit_domain_grants),
+        "proposal_units": [
+            {"id": unit_id, "name": names.get(unit_id, unit_id),
+             "domains": [domain for pair_unit, domain in scope.proposal_unit_domains if pair_unit == unit_id]}
+            for unit_id in dict.fromkeys(pair_unit for pair_unit, _ in scope.proposal_unit_domains)
+        ],
+    }
 
 
 @router.post("/me/change-password")
@@ -303,6 +358,97 @@ async def get_ask_history(
             request=request,
         )
     return rows
+
+
+@router.get("/{user_id}/unit-grants")
+async def list_unit_grants(request: Request, user_id: str):
+    await _require_admin(request)
+    from api.organization_service import active_officer_grants
+
+    user = await get_user_with_profile(user_id)
+    if not user or user.get("role") != "officer":
+        raise HTTPException(status_code=404, detail="Không tìm thấy tài khoản cán bộ.")
+    return await active_officer_grants(user_id)
+
+
+@router.post("/{user_id}/unit-grants", status_code=201)
+async def add_unit_grant(
+    request: Request, user_id: str, payload: OfficerUnitGrantRequest
+):
+    await _require_admin(request)
+    from api.organization_service import create_officer_grant
+    from api.system_settings import active_organization_units, active_settings
+
+    user = await get_user_with_profile(user_id)
+    if not user or user.get("role") != "officer":
+        raise HTTPException(status_code=404, detail="Không tìm thấy tài khoản cán bộ.")
+    settings = await active_settings()
+    try:
+        grant = await create_officer_grant(
+            officer_user_id=user_id,
+            organization_unit_id=payload.organization_unit_id,
+            domain_codes=payload.domain_codes,
+            reason=payload.reason,
+            expires_at=payload.expires_at,
+            granted_by_user_id=get_request_user_id(request),
+            units=await active_organization_units(settings),
+        )
+    except ValueError as exc:
+        messages = {
+            "organization_unit_not_found": "Phòng ban hỗ trợ không tồn tại hoặc đã ngừng hoạt động.",
+            "officer_unit_grant_expiry_invalid": "Thời hạn hỗ trợ phải ở tương lai.",
+            "officer_unit_grant_domain_outside_unit": "Lĩnh vực hỗ trợ không thuộc phòng ban đã chọn.",
+        }
+        raise HTTPException(status_code=422, detail=messages.get(str(exc), "Không thể cấp quyền hỗ trợ liên phòng.")) from exc
+    await write_audit_log(
+        action="officer.unit_grant.create",
+        entity_type="officer_unit_grant",
+        entity_id=str(grant.get("id") or ""),
+        actor_user_id=get_request_user_id(request),
+        actor_role=get_request_role(request),
+        target_user_id=user_id,
+        details={
+            "organization_unit_id": payload.organization_unit_id,
+            "domain_codes": payload.domain_codes,
+            "expires_at": payload.expires_at.isoformat(),
+            "reason": payload.reason,
+        },
+        request=request,
+    )
+    return grant
+
+
+@router.delete("/{user_id}/unit-grants/{grant_id}")
+async def remove_unit_grant(
+    request: Request,
+    user_id: str,
+    grant_id: str,
+    x_business_reason: str | None = Header(default=None),
+):
+    await _require_admin(request)
+    reason = _require_business_reason(x_business_reason)
+    from api.organization_service import revoke_officer_grant
+
+    grant = await revoke_officer_grant(grant_id, officer_user_id=user_id)
+    if not grant:
+        raise HTTPException(status_code=404, detail="Không tìm thấy quyền hỗ trợ liên phòng.")
+    await write_audit_log(
+        action="officer.unit_grant.revoke",
+        entity_type="officer_unit_grant",
+        entity_id=grant_id,
+        actor_user_id=get_request_user_id(request),
+        actor_role=get_request_role(request),
+        target_user_id=user_id,
+        details={
+            "reason": reason,
+            "organization_unit_id": grant.get("organization_unit_id"),
+            "domain_codes": grant.get("domain_codes") or [],
+            "expires_at": str(grant.get("expires_at") or ""),
+            "granted_by": str(grant.get("granted_by") or ""),
+        },
+        request=request,
+    )
+    return {"success": True, "message": "Đã thu hồi quyền hỗ trợ liên phòng."}
 
 
 @router.get("/{user_id}")

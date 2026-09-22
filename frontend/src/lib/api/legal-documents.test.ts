@@ -8,13 +8,14 @@ import { legalDocumentsApi } from './legal-documents'
 describe('legalDocumentsApi', () => {
   beforeEach(() => get.mockReset())
 
-  it('forwards pagination, date filters and an abort signal', async () => {
+  it('forwards pagination, validity, date filters and an abort signal', async () => {
     const signal = new AbortController().signal
     get.mockResolvedValue({ data: { items: [], total: 0, limit: 20, offset: 20 } })
 
     await legalDocumentsApi.list({
       limit: 20,
       offset: 20,
+      validity_status: 'expired',
       effective_from: '2026-01-01',
       effective_to: '2026-08-16',
     }, signal)
@@ -23,6 +24,7 @@ describe('legalDocumentsApi', () => {
       params: {
         limit: 20,
         offset: 20,
+        validity_status: 'expired',
         effective_from: '2026-01-01',
         effective_to: '2026-08-16',
       },
@@ -37,12 +39,12 @@ describe('legalDocumentsApi', () => {
       headers: { 'content-disposition': 'attachment; filename="danh-sach-van-ban-20260816.xlsx"' },
     })
 
-    await expect(legalDocumentsApi.exportXlsx({ tier: 'core' })).resolves.toEqual({
+    await expect(legalDocumentsApi.exportXlsx({ validity_status: 'expired' })).resolves.toEqual({
       blob,
       filename: 'danh-sach-van-ban-20260816.xlsx',
     })
     expect(get).toHaveBeenCalledWith('/legal/documents/export.xlsx', {
-      params: { tier: 'core' },
+      params: { validity_status: 'expired' },
       responseType: 'blob',
     })
   })

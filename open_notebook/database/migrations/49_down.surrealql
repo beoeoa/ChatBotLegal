@@ -1,0 +1,3 @@
+-- Roll back logical migration 48: retain the historical JSON-string shape.
+REMOVE FIELD IF EXISTS sources.* ON TABLE user_ask_history;
+DEFINE FIELD OVERWRITE sources ON TABLE user_ask_history TYPE option<array<string>>;

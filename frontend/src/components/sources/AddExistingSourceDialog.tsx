@@ -87,10 +87,11 @@ export function AddExistingSourceDialog({
         const res = await legalDocumentsApi.list({ q: norm, limit: 20 }).catch(() => ({ items: [] }))
         const docsMap: Record<string, LegalDocumentListItem> = {}
         legalDocsAsSources = (res.items || []).map((doc) => {
-          const fakeId = `legal_doc_${doc.doc_id}`
-          docsMap[fakeId] = doc
+          const documentKey = `document:${doc.doc_id}`
+          docsMap[documentKey] = doc
           return {
-            id: fakeId,
+            id: documentKey,
+            legal_document_id: String(doc.doc_id),
             title: `[Văn bản] ${doc.law_number ? `${doc.law_number} - ` : ''}${doc.document_title || ''}`,
             topics: [doc.domain || doc.domain_name || 'phap_luat'],
             asset: doc.source_url ? { url: doc.source_url } : null,
@@ -137,8 +138,8 @@ export function AddExistingSourceDialog({
     if (selectedSourceIds.length === 0) return
 
     try {
-      const normalIds = selectedSourceIds.filter((id) => !id.startsWith('legal_doc_'))
-      const legalDocIds = selectedSourceIds.filter((id) => id.startsWith('legal_doc_'))
+      const normalIds = selectedSourceIds.filter((id) => !id.startsWith('document:'))
+      const legalDocIds = selectedSourceIds.filter((id) => id.startsWith('document:'))
 
       if (normalIds.length > 0) {
         await addSources.mutateAsync({
@@ -150,27 +151,7 @@ export function AddExistingSourceDialog({
       for (const legalId of legalDocIds) {
         const docData = selectedLegalDocs[legalId]
         if (docData) {
-          if (docData.source_url) {
-            await sourcesApi.create({
-              type: 'link',
-              title: docData.document_title || docData.law_number || `Văn bản ${docData.doc_id}`,
-              url: docData.source_url,
-              notebook_id: notebookId,
-              notebooks: [notebookId],
-              embed: false,
-              async_processing: false,
-            })
-          } else {
-            await sourcesApi.create({
-              type: 'text',
-              title: docData.document_title || docData.law_number || `Văn bản ${docData.doc_id}`,
-              content: `Văn bản pháp luật chính thức: ${docData.document_title || docData.law_number}. Số hiệu: ${docData.law_number || 'N/A'}. Cơ quan ban hành: ${docData.issuing_agency || 'N/A'}. Hiệu lực từ: ${docData.effective_date || 'chưa cập nhật'}.`,
-              notebook_id: notebookId,
-              notebooks: [notebookId],
-              embed: false,
-              async_processing: false,
-            })
-          }
+          await sourcesApi.addLegalDocumentToNotebook(notebookId, String(docData.doc_id))
         }
       }
 
@@ -246,7 +227,9 @@ export function AddExistingSourceDialog({
             ) : (
               <div className="space-y-2 p-4">
                 {filteredSources.map((source) => {
-                  const isAlreadyLinked = currentSourceIds.has(source.id)
+                  const isAlreadyLinked = source.legal_document_id
+                    ? currentNotebookSources?.some((item) => item.legal_document_id === source.legal_document_id) || false
+                    : currentSourceIds.has(source.id)
                   const isSelected = selectedSourceIds.includes(source.id)
 
                   return (

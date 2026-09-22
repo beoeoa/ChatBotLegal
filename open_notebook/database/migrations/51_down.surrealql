@@ -1,0 +1,6 @@
+REMOVE FIELD IF EXISTS website_type ON TABLE legal_crawl_source;
+REMOVE FIELD IF EXISTS link_selector ON TABLE legal_crawl_source;
+REMOVE FIELD IF EXISTS next_page_selector ON TABLE legal_crawl_source;
+REMOVE FIELD IF EXISTS include_patterns ON TABLE legal_crawl_source;
+REMOVE FIELD IF EXISTS exclude_patterns ON TABLE legal_crawl_source;
+REMOVE FIELD IF EXISTS deleted_at ON TABLE legal_crawl_source;

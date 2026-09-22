@@ -1,13 +1,17 @@
 'use client'
 
-import { useAuthStore } from '@/lib/stores/auth-store'
+import {
+  useAuthStore,
+  type CitizenRegistrationInput,
+  type FirebaseProfileInput,
+} from '@/lib/stores/auth-store'
 import { useRouter } from 'next/navigation'
 import { useEffect } from 'react'
 import { ADMIN_LANDING_PATH } from '@/lib/navigation/capabilities'
 
 const ROLE_ALLOWED_PATHS = {
   citizen: ['/search', '/procedures', '/legal-docs', '/legal-documents', '/live-support'],
-  officer: ['/search', '/sources', '/notebooks', '/procedures', '/legal-docs', '/legal-documents', '/live-support', '/officer-proposals'],
+  officer: ['/search', '/legal-library', '/sources', '/notebooks', '/procedures', '/legal-docs', '/legal-documents', '/live-support', '/officer-proposals'],
 } as const
 
 export function useAuth() {
@@ -16,6 +20,9 @@ export function useAuth() {
     isAuthenticated,
     isLoading,
     login,
+    register,
+    exchangeFirebaseToken,
+    linkFirebaseAccount,
     logout,
     checkAuth,
     checkAuthRequired,
@@ -33,13 +40,16 @@ export function useAuth() {
     if (!hasHydrated) return
 
     if (authRequired === null) {
-      checkAuthRequired().then((required) => {
+      void checkAuthRequired().then((required) => {
         if (required) {
-          checkAuth()
+          void checkAuth()
         }
+      }).catch(() => {
+        // The store already records a localized connection state. Avoid an
+        // unhandled promise rejection while a transient request is retried.
       })
     } else if (authRequired) {
-      checkAuth()
+      void checkAuth()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hasHydrated, authRequired])
@@ -86,6 +96,27 @@ export function useAuth() {
     return true
   }
 
+  const handleFirebaseLogin = async (idToken: string, profile?: FirebaseProfileInput) => {
+    const success = await exchangeFirebaseToken(idToken, profile)
+    if (!success) return false
+    finishLogin()
+    return true
+  }
+
+  const handleFirebaseLink = async (idToken: string, identifier: string, password: string) => {
+    const success = await linkFirebaseAccount(idToken, identifier, password)
+    if (!success) return false
+    finishLogin()
+    return true
+  }
+
+  const handleRegister = async (input: CitizenRegistrationInput) => {
+    const success = await register(input)
+    if (!success) return false
+    finishLogin()
+    return true
+  }
+
   const handleConfirmTotp = async (confirmToken: string, code: string) => {
     const success = await confirmTotp(confirmToken, code)
     if (!success) return false
@@ -106,6 +137,9 @@ export function useAuth() {
     mustChangePassword,
     mfaChallenge,
     login: handleLogin,
+    register: handleRegister,
+    loginWithFirebase: handleFirebaseLogin,
+    linkGoogleAccount: handleFirebaseLink,
     setupTotp,
     confirmTotp: handleConfirmTotp,
     logout: handleLogout,

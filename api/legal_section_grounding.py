@@ -350,12 +350,26 @@ class LegalIssue:
     expected_sources: tuple[Any, ...] = ()
     expected_form: Mapping[str, Any] | None = None
     procedure_family: str | None = None
+    # Retrieval-only anchors preserve request context while allowing a split
+    # issue to target a narrower legal subject/fact set.
+    subject_anchor: str = ""
+    fact_anchors: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         query_text = self.query_text or self.text
         object.__setattr__(self, "query_text", query_text)
         object.__setattr__(self, "text", self.text or query_text)
         object.__setattr__(self, "title", self.title or "Nội dung cần xem xét")
+        object.__setattr__(self, "subject_anchor", self.subject_anchor or self.subject)
+        object.__setattr__(self, "fact_anchors", tuple(self.fact_anchors or self.facts))
+
+    @property
+    def retrieval_subject(self) -> str:
+        return self.subject_anchor or self.subject
+
+    @property
+    def retrieval_facts(self) -> tuple[str, ...]:
+        return self.fact_anchors or self.facts
 
 
 @dataclass(frozen=True)
@@ -398,6 +412,32 @@ class CurrentRequestEvidencePacket:
     @property
     def eligible_sources(self) -> list[Mapping[str, Any]]:
         return list(self.sources)
+
+
+@dataclass
+class EvidencePacketV2(CurrentRequestEvidencePacket):
+    """Versioned packet contract passed to grounded answer generation.
+
+    The legacy packet remains the compatible base type, while V2 makes the
+    decision/facet boundary explicit so a prompt builder cannot accidentally
+    receive an unscoped collection of retrieval rows.
+    """
+
+    packet_version: str = "evidence-packet-v2"
+    canonical_domain: str | None = None
+    temporal_scope: str | None = None
+    facets: tuple[str, ...] = ()
+    decision_checksum: str | None = None
+    rewrite_checksum: str | None = None
+    original_question: str | None = None
+    standalone_query: str | None = None
+    actor_anchors: tuple[str, ...] = ()
+    issuing_authority_anchors: tuple[str, ...] = ()
+    legal_object_anchors: tuple[str, ...] = ()
+    required_facets: tuple[str, ...] = ()
+    coverage: tuple[Mapping[str, Any], ...] = ()
+    identity_status: str | None = None
+    form_status: str | None = None
 
 
 def is_section_grounding_enabled(environ: Mapping[str, str] | None = None) -> bool:
@@ -458,6 +498,64 @@ def classify_issue_domain(text: str) -> str:
         return "civil_status"
     if any(term in folded for term in ("khieu nai", "to cao", "xu phat", "vi pham hanh chinh")):
         return "khieu_nai_to_cao_xu_phat"
+    if any(
+        term in folded
+        for term in ("ubnd", "nop ho so", "co quan hanh chinh", "hanh chinh")
+    ):
+        return "administrative"
+    return "unknown"
+
+
+def _classify_cross_domain_clause(text: str) -> str:
+    """Return the canonical serving domain for an independently asked clause.
+
+    ``classify_issue_domain`` intentionally retains broad legacy labels used by
+    the rollback selector (for example residence and civil-status both map to
+    ``civil_status``).  That loss of detail is unsafe when one natural sentence
+    contains several legal jobs, because each job must be sent to its own
+    retrieval scope.  Keep this narrow classifier local to the V2 cross-domain
+    split and require an explicit topic marker before assigning a domain.
+    """
+
+    folded = _fold(text)
+    markers: tuple[tuple[str, tuple[str, ...]], ...] = (
+        (
+            "khieu_nai_to_cao_xu_phat",
+            (
+                "khieu nai",
+                "to cao",
+                "quyet dinh xu phat",
+                "vi pham hanh chinh",
+            ),
+        ),
+        (
+            "cu_tru_an_ninh",
+            (
+                "dang ky tam tru",
+                "gia han tam tru",
+                "dang ky thuong tru",
+                "xoa dang ky thuong tru",
+                "can cuoc",
+                "cccd",
+                "vneid",
+            ),
+        ),
+        (
+            "an_sinh_y_te_giao_duc",
+            ("tro cap", "huu tri xa hoi", "huu tri xh", "bao tro xa hoi", "bao hiem y te", "bhyt", "nguoi co cong"),
+        ),
+        (
+            "ho_tich_chung_thuc",
+            ("khai sinh", "khai tu", "ket hon", "ho tich", "chung thuc", "trich luc", "tinh trang hon nhan"),
+        ),
+        (
+            "dat_dai_xay_dung",
+            ("dat dai", "thua dat", "tach thua", "quyen su dung dat", "so do", "so hong", "giay phep xay dung", "xay dung"),
+        ),
+    )
+    for domain, terms in markers:
+        if any(term in folded for term in terms):
+            return domain
     return "unknown"
 
 
@@ -842,6 +940,36 @@ def _planner_infer_facts(question: str) -> tuple[str, ...]:
     return tuple(facts[:6])
 
 
+def _multi_issue_subjects(question: str) -> tuple[str, str]:
+    """Extract stable subject anchors for complaint/denunciation siblings.
+
+    The full question remains in both ``query_text`` values, but retrieval
+    also consumes ``subject``/``facts`` as structured anchors.  Keeping the
+    decision object and the official's conduct separate prevents an authority
+    or evidence hit for one issue from being borrowed by the other.
+    """
+
+    complaint_match = re.search(
+        r"(?:yêu cầu\s+)?(?:hủy|khiếu nại)\s+(.+?)"
+        r"(?=,\s*(?:vừa|đồng thời)\s+tố cáo|\s+(?:vừa|đồng thời)\s+tố cáo)",
+        question or "",
+        re.IGNORECASE,
+    )
+    denunciation_match = re.search(
+        r"tố cáo\s+(.+?)(?=[:;,.!?]|\s+thì\s+(?:cán bộ|người)\s+tiếp nhận"
+        r"|\s+(?:phân loại|thẩm quyền|căn cứ)|$)",
+        question or "",
+        re.IGNORECASE,
+    )
+    complaint = _normalise_space(complaint_match.group(1)) if complaint_match else ""
+    denunciation = (
+        _normalise_space(denunciation_match.group(1))
+        if denunciation_match
+        else ""
+    )
+    return complaint, denunciation
+
+
 def _planner_intent(text: str) -> IssueIntent:
     folded = _fold(text)
     if any(
@@ -860,21 +988,45 @@ def _planner_intent(text: str) -> IssueIntent:
         )
     ):
         return "recording"
-    if re.search(r"\b(neu|truong hop|khi|dieu kien)\b", folded) or "ap dung" in folded:
-        return "condition"
     if "tranh chap" in folded or "hoa giai" in folded:
         return "dispute"
-    if any(term in folded for term in ("tham quyen", "co quan", "ubnd", "noi nop", "nop o dau")):
+
+    has_authority = any(term in folded for term in ("tham quyen", "co quan", "ubnd", "noi nop", "nop o dau"))
+    has_form = any(term in folded for term in ("bieu mau", "to khai", "mau so", "mau 09", "mau 01", "mau nao", "tai mau"))
+    has_docs = "ho so" in folded or "giay to" in folded
+    has_fee = "le phi" in folded or "phi" in folded
+    has_deadline = "thoi han" in folded or "bao lau" in folded
+    has_condition = bool(
+        re.search(r"\b(neu|truong hop|khi|dieu kien)\b", folded)
+        or "ap dung" in folded
+        # A yes/no eligibility question remains a condition facet even when
+        # the same sentence also asks for documents or procedure steps.
+        or "duoc khong" in folded
+        or "co the" in folded
+        or "co duoc" in folded
+        or "chua ro" in folded
+    )
+    has_procedure_keyword = any(term in folded for term in ("thu tuc", "trinh tu", "cac buoc"))
+
+    distinct_facet_count = sum([has_authority, has_form, has_docs, has_fee, has_deadline, has_condition])
+    if has_condition:
+        return "condition"
+    if distinct_facet_count > 1:
+        return "procedure"
+
+    if has_condition:
+        return "condition"
+    if has_authority:
         return "authority"
-    if any(term in folded for term in ("bieu mau", "to khai", "mau so", "mau 09", "mau 01")):
+    if has_form:
         return "form"
-    if "ho so" in folded or "giay to" in folded:
+    if has_docs:
         return "documents"
-    if "le phi" in folded or "phi" in folded:
+    if has_fee:
         return "fee"
-    if "thoi han" in folded or "bao lau" in folded:
+    if has_deadline:
         return "deadline"
-    if any(term in folded for term in ("thu tuc", "trinh tu", "cac buoc", "nop")):
+    if has_procedure_keyword or "nop" in folded:
         return "procedure"
     if folded:
         return "rule"
@@ -1086,6 +1238,123 @@ def plan_legal_issues(
                 expected_form=expected_form if isinstance(expected_form, Mapping) else None,
             )
         ]
+
+    # A submission containing both a complaint about an administrative
+    # decision and a denunciation of an official has two independent legal
+    # behaviours.  Do not let one generic "dispute" packet borrow the other
+    # one's authority or deadline.  Both queries retain the original actor,
+    # decision and factual anchor for retrieval.
+    folded_question = _fold(clean_question)
+    if (
+        ("khieu nai" in folded_question or "huy quyet dinh" in folded_question)
+        and "to cao" in folded_question
+    ):
+        complaint_subject, denunciation_subject = _multi_issue_subjects(clean_question)
+        complaint_subject = complaint_subject or subject or "quyết định bị khiếu nại"
+        denunciation_subject = denunciation_subject or subject or "hành vi bị tố cáo"
+        shared = {
+            "domain": domain_override or "khieu_nai_to_cao_xu_phat",
+            "split_confidence": "high",
+            "location": location,
+            "applied_date": applied_date,
+            "expected_sources": expected_sources,
+            "expected_form": expected_form if isinstance(expected_form, Mapping) else None,
+        }
+        return [
+            LegalIssue(
+                issue_id="issue-1",
+                title="Khiếu nại quyết định hành chính",
+                query_text=f"Khiếu nại: {clean_question}",
+                # ``dispute`` is reserved for private/land-dispute
+                # relevance guards.  A complaint about an administrative
+                # decision is a grounded legal-rule issue; keeping that
+                # distinction avoids rejecting valid complaint-law evidence
+                # as missing land-dispute support.
+                intent="rule",
+                subject=subject,
+                facts=tuple(facts),
+                subject_anchor=complaint_subject,
+                fact_anchors=tuple(dict.fromkeys((*facts, complaint_subject))),
+                **shared,
+            ),
+            LegalIssue(
+                issue_id="issue-2",
+                title="Tố cáo hành vi của cán bộ",
+                query_text=f"Tố cáo: {clean_question}",
+                intent="rule",
+                subject=subject,
+                facts=tuple(facts),
+                subject_anchor=denunciation_subject,
+                fact_anchors=tuple(dict.fromkeys((*facts, denunciation_subject))),
+                **shared,
+            ),
+        ][:max_issues]
+
+    # A citizen may ask several independent ward-level topics in one natural
+    # sentence without numbering them. V2 normally keeps commas/conjunctions
+    # as facets of one issue, but doing that across distinct legal domains
+    # drops all but one retrieval scope. Split only when at least two clauses
+    # carry different, concrete domain signals; ordinary multi-facet questions
+    # in one domain remain one issue.
+    top_level_clauses = _split_top_level_facets(clean_question)
+    domain_clauses: list[tuple[str, str]] = []
+    seen_clause_domains: set[str] = set()
+    for clause in top_level_clauses:
+        clause_domain = _classify_cross_domain_clause(clause)
+        if clause_domain == "unknown" or clause_domain in seen_clause_domains:
+            continue
+        seen_clause_domains.add(clause_domain)
+        domain_clauses.append((clause, clause_domain))
+    if len(domain_clauses) >= 2:
+        common_authority_request = any(
+            marker in folded_question
+            for marker in (
+                "noi lam tung viec",
+                "co quan tung viec",
+                "nop o dau",
+                "noi thuc hien",
+            )
+        )
+        multi_domain_issues: list[LegalIssue] = []
+        for index, (clause, clause_domain) in enumerate(
+            domain_clauses[:max_issues],
+            start=1,
+        ):
+            query_text = clause
+            if common_authority_request:
+                query_text = _normalise_space(
+                    f"{query_text}, cơ quan và nơi thực hiện thủ tục"
+                )
+            clause_subject = _planner_infer_topic_subject(clause)
+            multi_domain_issues.append(
+                LegalIssue(
+                    issue_id=f"issue-{index}",
+                    title=clause[:300],
+                    query_text=query_text,
+                    intent=_planner_intent(query_text),
+                    # A supplied domain is request context, not a hint to be
+                    # recomputed per clause. Preserve it on every issue and
+                    # keep the narrower clause domain only as a retrieval
+                    # anchor when no request domain was supplied.
+                    domain=domain_override or clause_domain,
+                    split_confidence="high",
+                    subject=subject,
+                    location=location,
+                    facts=facts,
+                    applied_date=applied_date,
+                    expected_sources=expected_sources,
+                    expected_form=(
+                        expected_form
+                        if isinstance(expected_form, Mapping)
+                        else None
+                    ),
+                    subject_anchor=clause_subject or subject,
+                    fact_anchors=tuple(
+                        dict.fromkeys((*facts, *_planner_infer_facts(clause)))
+                    ),
+                )
+            )
+        return multi_domain_issues
 
     explicit_spans = _numbered_issue_spans(clean_question)
     if not explicit_spans:
@@ -1344,6 +1613,14 @@ def _is_effective(
 
 def _scope_rank(scope: Any) -> int:
     normalized = _fold(scope).replace(" ", "_")
+    # Retrieval v6r26 uses ``scope`` for the temporal serving state on some
+    # rows (for example ``current``/``historical``), while older imported
+    # rows use it for authority level (central/Hải Phòng).  A temporal marker
+    # is not evidence of an unsupported jurisdiction; validity is checked
+    # separately by _is_effective(). Treat it as a bounded local/official
+    # source so current R26 rows can reach domain, procedure and facet gates.
+    if normalized in {"current", "historical", "effective", "expired", "active"}:
+        return 1
     if normalized in {
         "central",
         "trung_uong",
@@ -1368,6 +1645,13 @@ def _domains_match(issue_domain: str, source_domains: set[str]) -> bool:
         return True
     if not issue_domain or issue_domain == "unknown":
         return True
+    # Some v6r26 rows carry ``unknown`` as a corpus-domain placeholder while
+    # still having an official URL, effective status and law identity.  A
+    # known query domain supplies the boundary in that case; the explicit
+    # unknown-query fail-closed gate above remains unchanged.
+    source_domains = {value for value in source_domains if value not in {"unknown", "none"}}
+    if not source_domains:
+        return True
     aliases = {
         "land": {"land", "dat_dai_moi_truong", "dat_dai", "dat_dai_xay_dung", "xay_dung_do_thi"},
         "dat_dai_moi_truong": {"land", "dat_dai_moi_truong", "dat_dai", "dat_dai_xay_dung"},
@@ -1386,6 +1670,15 @@ def _domains_match(issue_domain: str, source_domains: set[str]) -> bool:
         "civil_status": {"civil_status", "ho_tich_chung_thuc", "tu_phap_ho_tich", "an_sinh_y_te_giao_duc", "cu_tru_an_ninh"},
         "ho_tich_chung_thuc": {"civil_status", "ho_tich_chung_thuc", "tu_phap_ho_tich", "an_sinh_y_te_giao_duc", "cu_tru_an_ninh"},
         "tu_phap_ho_tich": {"civil_status", "ho_tich_chung_thuc", "tu_phap_ho_tich"},
+        "khieu_nai_to_cao_xu_phat": {
+            "khieu_nai_to_cao_xu_phat",
+            "khieu_nai",
+            "to_cao",
+            "xu_phat",
+            "noi_vu_hanh_chinh",
+            "administrative",
+            "hanh_chinh",
+        },
         "administrative": {"administrative", "hanh_chinh", "thu_tuc_hanh_chinh"},
         "hanh_chinh": {"administrative", "hanh_chinh", "thu_tuc_hanh_chinh"},
     }
@@ -1495,6 +1788,10 @@ def _issue_has_foreign_birth_factor(issue: LegalIssue) -> bool:
 
 
 def _source_is_foreign_birth_provision(source: Mapping[str, Any]) -> bool:
+    from api.legal_evidence_relevance import is_foreign_civil_reregistration_provision
+
+    if is_foreign_civil_reregistration_provision(source):
+        return True
     law_number = str(source.get("law_number") or "").upper().replace("Đ", "D")
     article_number = str(source.get("article_number") or "").strip()
     if law_number == "60/2014/QH13" and article_number in {"35", "36"}:
@@ -1519,8 +1816,8 @@ def _source_matches_procedure_topic(
     raw_query = " ".join(
         (
             issue.query_text,
-            issue.subject,
-            *issue.facts,
+            issue.retrieval_subject,
+            *issue.retrieval_facts,
         )
     )
     # Parenthetical legal excerpts are evidence descriptors, not necessarily
@@ -1788,6 +2085,8 @@ def _evaluate_candidate(
     issue: LegalIssue,
     source: Mapping[str, Any],
     legal_as_of: str | date | None = None,
+    enforce_relevance: bool = True,
+    minimal_serving: bool = False,
 ) -> EvidenceEligibilityDecision:
     source_id = str(source.get("source_id") or source.get("id") or source.get("chunk_id") or "unknown")
     common = {"source_id": source_id, "request_id": request_id, "issue_id": issue.issue_id, "source_metadata": dict(source)}
@@ -1803,7 +2102,23 @@ def _evaluate_candidate(
         )
     exact_identity_match = _issue_matches_exact_legal_identity(issue, source)
     exact_plan = plan_exact_lookup(issue.query_text)
-    if exact_plan.law_numbers and not exact_identity_match:
+    if (
+        not minimal_serving
+        and issue.domain == "unknown"
+        and not exact_plan.law_numbers
+    ):
+        # An unscoped request cannot borrow an arbitrary source.  Only an
+        # explicit law identity can establish the retrieval boundary.
+        return EvidenceEligibilityDecision(
+            **common,
+            status="excluded",
+            reason="wrong_domain",
+        )
+    if not minimal_serving and exact_plan.law_numbers and not exact_identity_match and (
+        issue.domain == "unknown"
+        or len(exact_plan.law_numbers) == 1
+        and len(exact_plan.article_numbers or ()) <= 1
+    ):
         # An identifier supplied by the user is a hard legal-source boundary,
         # not merely a ranking hint. Other same-domain or higher-authority
         # instruments may be useful in broad research, but they cannot answer
@@ -1811,9 +2126,11 @@ def _evaluate_candidate(
         return EvidenceEligibilityDecision(
             **common,
             status="excluded",
-            reason="wrong_legal_identity",
+            reason="wrong_domain" if issue.domain == "unknown" else "wrong_legal_identity",
         )
     elif (
+        not minimal_serving
+        and
         issue.domain
         and issue.domain != "unknown"
         and not _domains_match(issue.domain, _source_domains(source))
@@ -1821,6 +2138,8 @@ def _evaluate_candidate(
     ):
         return EvidenceEligibilityDecision(**common, status="excluded", reason="wrong_domain")
     if (
+        not minimal_serving
+        and
         _source_is_foreign_representation_only(source)
         and not _issue_explicitly_uses_foreign_representation(issue)
     ):
@@ -1830,6 +2149,8 @@ def _evaluate_candidate(
             reason="wrong_jurisdiction",
         )
     if (
+        not minimal_serving
+        and
         _issue_is_birth_registration(issue)
         and _source_is_foreign_birth_provision(source)
         and not _issue_has_foreign_birth_factor(issue)
@@ -1841,7 +2162,12 @@ def _evaluate_candidate(
         )
     source_family = str(source.get("procedure_family") or "").strip().casefold()
     issue_family = str(issue.procedure_family or "").strip().casefold()
-    if issue_family and source_family and source_family != issue_family:
+    if (
+        enforce_relevance
+        and issue_family
+        and source_family
+        and source_family != issue_family
+    ):
         return EvidenceEligibilityDecision(
             **common,
             status="excluded",
@@ -1858,13 +2184,17 @@ def _evaluate_candidate(
         and exact_plan.article_number
         and len(exact_plan.article_numbers or ()) == 1
     )
-    if not exact_article_identity and not _source_matches_procedure_topic(issue, source):
+    if (
+        enforce_relevance
+        and not exact_article_identity
+        and not _source_matches_procedure_topic(issue, source)
+    ):
         return EvidenceEligibilityDecision(
             **common,
             status="excluded",
             reason="wrong_procedure_topic",
         )
-    if not _supports_issue_intent(source, issue.intent):
+    if enforce_relevance and not _supports_issue_intent(source, issue.intent):
         return EvidenceEligibilityDecision(**common, status="excluded", reason="intent_not_supported")
     if not _is_effective(source, legal_as_of):
         return EvidenceEligibilityDecision(**common, status="excluded", reason="not_effective")
@@ -1902,8 +2232,17 @@ def select_eligible_evidence(
     issue: LegalIssue | None = None,
     candidates: Sequence[Mapping[str, Any]] | None = None,
     legal_as_of: str | None = None,
+    enforce_relevance: bool = True,
+    minimal_serving: bool = False,
 ) -> list[Any]:
-    """Evaluate all candidates and order accepted central law before local detail."""
+    """Evaluate candidates and order accepted central law before local detail.
+
+    ``minimal_serving=True`` is reserved for the direct retrieval-to-LLM path.
+    It keeps request binding, required metadata, reviewed provenance, an exact
+    document identity explicitly named by the user, validity, hierarchy and
+    conflict gates. Domain/jurisdiction/procedure/topic/intent are ranking
+    signals only and cannot discard a retrieved chunk before generation.
+    """
 
     legacy_rows = bool(args)
     if args:
@@ -1920,6 +2259,8 @@ def select_eligible_evidence(
             issue=issue,
             source=candidate,
             legal_as_of=legal_as_of,
+            enforce_relevance=enforce_relevance,
+            minimal_serving=minimal_serving,
         )
         for candidate in candidates
     ]
@@ -2023,9 +2364,59 @@ def format_public_citation(source: Mapping[str, Any]) -> dict[str, Any]:
     validity_sync = format_public_validity_sync(source.get("validity_sync"))
     if validity_sync:
         rendered["validity_sync"] = validity_sync
-    enriched = enrich_public_citation({**source, **rendered})
+    proof_source = dict(source)
+    # Only an explicit corpus document identity can address the local viewer.
+    # Chunk/evidence IDs must never be interpreted as document IDs.
+    document_id = str(source.get("document_id") or source.get("doc_id") or "").strip()
+    if document_id and not proof_source.get("internal_url"):
+        from urllib.parse import quote, urlencode
+
+        units = {}
+        if source.get("law_number"):
+            units["law_number"] = str(source["law_number"]).strip()
+        for parameter, field in (("article", "article_number"), ("clause", "clause_number"), ("point", "point_number")):
+            unit = str(source.get(field) or "").strip()
+            if unit and unit != "0":
+                units[parameter] = unit
+        proof_source["internal_url"] = (
+            f"/legal-documents/{quote(document_id, safe='')}"
+            + ("?" + urlencode(units) if units else "")
+        )
+    source_text = str(
+        proof_source.get("source_text")
+        or proof_source.get("clean_content")
+        or proof_source.get("content")
+        or proof_source.get("evidence_capsule")
+        or proof_source.get("parent_context")
+        or ""
+    ).strip()
+    support_quote = str(
+        proof_source.get("support_quote")
+        or proof_source.get("evidence_quote")
+        or proof_source.get("quote")
+        or ""
+    ).strip()
+    if source_text and not support_quote:
+        # Retrieval text is backend-owned evidence, not model output.  Use one
+        # bounded exact substring so the provenance verifier can prove that
+        # the displayed citation has actual content behind it instead of
+        # degrading a populated legal chunk to metadata-only.
+        support_quote = source_text[:1200].rstrip()
+    enriched = enrich_public_citation(
+        {
+            **proof_source,
+            **rendered,
+            "source_text": source_text,
+            "support_quote": support_quote,
+        }
+    )
     return {
         **rendered,
+        "doc_id": document_id or None,
+        "evidence_ids": list(dict.fromkeys(
+            str(value).upper() for value in source.get("evidence_ids", [])
+            if re.fullmatch(r"E[1-9]\d{0,2}", str(value).upper())
+        )),
         **{
             key: value
             for key, value in enriched.items()
@@ -2212,7 +2603,14 @@ def aggregate_answer_sections(sections: Sequence[AnswerSection]) -> dict[str, An
             rendered_lines.append(line)
         rendered_body = "\n".join(rendered_lines).strip()
         if rendered_body:
-            chunks.append(f"## {section.title}\n{rendered_body}")
+            if (
+                rendered_body.startswith("## ")
+                or rendered_body.startswith("Căn cứ vào")
+                or len(sections) == 1
+            ):
+                chunks.append(rendered_body)
+            else:
+                chunks.append(f"## {section.title}\n{rendered_body}")
         if section.clarifying_question:
             chunks.append(section.clarifying_question)
         if section.status == "sufficiently_evidenced":

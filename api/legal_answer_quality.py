@@ -11,7 +11,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from datetime import date
-from typing import Any, Literal, Sequence
+from typing import Any, Literal, Mapping, Sequence
 
 from api.legal_claim_validation import _claim_text_supported_by_quote
 
@@ -396,8 +396,16 @@ def build_evidence_coverage(
     required_sections: list[str] | None = None,
     recommended_forms: list[dict[str, Any]] | None = None,
     answer: str | None = None,
+    validated_claims: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Report observable source coverage without making a legal judgment."""
+    """Report observable source coverage without making a legal judgment.
+
+    ``validated_claims`` is an optional projection from the same postcheck
+    that produced the final answer. It lets a direct Markdown answer carry an
+    issue/facet-bound supported claim even when it does not use a ``Kết luận``
+    heading, without treating a bare facet label or arbitrary citation as
+    proof.
+    """
     required = set(required_sections or [])
     blobs = [(_evidence_id(item), _evidence_blob(item)) for item in results if isinstance(item, dict)]
     coverage: dict[str, dict[str, Any]] = {}
@@ -416,6 +424,15 @@ def build_evidence_coverage(
 
         if section == "conclusion":
             ids = _direct_conclusion_evidence_ids(answer, results)
+            if not ids:
+                ids = [
+                    str(item.get("source_id") or "").strip()
+                    for item in (validated_claims or ())
+                    if isinstance(item, Mapping)
+                    and str(item.get("status") or "").casefold()
+                    in {"supported", "verified"}
+                    and str(item.get("source_id") or "").strip()
+                ]
             if not ids:
                 ids = [
                     str(form.get("form_id") or "")

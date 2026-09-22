@@ -23,7 +23,7 @@ describe('Ask SSE parser', () => {
     expect(events.map((event) => event.type)).toEqual([
       'accepted',
       'final',
-      'complete',
+      'completed',
     ])
     expect(events[1]).toMatchObject({
       type: 'final',
@@ -46,8 +46,8 @@ describe('Ask SSE parser', () => {
       'status',
       'sources',
       'final',
-      'error',
-      'complete',
+      'failed',
+      'completed',
     ])
     expect(events[2]).toMatchObject({
       type: 'sources',

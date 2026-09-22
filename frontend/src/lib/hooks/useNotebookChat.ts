@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { getApiErrorMessage } from '@/lib/utils/error-handler'
@@ -33,6 +33,7 @@ export function useNotebookChat({ notebookId, sources, notes, contextSelections 
   const [charCount, setCharCount] = useState<number>(0)
   // Pending model override for when user changes model before a session exists
   const [pendingModelOverride, setPendingModelOverride] = useState<string | null>(null)
+  const lastContextSignature = useRef('')
 
   // Fetch sessions for this notebook
   const {
@@ -130,7 +131,7 @@ export function useNotebookChat({ notebookId, sources, notes, contextSelections 
   })
 
   // Build context from sources and notes based on user selections
-  const buildContext = useCallback(async () => {
+  const buildContext = useCallback(async (query = '') => {
     // Build context_config mapping IDs to selection modes
     const context_config: { sources: Record<string, string>, notes: Record<string, string> } = {
       sources: {},
@@ -160,9 +161,14 @@ export function useNotebookChat({ notebookId, sources, notes, contextSelections 
     })
 
     // Call API to build context with actual content
+    const fullTextRequested = sources.some(
+      (source) => contextSelections.sources[source.id] === 'full'
+    )
     const response = await chatApi.buildContext({
       notebook_id: notebookId,
-      context_config
+      context_config,
+      query,
+      full_text_requested: fullTextRequested,
     })
 
     // Store token and char counts
@@ -214,12 +220,16 @@ export function useNotebookChat({ notebookId, sources, notes, contextSelections 
 
     try {
       // Build context and send message
-      const context = await buildContext()
+      const fullTextRequested = sources.some(
+        (source) => contextSelections.sources[source.id] === 'full'
+      )
+      const context = await buildContext(message)
       const response = await chatApi.sendMessage({
         session_id: sessionId,
         message,
         context,
-        model_override: modelOverride ?? (currentSession?.model_override ?? undefined)
+        model_override: modelOverride ?? (currentSession?.model_override ?? undefined),
+        full_text_requested: fullTextRequested,
       })
 
       // Update messages with API response
@@ -245,6 +255,8 @@ export function useNotebookChat({ notebookId, sources, notes, contextSelections 
     refetchCurrentSession,
     queryClient,
     t
+    , sources
+    , contextSelections.sources
   ])
 
   // Switch session
@@ -289,6 +301,12 @@ export function useNotebookChat({ notebookId, sources, notes, contextSelections 
 
   // Update token/char counts when context selections change
   useEffect(() => {
+    const signature = JSON.stringify({
+      sources: sources.map(source => [source.id, contextSelections.sources[source.id]]),
+      notes: notes.map(note => [note.id, contextSelections.notes[note.id]]),
+    })
+    if (signature === lastContextSignature.current) return
+    lastContextSignature.current = signature
     const updateContextCounts = async () => {
       try {
         await buildContext()
@@ -297,7 +315,7 @@ export function useNotebookChat({ notebookId, sources, notes, contextSelections 
       }
     }
     updateContextCounts()
-  }, [buildContext])
+  }, [buildContext, sources, notes, contextSelections.sources, contextSelections.notes])
 
   return {
     // State

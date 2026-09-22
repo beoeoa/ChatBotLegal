@@ -1,0 +1,4 @@
+-- Roll back only the additive serving projection fields.
+REMOVE FIELD IF EXISTS vector_collection ON TABLE legal_crawl_candidate;
+REMOVE FIELD IF EXISTS chatbot_ready ON TABLE legal_crawl_candidate;
+REMOVE FIELD IF EXISTS vector_collection ON TABLE legal_import_job;

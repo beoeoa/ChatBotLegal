@@ -2,7 +2,9 @@
 
 This module contains no I/O and never infers legal effect from model output.
 Only exact official evidence is normalized; unknown or partial evidence remains
-explicit so callers can fail closed at the retrieval boundary.
+explicit in serving metadata. Explicit full-document adverse statuses and
+known affected provisions fail closed, while an unresolved partial scope is
+passed through with a warning until the official scope is resolved.
 """
 
 from __future__ import annotations
@@ -74,7 +76,16 @@ def normalize_law_number(value: Any) -> str | None:
     text = unicodedata.normalize("NFKC", str(value or "")).upper().strip()
     text = re.sub(r"\s+", "", text)
     text = text.replace("–", "-").replace("—", "-").replace("−", "-")
-    return text if _LAW_NUMBER.fullmatch(text) else None
+    if _LAW_NUMBER.fullmatch(text):
+        return text
+    # The official endpoint sometimes prefixes the docNum field with its
+    # document type. Accept only that narrow transport defect, not free text.
+    prefixed = re.fullmatch(
+        r"(?:LUẬT|BỘLUẬT|NGHỊQUYẾT|NGHỊĐỊNH|THÔNGTƯ|QUYẾTĐỊNH|PHÁPLỆNH)SỐ:?"
+        r"(?P<number>\d{1,4}(?:\.\d+)?/\d{4}/[A-ZĐ0-9]{1,12}(?:-[A-ZĐ0-9]{1,12})*)",
+        text,
+    )
+    return prefixed.group("number") if prefixed else None
 
 
 def _parse_date(value: Any) -> date | None:
@@ -224,11 +235,26 @@ class LegalValidityObservation:
     evidence_status: EvidenceStatus
     observed_at: datetime
     source_updated_at: datetime | None
+    verified_by: str | None = None
+    verified_at: datetime | None = None
     fingerprint: str = field(init=False)
     observation_key: str = field(init=False)
 
     def __post_init__(self) -> None:
         normalized_number = normalize_law_number(self.law_number)
+        if normalized_number is None and self.source_kind == "admin_confirmed_stored_metadata":
+            # Administrative confirmation is bound to a corpus record, not a
+            # guessed instrument year. Keep the original identifier intact.
+            raw_number = str(self.law_number or "").strip()
+            if (
+                str(self.document_id or "").isdigit()
+                and int(self.document_id) > 0
+                and re.fullmatch(
+                    r"(?:(?:Thông tư|Số:)\s*)?\d{1,6}/(?:\d{4}/)?[A-ZĐ0-9]{1,12}(?:-[A-ZĐ0-9]{1,12})*",
+                    raw_number,
+                )
+            ):
+                normalized_number = raw_number
         if normalized_number is None:
             raise ValueError("exact_law_number_required")
         observed_at = _parse_datetime(self.observed_at)
@@ -283,6 +309,8 @@ class LegalValidityObservation:
             "evidence_status": self.evidence_status.value,
             "observed_at": self.observed_at.isoformat(),
             "source_updated_at": self.source_updated_at.isoformat() if self.source_updated_at else None,
+            "verified_by": self.verified_by,
+            "verified_at": self.verified_at.isoformat() if self.verified_at else None,
             "fingerprint": self.fingerprint,
             "observation_key": self.observation_key,
         }
@@ -306,6 +334,8 @@ class LegalValidityObservation:
             evidence_status=EvidenceStatus(str(value.get("evidence_status") or "malformed")),
             observed_at=_parse_datetime(value.get("observed_at")) or datetime.now(timezone.utc),
             source_updated_at=_parse_datetime(value.get("source_updated_at")),
+            verified_by=str(value.get("verified_by") or "") or None,
+            verified_at=_parse_datetime(value.get("verified_at")),
         )
 
 
@@ -385,8 +415,13 @@ def serving_decision(
         proposed_action = "historical_only"
     elif observation.normalized_status in _ADVERSE_PARTIAL:
         if not observation.affected_provisions:
-            reason = "partial_scope_unresolved"
-            proposed_action = "block_document"
+            # A partial-effectivity record without affected provisions is a
+            # source-validity gap, not proof that every provision is invalid.
+            # Keep the retrieved row available to the answer pipeline and
+            # expose the uncertainty as metadata.  A later snapshot refresh
+            # can then resolve the exact article/clause without having
+            # discarded the relevant retrieval hit in the meantime.
+            warning = "partial_scope_unresolved"
         elif any(
             provision.matches(
                 article_number=article_number,

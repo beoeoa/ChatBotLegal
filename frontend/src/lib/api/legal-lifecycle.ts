@@ -26,6 +26,11 @@ export interface LifecycleValidation {
 }
 
 export interface LifecycleDraft {
+  field_id?: number | null
+  domain_slug?: string | null
+  primary_organization_unit_id?: string | null
+  activation_state?: string
+  activation_error?: string
   id: string
   logical_document_id?: number | null
   state: LifecycleDraftState
@@ -50,6 +55,9 @@ export interface LifecycleDraft {
 }
 
 export interface LifecycleDraftInput {
+  field_id?: number | null
+  domain_slug?: string | null
+  primary_organization_unit_id?: string | null
   reason: string
   logical_document_id?: number | null
   base_fingerprint?: string | null
@@ -112,6 +120,11 @@ export const legalLifecycleApi = {
 
   async review(id: string, decision: 'approved' | 'rejected' | 'changes_requested', reason: string, revision: number, idempotencyKey: string): Promise<LifecycleDraft> {
     return (await apiClient.post(`/legal/lifecycle/drafts/${encodeURIComponent(id)}/review`, { decision, reason }, { headers: mutationHeaders(idempotencyKey, revision) })).data
+  },
+
+  async activate(id: string, reason: string, revision: number): Promise<LifecycleDraft> {
+    return (await apiClient.post(`/legal/lifecycle/drafts/${encodeURIComponent(id)}/activate`, { reason },
+      { headers: mutationHeaders(lifecycleIdempotencyKey('activate'), revision), timeout: 310000 })).data
   },
 
   async activationPreview(id: string): Promise<ActivationPreview> {

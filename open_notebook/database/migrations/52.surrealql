@@ -1,0 +1,3 @@
+-- Per-source rendering compatibility profile for difficult JavaScript pages.
+-- Additive only; missing values continue to mean "standard".
+DEFINE FIELD IF NOT EXISTS compatibility_mode ON TABLE legal_crawl_source TYPE option<string>;

@@ -11,10 +11,14 @@ const api = vi.hoisted(() => ({
   createChangeEventCandidate: vi.fn(),
   confirmChangeEvent: vi.fn(),
 }))
+const settings = vi.hoisted(() => ({ organization_units: [] as Array<Record<string, unknown>> }))
 
 vi.mock('@/lib/api/legal-management', () => ({ legalManagementApi: api }))
 vi.mock('@/components/layout/AppShell', () => ({
   AppShell: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+}))
+vi.mock('@/lib/hooks/use-settings', () => ({
+  useSettings: () => ({ data: settings }),
 }))
 
 import LegalManagementPage from './page'
@@ -79,6 +83,15 @@ function readyData() {
       reason_code: 'faq_dependency_not_configured',
       message: 'Chưa có schema phụ thuộc FAQ được phê duyệt.',
     },
+    serving_release: {
+      release_id: 'retrieval-v2-20260816-v6',
+      legal_as_of: '2026-08-13',
+      manifest_sha256: 'm'.repeat(64),
+      current_collection: 'current-shadow',
+      temporal_collection: 'temporal-shadow',
+      exact_lexical_index: 'exact.sqlite3',
+      cards: { total_retrievable: 100, current_effective: 80, expired_total: 12, expiring_30: 1, effective_30: 2 },
+    },
   })
   api.list.mockResolvedValue({
     items: [
@@ -90,6 +103,9 @@ function readyData() {
         issuing_agency: 'Chính phủ',
         stored_status: 'active',
         as_of_status: 'active',
+        validity_status: 'active',
+        serving_state: 'current_retrievable',
+        current_answer_eligible: true,
         retrieval_tier: 'core',
         article_count: 2,
         chunk_count: 4,
@@ -155,11 +171,12 @@ describe('LegalManagementPage', () => {
         'H\u1ebft hi\u1ec7u l\u1ef1c \u2013 kh\u00f4ng d\u00f9ng \u0111\u1ec3 tr\u1ea3 l\u1eddi hi\u1ec7n h\u00e0nh',
       ),
     ).toBeInTheDocument()
-    expect(screen.getByText('Ch\u1ec9 d\u00f9ng \u0111\u1ec3 tra c\u1ee9u l\u1ecbch s\u1eed')).toBeInTheDocument()
+    expect(screen.getByText('Ch\u1ec9 tra c\u1ee9u l\u1ecbch s\u1eed')).toBeInTheDocument()
   })
 
   beforeEach(() => {
     vi.clearAllMocks()
+    settings.organization_units = []
     readyData()
   })
 
@@ -167,13 +184,17 @@ describe('LegalManagementPage', () => {
     render(<LegalManagementPage />)
 
     expect(await screen.findByRole('heading', { name: 'Kho văn bản pháp luật' })).toBeInTheDocument()
-    expect(screen.getByText('80 / 100')).toBeInTheDocument()
+    expect(screen.getByText('100')).toBeInTheDocument()
     expect(screen.getByText('Nghị định thử nghiệm')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Văn bản cần kiểm tra hiệu lực' })).toHaveAttribute('href', '/legal-management/validity')
     expect(screen.queryByRole('link', { name: 'Bản nháp và phiên bản' })).not.toBeInTheDocument()
-    expect(screen.getByText('Đang phục vụ tra cứu')).toBeInTheDocument()
-    expect(screen.getByText('Cần kiểm tra hiệu lực')).toBeInTheDocument()
-    expect(screen.getByText('Lỗi xử lý dữ liệu')).toBeInTheDocument()
+    expect(screen.getByText('Tổng văn bản tra cứu')).toBeInTheDocument()
+    expect(screen.getByText('Văn bản còn hiệu lực')).toBeInTheDocument()
+    expect(screen.getByText('Tình trạng kho tra cứu')).toBeInTheDocument()
+    expect(screen.getByText('Văn bản hết hiệu lực cần xử lý')).toBeInTheDocument()
+    expect(screen.getAllByText('12').length).toBeGreaterThan(0)
+    expect(screen.getByText('Nguồn quét hoặc nhập kho bị lỗi')).toBeInTheDocument()
+    expect(screen.queryByText(/current_retrievable|historical_only|Manifest V3|manifest/i)).not.toBeInTheDocument()
     expect(screen.getByRole('link', { name: /Nghị định thử nghiệm/ })).toHaveAttribute(
       'href',
       '/legal-management/42',
@@ -198,59 +219,45 @@ describe('LegalManagementPage', () => {
     await waitFor(() => {
       expect(api.list).toHaveBeenLastCalledWith(
         expect.objectContaining({ q: 'hộ tịch', validity_status: 'expired', offset: 0 }),
+        expect.objectContaining({ timeout: 10000 }),
       )
     })
   })
 
-  it('filters lifecycle rows and uses two-step evidence confirmation', async () => {
-    api.createChangeEventCandidate.mockResolvedValue({
-      id: 'change-1', document_id: 'doc-42', event_type: 'replace',
-      effective_from: '2026-08-13', source_url: 'https://vbpl.vn/replacement',
-      scope: 'whole_document', provisions: [], provenance: {},
-      reason: 'Ghi nhận văn bản thay thế chính thức.', status: 'candidate',
-      evidence_fingerprint: 'a'.repeat(64),
-    })
-    api.confirmChangeEvent.mockResolvedValue({
-      event_id: 'change-1', status: 'confirmed', impact_case_count: 3,
-    })
+  it('shows only active departments in the management filter', async () => {
+    settings.organization_units = [
+      { id: 'active-unit', name: 'Phòng đang hoạt động', short_name: null, sort_order: 1, is_active: true },
+      { id: 'inactive-unit', name: 'Phòng đã ngừng', short_name: null, sort_order: 2, is_active: false },
+    ]
     render(<LegalManagementPage />)
-    await screen.findByText('Quản trị vòng đời nâng cao')
-    fireEvent.click(screen.getByText('Quản trị vòng đời nâng cao'))
-    await screen.findByText('Vòng đời và trạng thái chỉ mục')
+    await screen.findByText('Nghị định thử nghiệm')
 
-    fireEvent.change(screen.getByLabelText('Nhóm vòng đời'), {
-      target: { value: 'expiring_30' },
-    })
-    await waitFor(() => {
-      expect(api.lifecycleDocuments).toHaveBeenLastCalledWith(
-        expect.objectContaining({ bucket: 'expiring_30' }),
-      )
-    })
+    const filter = screen.getByLabelText('Phòng ban phụ trách')
+    expect(filter).toHaveTextContent('Phòng đang hoạt động')
+    expect(filter).not.toHaveTextContent('Phòng đã ngừng')
+  })
 
-    fireEvent.click(screen.getByRole('button', { name: /Ghi nhận thay đổi/ }))
-    fireEvent.change(screen.getByLabelText('Loại sự kiện'), { target: { value: 'replace' } })
-    fireEvent.change(screen.getByLabelText('URL nguồn chính thức'), {
-      target: { value: 'https://vbpl.vn/replacement' },
-    })
-    fireEvent.change(screen.getByLabelText('Lý do tạo ứng viên'), {
-      target: { value: 'Ghi nhận văn bản thay thế từ nguồn chính thức.' },
-    })
-    fireEvent.click(screen.getByRole('button', { name: 'Tạo ứng viên' }))
-    expect(await screen.findByText('Ứng viên chờ xác nhận')).toBeInTheDocument()
-    expect(api.createChangeEventCandidate).toHaveBeenCalledWith(
-      expect.objectContaining({ document_id: 'doc-42', event_type: 'replace' }),
+  it('hides old expired history by default and can request all history', async () => {
+    render(<LegalManagementPage />)
+    await screen.findByText('Nghị định thử nghiệm')
+
+    expect(api.list).toHaveBeenLastCalledWith(
+      expect.objectContaining({ include_expired_history: false }),
+      expect.objectContaining({ timeout: 10000 }),
     )
+    fireEvent.change(screen.getByLabelText('Lịch sử hết hiệu lực'), { target: { value: 'all' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Áp dụng bộ lọc' }))
+    await waitFor(() => expect(api.list).toHaveBeenLastCalledWith(
+      expect.objectContaining({ include_expired_history: true, offset: 0 }),
+      expect.objectContaining({ timeout: 10000 }),
+    ))
+  })
 
-    fireEvent.change(screen.getByLabelText('Lý do xác nhận'), {
-      target: { value: 'Đã đối chiếu nguồn và ngày áp dụng hợp lệ.' },
-    })
-    fireEvent.click(screen.getByRole('button', { name: 'Xác nhận bằng chứng' }))
-    await waitFor(() => {
-      expect(api.confirmChangeEvent).toHaveBeenCalledWith('change-1', {
-        evidence_fingerprint: 'a'.repeat(64),
-        reason: 'Đã đối chiếu nguồn và ngày áp dụng hợp lệ.',
-      })
-    })
+  it('routes lifecycle review to the dedicated read-only validity surface', async () => {
+    render(<LegalManagementPage />)
+    const link = await screen.findByRole('link', { name: /Văn bản cần kiểm tra hiệu lực/i })
+    expect(link).toHaveAttribute('href', '/legal-management/validity')
+    expect(screen.queryByText('Quản trị vòng đời nâng cao')).not.toBeInTheDocument()
   })
 
   it('distinguishes an empty result from a failed dashboard read', async () => {

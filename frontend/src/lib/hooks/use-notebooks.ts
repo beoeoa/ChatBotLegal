@@ -4,7 +4,7 @@ import { QUERY_KEYS } from '@/lib/api/query-client'
 import { useToast } from '@/lib/hooks/use-toast'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import { getApiErrorKey } from '@/lib/utils/error-handler'
-import { CreateNotebookRequest, UpdateNotebookRequest } from '@/lib/types/api'
+import { CreateNotebookRequest, NotebookResponse, UpdateNotebookRequest } from '@/lib/types/api'
 import { useAuthStore } from '@/lib/stores/auth-store'
 
 function shouldRetryNotebookRequest(failureCount: number, error: unknown) {
@@ -24,11 +24,26 @@ export function useNotebooks(archived?: boolean, enabled: boolean = true) {
 
 export function useNotebook(id: string) {
   const userId = useAuthStore((state) => state.userId)
+  const queryClient = useQueryClient()
   return useQuery({
     queryKey: [...QUERY_KEYS.notebook(id), { owner: userId }],
     queryFn: () => notebooksApi.get(id),
     enabled: !!id && !!userId,
     retry: shouldRetryNotebookRequest,
+    placeholderData: () => {
+      const notebookLists = queryClient.getQueriesData<NotebookResponse[]>({
+        queryKey: QUERY_KEYS.notebooks,
+      })
+      for (const [queryKey, notebooks] of notebookLists) {
+        const ownerScope = Array.isArray(queryKey)
+          ? queryKey.find((part) => typeof part === 'object' && part !== null && 'owner' in part) as { owner?: string } | undefined
+          : undefined
+        if (ownerScope?.owner !== userId) continue
+        const match = notebooks?.find((notebook) => notebook.id === id)
+        if (match) return match
+      }
+      return undefined
+    },
   })
 }
 

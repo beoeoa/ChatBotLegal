@@ -22,6 +22,7 @@ interface StrategyData {
 }
 
 interface AskState {
+  finalResponse: AskResponse | null
   isStreaming: boolean
   stageLabel: string | null
   strategy: StrategyData | null
@@ -45,6 +46,12 @@ interface AskState {
 }
 
 interface AskOptions {
+  answerDepth?: 'quick' | 'balanced' | 'deep'
+  attachmentText?: string
+  attachmentId?: string
+  attachmentName?: string
+  attachmentSha256?: string
+  attachmentStatus?: 'processing' | 'complete' | 'partial' | 'error'
   offlineMode?: boolean
   offlineModel?: string
   domain?: string | null
@@ -53,6 +60,13 @@ interface AskOptions {
   conversationId?: string | null
   eventDate?: string | null
   legalAsOf?: string | null
+  modelOptionId?: string | null
+  memoryItemIds?: string[]
+  activeDocumentId?: string | null
+  /** The page already wrote the user message before opening Ask. */
+  prePersistedUserMessage?: boolean
+  /** Stable only for retries of one submission, never derived from question text. */
+  turnId?: string
 }
 
 interface AskFailure {
@@ -60,15 +74,6 @@ interface AskFailure {
   answer?: undefined
 }
 
-function stableIdempotencyKey(conversationId: string | null | undefined, question: string): string {
-  const input = `${conversationId || 'new'}:${question.replace(/\s+/g, ' ').trim().toLocaleLowerCase()}`
-  let hash = 2166136261
-  for (let index = 0; index < input.length; index += 1) {
-    hash ^= input.charCodeAt(index)
-    hash = Math.imul(hash, 16777619)
-  }
-  return `ask-${(hash >>> 0).toString(16)}-${input.length}`
-}
 
 export function useAsk() {
   const { t } = useTranslation()
@@ -79,6 +84,7 @@ export function useAsk() {
     strategy: null,
     answers: [],
     finalAnswer: null,
+    finalResponse: null,
     ragTrace: null,
     procedureDetail: null,
     recommendedForms: null,
@@ -140,6 +146,7 @@ export function useAsk() {
       strategy: null,
       answers: [],
       finalAnswer: null,
+      finalResponse: null,
       ragTrace: null,
       procedureDetail: null,
       recommendedForms: null,
@@ -158,15 +165,20 @@ export function useAsk() {
     })
 
     try {
-      // Keep retries for the same conversation/question on one backend key.
-      // A random key makes duplicate clicks impossible to deduplicate.
-      const idempotencyKey = stableIdempotencyKey(options.conversationId, question)
+      const idempotencyKey = options.turnId || `turn-${crypto.randomUUID()}`
       const request: AskRequest = {
         question,
         role,
         strategy_model: resolvedModels.strategy,
         answer_model: resolvedModels.answer,
         final_answer_model: resolvedModels.finalAnswer,
+        model_option_id: options.modelOptionId || undefined,
+        answer_depth: options.answerDepth || 'balanced',
+        attachment_id: options.attachmentId || undefined,
+        attachment_text: options.attachmentText || undefined,
+        attachment_name: options.attachmentName || undefined,
+        attachment_sha256: options.attachmentSha256 || undefined,
+        attachment_status: options.attachmentStatus || undefined,
         offline_mode: options.offlineMode,
         offline_model: options.offlineModel,
         domain: options.domain || null,
@@ -178,10 +190,14 @@ export function useAsk() {
         event_date: options.eventDate || undefined,
         legal_as_of: options.legalAsOf || undefined,
         idempotency_key: idempotencyKey,
+        pre_persisted_user_message: options.prePersistedUserMessage === true,
+        memory_item_ids: options.memoryItemIds || [],
+        active_document_id: options.activeDocumentId || undefined,
         signal: controller.signal
       }
 
       const onStreamEvent = (event: AskSseEvent) => {
+        if (abortRef.current !== controller || controller.signal.aborted) return
         if (event.type === 'accepted') {
           setState(prev => ({ ...prev, stageLabel: askStageLabel('accepted') }))
         } else if (event.type === 'status') {
@@ -194,7 +210,9 @@ export function useAsk() {
             citations: event.citations,
             stageLabel: askStageLabel('retrieval'),
           }))
-        } else if (event.type === 'complete') {
+        } else if (event.type === 'text_delta') {
+          setState(prev => ({ ...prev, finalAnswer: (prev.finalAnswer || '') + event.text, stageLabel: 'Đang soạn · nội dung chưa hoàn tất' }))
+        } else if (event.type === 'completed') {
           setState(prev => ({ ...prev, stageLabel: askStageLabel('complete') }))
         }
       }
@@ -218,6 +236,8 @@ export function useAsk() {
         response = await searchApi.askKnowledgeBaseSimple(request)
       }
 
+      if (abortRef.current !== controller || controller.signal.aborted) return null
+
       if (!response?.answer) {
         throw new Error('No answer received from server')
       }
@@ -225,6 +245,7 @@ export function useAsk() {
       setState(prev => ({
         ...prev,
         finalAnswer: response.answer,
+        finalResponse: response,
         stageLabel: askStageLabel('complete'),
         ragTrace: response.rag_trace || null,
         procedureDetail: response.procedure_detail || null,
@@ -245,12 +266,15 @@ export function useAsk() {
       return response
 
     } catch (error) {
+      if (abortRef.current !== controller) return null
       const cancelled = controller.signal.aborted
       if (cancelled) {
         setState(prev => ({
           ...prev,
           isStreaming: false,
-          stageLabel: 'Đã dừng tạo câu trả lời',
+          stageLabel: prev.finalAnswer
+            ? 'Đã dừng · phần nội dung đã nhận vẫn được giữ lại'
+            : 'Đã dừng tạo câu trả lời',
           cancelled: true,
           error: null,
         }))
@@ -260,6 +284,9 @@ export function useAsk() {
       setState(prev => ({
         ...prev,
         isStreaming: false,
+        stageLabel: prev.finalAnswer
+          ? 'Kết nối bị gián đoạn · phần nội dung đã nhận vẫn được giữ lại'
+          : prev.stageLabel,
         error: errorMessage
       }))
 
@@ -273,12 +300,15 @@ export function useAsk() {
   }, [t])
 
   const reset = useCallback(() => {
+    abortRef.current?.abort()
+    abortRef.current = null
     setState({
       isStreaming: false,
       stageLabel: null,
       strategy: null,
       answers: [],
       finalAnswer: null,
+      finalResponse: null,
       ragTrace: null,
       procedureDetail: null,
       recommendedForms: null,
@@ -304,7 +334,9 @@ export function useAsk() {
       setState(prev => ({
         ...prev,
         isStreaming: false,
-        stageLabel: 'Đã dừng tạo câu trả lời',
+        stageLabel: prev.finalAnswer
+          ? 'Đã dừng · phần nội dung đã nhận vẫn được giữ lại'
+          : 'Đã dừng tạo câu trả lời',
         cancelled: true,
         error: null,
       }))

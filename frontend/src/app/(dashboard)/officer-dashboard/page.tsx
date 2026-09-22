@@ -1,58 +1,31 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
 import {
   ArrowRight,
   Book,
   BookOpen,
-  Bot,
-  CheckCircle2,
-  Clock3,
-  ExternalLink,
-  FileCheck2,
-  FileDown,
   FilePlus2,
   FileSearch,
   FileText,
-  FolderOpen,
   FolderTree,
   Headphones,
-  History,
-  LayoutDashboard,
-  LibraryBig,
   MessageCircleQuestion,
-  MessageSquare,
   Plus,
   RefreshCw,
-  Search,
-  Send,
   ShieldAlert,
-  ShieldCheck,
   Sparkles,
   User,
-  Users,
 } from 'lucide-react'
-import { toast } from 'sonner'
 
 import { apiClient } from '@/lib/api/client'
 import { useAuthStore } from '@/lib/stores/auth-store'
+import { useOperatingScope } from '@/lib/hooks/use-operating-scope'
 import { AppShell } from '@/components/layout/AppShell'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { Input } from '@/components/ui/input'
-import { Progress } from '@/components/ui/progress'
-
-const DOMAIN_LABELS: Record<string, { label: string; color: string }> = {
-  ho_tich_chung_thuc: { label: 'Hộ tịch - Chứng thực', color: 'bg-blue-500/10 text-blue-600 border-blue-200' },
-  dat_dai_xay_dung: { label: 'Đất đai - Xây dựng', color: 'bg-emerald-500/10 text-emerald-600 border-emerald-200' },
-  hanh_chinh_cong: { label: 'Hành chính công', color: 'bg-purple-500/10 text-purple-600 border-purple-200' },
-  trat_tu_do_thi: { label: 'Trật tự đô thị', color: 'bg-amber-500/10 text-amber-600 border-amber-200' },
-  cu_tru_an_ninh: { label: 'Cư trú - An ninh trật tự', color: 'bg-cyan-500/10 text-cyan-600 border-cyan-200' },
-  khieu_nai_to_cao_xu_phat: { label: 'Khiếu nại - Tố cáo - Xử phạt', color: 'bg-rose-500/10 text-rose-600 border-rose-200' },
-  an_sinh_y_te_giao_duc: { label: 'An sinh - Y tế - Giáo dục', color: 'bg-indigo-500/10 text-indigo-600 border-indigo-200' },
-}
 
 interface ProposalCandidate {
   id: string
@@ -77,43 +50,55 @@ interface NotebookItem {
 }
 
 export default function OfficerDashboardPage() {
-  const { username, role } = useAuthStore()
+  const { username } = useAuthStore()
+  const { scope: operatingScope, error: scopeError } = useOperatingScope()
+  const [proposalSummary, setProposalSummary] = useState<{ total: number; by_status: Record<string, number> } | null>(null)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [proposals, setProposals] = useState<ProposalCandidate[]>([])
   const [notebooks, setNotebooks] = useState<NotebookItem[]>([])
-  const [faqCount, setFaqCount] = useState<number>(10)
-  const [sourcesCount, setSourcesCount] = useState<number>(0)
-  const [supportQueueCount, setSupportQueueCount] = useState<number>(0)
+  const [faqCount, setFaqCount] = useState<number | null>(null)
+  const [notebookCount, setNotebookCount] = useState<number | null>(null)
+  const [loadErrors, setLoadErrors] = useState<string[]>([])
+  const inFlight = useRef(false)
+  const domainLabels = operatingScope?.domain_labels || {}
+  const domainLabel = (code?: string) =>
+    (code && domainLabels[code]) || code || 'Lĩnh vực khác'
 
   const loadData = useCallback(async (manual = false) => {
+    if (inFlight.current) return
+    inFlight.current = true
     if (manual) setRefreshing(true)
     try {
-      const [proposalsRes, notebooksRes, faqRes, sourcesRes] = await Promise.allSettled([
+      const [proposalsRes, notebooksRes, faqRes, proposalCountsRes] = await Promise.allSettled([
         apiClient.get<{ candidates?: ProposalCandidate[] }>('/legal/proposals/candidates'),
         apiClient.get<NotebookItem[] | { items?: NotebookItem[] }>('/notebooks'),
         apiClient.get<{ total?: number }>('/faq?limit=1'),
-        apiClient.get<unknown[]>('/sources'),
+        apiClient.get<{ total: number; by_status: Record<string, number> }>('/legal/proposals/summary'),
       ])
 
       if (proposalsRes.status === 'fulfilled') {
         setProposals(proposalsRes.value.data?.candidates || [])
       }
+      if (proposalCountsRes.status === 'fulfilled') setProposalSummary(proposalCountsRes.value.data)
       if (notebooksRes.status === 'fulfilled') {
         const raw = notebooksRes.value.data
         const items = Array.isArray(raw) ? raw : raw?.items || []
         setNotebooks(items.slice(0, 5))
+        setNotebookCount(items.length)
       }
       if (faqRes.status === 'fulfilled') {
-        setFaqCount(faqRes.value.data?.total || 10)
+        setFaqCount(faqRes.value.data?.total ?? null)
       }
-      if (sourcesRes.status === 'fulfilled') {
-        const raw = sourcesRes.value.data
-        setSourcesCount(Array.isArray(raw) ? raw.length : 0)
-      }
+      setLoadErrors([
+        ...(proposalsRes.status === 'rejected' || proposalCountsRes.status === 'rejected' ? ['đề xuất văn bản'] : []),
+        ...(notebooksRes.status === 'rejected' ? ['hồ sơ pháp lý'] : []),
+        ...(faqRes.status === 'rejected' ? ['câu hỏi thường gặp'] : []),
+      ])
     } catch {
-      // Graceful fallback
+      setLoadErrors(['số liệu tổng quan'])
     } finally {
+      inFlight.current = false
       setLoading(false)
       setRefreshing(false)
     }
@@ -123,24 +108,17 @@ export default function OfficerDashboardPage() {
     void loadData()
   }, [loadData])
 
-  const pendingProposals = proposals.filter(
-    (p) => (p.review_status || p.status) === 'pending' || !(p.review_status || p.status),
-  ).length
-  const changesRequestedProposals = proposals.filter(
-    (p) => (p.review_status || p.status) === 'changes_requested',
-  ).length
-  const approvedProposals = proposals.filter(
-    (p) => (p.review_status || p.status) === 'approved' || (p.review_status || p.status) === 'imported',
-  ).length
+  const pendingProposals = proposalSummary?.by_status.pending || 0
+  const changesRequestedProposals = proposalSummary?.by_status.changes_requested || 0
+  const approvedProposals = ['approved', 'import_queued', 'imported'].reduce((sum, status) => sum + (proposalSummary?.by_status[status] || 0), 0)
 
   return (
     <AppShell>
-      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain bg-muted/10 p-4 pb-16 md:p-8 md:pb-20">
+      <div aria-busy={loading || refreshing} className="app-main-gradient min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 pb-16 md:p-7 md:pb-20">
         <div className="mx-auto max-w-7xl space-y-6">
 
           {/* 🌟 Officer Welcome Hero Banner */}
-          <section className="relative overflow-hidden rounded-2xl border border-border/60 bg-gradient-to-br from-card via-card to-primary/[0.05] p-5 shadow-sm md:p-7">
-            <div className="pointer-events-none absolute -right-16 -top-20 h-64 w-64 rounded-full bg-primary/10 blur-3xl" />
+          <section className="relative overflow-hidden rounded-2xl border border-border/80 bg-card p-5 shadow-sm md:p-7">
             <div className="relative flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
               <div className="space-y-1.5">
                 <div className="flex flex-wrap items-center gap-2.5">
@@ -148,7 +126,7 @@ export default function OfficerDashboardPage() {
                     <User className="h-5 w-5" />
                   </div>
                   <div>
-                    <h1 className="text-2xl font-bold tracking-tight md:text-3xl">
+                    <h1 className="font-display text-3xl font-bold tracking-tight text-foreground md:text-4xl">
                       Xin chào, {username || 'Cán bộ nghiệp vụ'}!
                     </h1>
                   </div>
@@ -157,15 +135,18 @@ export default function OfficerDashboardPage() {
                   </Badge>
                 </div>
                 <p className="text-sm text-muted-foreground">
-                  Bàn làm việc nghiệp vụ pháp lý · UBND Quận Lê Chân, Thành phố Hải Phòng.
+                  Bàn làm việc nghiệp vụ pháp lý theo phòng ban được phân công.
                 </p>
+                <p role="status" className="text-sm text-muted-foreground">{scopeError || (operatingScope
+                  ? `Phòng ban chính: ${operatingScope.primary_organization_unit_name || 'Chưa phân công'}. ${operatingScope.can_manage_content ? 'Quyền nghiệp vụ được xác nhận theo phòng ban và hỗ trợ còn hạn.' : 'Chưa có quyền nhận việc; vẫn được tra cứu pháp luật dùng chung.'}`
+                  : 'Đang xác nhận phạm vi phòng ban…')}</p>
                 <div className="flex items-center gap-3 text-xs text-muted-foreground">
                   <span className="flex items-center gap-1">
                     <span className="inline-block h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
-                    Hệ thống hoạt động bình thường
+                    Theo dõi công việc của bạn
                   </span>
                   <span>·</span>
-                  <span>Trợ lý AI sẵn sàng hỗ trợ giải đáp pháp luật</span>
+                  <span>Tra cứu tài liệu và tiếp nhận yêu cầu hỗ trợ</span>
                 </div>
               </div>
 
@@ -174,7 +155,7 @@ export default function OfficerDashboardPage() {
                   variant="outline"
                   size="sm"
                   onClick={() => void loadData(true)}
-                  disabled={refreshing}
+                  disabled={loading || refreshing}
                   className="gap-2 bg-background/80 shadow-sm hover:bg-background"
                 >
                   <RefreshCw className={`h-4 w-4 ${refreshing ? 'animate-spin text-primary' : ''}`} />
@@ -190,20 +171,26 @@ export default function OfficerDashboardPage() {
             </div>
           </section>
 
+          {loadErrors.length > 0 && (
+            <div role="alert" className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950 dark:bg-amber-950/30 dark:text-amber-100">
+              Chưa tải được {loadErrors.join(', ')}. Số liệu đã tải trước đó được giữ lại; hãy bấm Làm mới để thử lại.
+            </div>
+          )}
+
           {/* 📊 4 KPI Metric Cards */}
           <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             {/* Card 1: Hồ sơ pháp lý */}
-            <Card className="group relative overflow-hidden transition-all hover:-translate-y-0.5 hover:shadow-md">
+            <Card className="group relative overflow-hidden transition-shadow hover:shadow-md">
               <CardContent className="p-5">
                 <div className="flex items-center justify-between gap-3">
                   <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Hồ sơ pháp lý</span>
-                  <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-blue-500/10 text-blue-600 dark:text-blue-400">
+                  <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-primary/10 text-primary">
                     <Book className="h-5 w-5" />
                   </span>
                 </div>
                 <div className="mt-3 flex items-baseline gap-2">
-                  <span className="text-3xl font-bold tracking-tight tabular-nums text-foreground">{notebooks.length}</span>
-                  <span className="text-xs text-muted-foreground">hồ sơ đã tạo</span>
+                  <span className="text-3xl font-bold tracking-tight tabular-nums text-foreground">{notebookCount ?? '—'}</span>
+                  <span className="text-xs text-muted-foreground">hồ sơ được truy cập</span>
                 </div>
                 <div className="mt-3 flex items-center justify-between border-t pt-2.5 text-xs text-muted-foreground">
                   <span>Nghiên cứu & Ghi chú</span>
@@ -216,7 +203,7 @@ export default function OfficerDashboardPage() {
             </Card>
 
             {/* Card 2: Đề xuất văn bản */}
-            <Card className="group relative overflow-hidden transition-all hover:-translate-y-0.5 hover:shadow-md">
+            <Card className="group relative overflow-hidden transition-shadow hover:shadow-md">
               <CardContent className="p-5">
                 <div className="flex items-center justify-between gap-3">
                   <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Đề xuất văn bản</span>
@@ -225,7 +212,7 @@ export default function OfficerDashboardPage() {
                   </span>
                 </div>
                 <div className="mt-3 flex items-baseline gap-2">
-                  <span className="text-3xl font-bold tracking-tight tabular-nums text-foreground">{proposals.length}</span>
+                  <span className="text-3xl font-bold tracking-tight tabular-nums text-foreground">{loading || loadErrors.includes('đề xuất văn bản') ? '—' : proposalSummary?.total ?? '—'}</span>
                   <span className="text-xs text-muted-foreground">tổng đề xuất</span>
                 </div>
                 <div className="mt-3 flex items-center justify-between border-t pt-2.5 text-xs">
@@ -243,7 +230,7 @@ export default function OfficerDashboardPage() {
             </Card>
 
             {/* Card 3: Hỗ trợ người dân */}
-            <Card className="group relative overflow-hidden transition-all hover:-translate-y-0.5 hover:shadow-md">
+            <Card className="group relative overflow-hidden transition-shadow hover:shadow-md">
               <CardContent className="p-5">
                 <div className="flex items-center justify-between gap-3">
                   <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Hỗ trợ công dân</span>
@@ -252,11 +239,11 @@ export default function OfficerDashboardPage() {
                   </span>
                 </div>
                 <div className="mt-3 flex items-baseline gap-2">
-                  <span className="text-3xl font-bold tracking-tight tabular-nums text-foreground">Trực tuyến</span>
-                  <span className="text-xs text-emerald-600 font-medium">Sẵn sàng</span>
+                  <span className="text-3xl font-bold tracking-tight tabular-nums text-foreground">Tiếp nhận</span>
+                  <span className="text-xs text-muted-foreground">yêu cầu hỗ trợ</span>
                 </div>
                 <div className="mt-3 flex items-center justify-between border-t pt-2.5 text-xs text-muted-foreground">
-                  <span>Hàng chờ lĩnh vực</span>
+                  <span>Hàng chờ phòng ban</span>
                   <span className="text-primary font-medium flex items-center gap-0.5">
                     Vào ca trực <ArrowRight className="h-3 w-3" />
                   </span>
@@ -266,20 +253,20 @@ export default function OfficerDashboardPage() {
             </Card>
 
             {/* Card 4: Kho thủ tục & FAQ */}
-            <Card className="group relative overflow-hidden transition-all hover:-translate-y-0.5 hover:shadow-md">
+            <Card className="group relative overflow-hidden transition-shadow hover:shadow-md">
               <CardContent className="p-5">
                 <div className="flex items-center justify-between gap-3">
-                  <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Thủ tục & Biểu mẫu</span>
+                  <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Câu hỏi thường gặp</span>
                   <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-amber-500/10 text-amber-600 dark:text-amber-400">
                     <FileText className="h-5 w-5" />
                   </span>
                 </div>
                 <div className="mt-3 flex items-baseline gap-2">
-                  <span className="text-3xl font-bold tracking-tight tabular-nums text-foreground">{faqCount}</span>
-                  <span className="text-xs text-muted-foreground">quy trình chuẩn</span>
+                  <span className="text-3xl font-bold tracking-tight tabular-nums text-foreground">{faqCount ?? '—'}</span>
+                  <span className="text-xs text-muted-foreground">hướng dẫn đã công bố</span>
                 </div>
                 <div className="mt-3 flex items-center justify-between border-t pt-2.5 text-xs text-muted-foreground">
-                  <span>7 Lĩnh vực hành chính</span>
+                  <span>Tra cứu theo nhu cầu</span>
                   <span className="text-primary font-medium flex items-center gap-0.5">
                     Tra cứu ngay <ArrowRight className="h-3 w-3" />
                   </span>
@@ -298,8 +285,8 @@ export default function OfficerDashboardPage() {
             </div>
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
               {[
-                { title: 'Hỏi đáp pháp luật', desc: 'Trợ lý AI tra cứu nhanh', href: '/search', icon: MessageCircleQuestion, color: 'text-blue-600 bg-blue-500/10 hover:border-blue-300' },
-                { title: 'Đề xuất văn bản', desc: 'Gửi URL/file cho Admin', href: '/officer-proposals', icon: FilePlus2, color: 'text-emerald-600 bg-emerald-500/10 hover:border-emerald-300' },
+                { title: 'Hỏi đáp pháp luật', desc: 'Trợ lý AI tra cứu nhanh', href: '/search', icon: MessageCircleQuestion, color: 'text-primary bg-primary/10 hover:border-primary/40' },
+                { title: 'Đề xuất văn bản', desc: 'Gửi đường dẫn hoặc tệp cho quản trị viên', href: '/officer-proposals', icon: FilePlus2, color: 'text-emerald-600 bg-emerald-500/10 hover:border-emerald-300' },
                 { title: 'Hỗ trợ công dân', desc: 'Tiếp nhận phiên chat', href: '/live-support', icon: Headphones, color: 'text-purple-600 bg-purple-500/10 hover:border-purple-300' },
                 { title: 'Hồ sơ pháp lý', desc: 'Ghi chú & Quản lý vụ việc', href: '/notebooks', icon: Book, color: 'text-amber-600 bg-amber-500/10 hover:border-amber-300' },
                 { title: 'Thủ tục hành chính', desc: 'Các bước & Biểu mẫu', href: '/procedures', icon: FileSearch, color: 'text-cyan-600 bg-cyan-500/10 hover:border-cyan-300' },
@@ -310,7 +297,7 @@ export default function OfficerDashboardPage() {
                   <Link
                     key={item.href}
                     href={item.href}
-                    className={`group flex flex-col justify-between rounded-xl border border-border/70 bg-card p-3.5 transition-all hover:-translate-y-0.5 hover:shadow-sm ${item.color.split(' ').pop()}`}
+                    className={`group flex flex-col justify-between rounded-xl border border-border/70 bg-card p-3.5 transition-shadow hover:shadow-sm ${item.color.split(' ').pop()}`}
                   >
                     <div className="flex items-center justify-between">
                       <span className={`flex h-8 w-8 items-center justify-center rounded-lg ${item.color.split(' ').slice(0, 2).join(' ')}`}>
@@ -341,7 +328,7 @@ export default function OfficerDashboardPage() {
                       <CardTitle className="text-base flex items-center gap-2">
                         <FileSearch className="h-5 w-5 text-primary" /> Tiến độ đề xuất văn bản của bạn
                       </CardTitle>
-                      <CardDescription>Theo dõi trạng thái Admin kiểm tra và duyệt nguồn.</CardDescription>
+                      <CardDescription>Theo dõi trạng thái quản trị viên kiểm tra và duyệt nguồn.</CardDescription>
                     </div>
                     <Button asChild size="sm" variant="outline" className="gap-1 text-xs">
                       <Link href="/officer-proposals">
@@ -351,12 +338,12 @@ export default function OfficerDashboardPage() {
                   </div>
                 </CardHeader>
                 <CardContent className="space-y-3">
-                  {proposals.length === 0 && !loading && (
+                  {proposals.length === 0 && !loading && !loadErrors.length && (
                     <div className="flex flex-col items-center justify-center rounded-xl border border-dashed p-8 text-center">
                       <FileSearch className="h-8 w-8 text-muted-foreground/50 mb-2" />
                       <p className="text-sm font-medium text-foreground">Bạn chưa gửi đề xuất văn bản nào</p>
                       <p className="text-xs text-muted-foreground mt-1 max-w-sm">
-                        Khi phát hiện văn bản mới hoặc biểu mẫu thay đổi, hãy gửi đề xuất để Admin phê duyệt vào kho chung.
+                        Khi phát hiện văn bản mới hoặc biểu mẫu thay đổi, hãy gửi đề xuất để quản trị viên phê duyệt vào kho chung.
                       </p>
                       <Button asChild size="sm" className="mt-4 gap-1">
                         <Link href="/officer-proposals">
@@ -378,19 +365,19 @@ export default function OfficerDashboardPage() {
                           <div className="flex flex-wrap items-center gap-2">
                             <span className="font-semibold text-sm text-foreground">{item.title || 'Văn bản đề xuất'}</span>
                             <Badge variant={isNeedsChange ? 'destructive' : isApproved ? 'secondary' : 'outline'}>
-                              {isNeedsChange ? 'Admin yêu cầu bổ sung' : isApproved ? 'Đã duyệt' : 'Đang chờ duyệt'}
+                              {isNeedsChange ? 'Quản trị viên yêu cầu bổ sung' : isApproved ? 'Đã duyệt' : 'Đang chờ duyệt'}
                             </Badge>
                             <Badge variant="outline" className="text-xs">
-                              {DOMAIN_LABELS[item.domain || '']?.label || item.domain || 'Lĩnh vực khác'}
+                              {domainLabel(item.domain)}
                             </Badge>
                           </div>
                         </div>
                         <p className="text-xs text-muted-foreground mt-1">
-                          Số hiệu: {item.law_number || 'Chưa có'} · Loại: {item.source_type || 'Văn bản'}
+                          Số hiệu: {item.law_number || 'Chưa có'}
                         </p>
                         {isNeedsChange && feedback && (
                           <div className="mt-2.5 rounded-lg bg-amber-500/10 border border-amber-300/40 p-2.5 text-xs text-amber-900 dark:text-amber-200">
-                            <b>Admin phản hồi:</b> {feedback}
+                            <b>Quản trị viên phản hồi:</b> {feedback}
                           </div>
                         )}
                       </div>
@@ -417,7 +404,7 @@ export default function OfficerDashboardPage() {
                   </div>
                 </CardHeader>
                 <CardContent className="space-y-2.5">
-                  {notebooks.length === 0 && !loading && (
+                  {notebooks.length === 0 && !loading && !loadErrors.length && (
                     <p className="text-xs text-muted-foreground py-4 text-center">Chưa có hồ sơ pháp lý nào được tạo.</p>
                   )}
                   {notebooks.map((nb) => (
@@ -455,13 +442,13 @@ export default function OfficerDashboardPage() {
                 <CardContent className="space-y-3.5">
                   <div className="rounded-xl border p-4 bg-primary/[0.03] space-y-2">
                     <div className="flex items-center justify-between">
-                      <span className="text-sm font-medium">Trạng thái ca trực:</span>
+                      <span className="text-sm font-medium">Phạm vi tiếp nhận:</span>
                       <Badge variant="secondary" className="bg-emerald-500/10 text-emerald-600 border-emerald-200">
-                        Sẵn sàng tiếp nhận
+                        Phòng ban của bạn
                       </Badge>
                     </div>
                     <p className="text-xs text-muted-foreground">
-                      Công dân khi gửi yêu cầu hỗ trợ sẽ được phân phối tự động đến cán bộ đúng lĩnh vực chuyên môn.
+                      Yêu cầu được chuyển đến phòng ban phụ trách. Mở bàn làm việc để kiểm tra hàng chờ và nhận xử lý.
                     </p>
                   </div>
                   <Button asChild className="w-full gap-2 shadow-sm">
@@ -472,25 +459,30 @@ export default function OfficerDashboardPage() {
                 </CardContent>
               </Card>
 
-              {/* Quick Procedures by 7 Domains */}
+              {/* Quick procedures follow the officer's persisted assignments. */}
               <Card className="shadow-sm">
                 <CardHeader className="pb-3">
                   <CardTitle className="text-base flex items-center gap-2">
-                    <FolderTree className="h-5 w-5 text-primary" /> Danh mục 7 Lĩnh vực hành chính
+                    <FolderTree className="h-5 w-5 text-primary" /> Lĩnh vực được phân công
                   </CardTitle>
                   <CardDescription>Tra cứu nhanh quy trình và biểu mẫu theo lĩnh vực.</CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-2">
-                  {Object.entries(DOMAIN_LABELS).map(([key, info]) => (
+                  {(operatingScope?.domains || []).map((code) => (
                     <Link
-                      key={key}
-                      href={`/procedures?domain=${key}`}
+                      key={code}
+                      href={`/procedures?domain=${encodeURIComponent(code)}`}
                       className="flex items-center justify-between rounded-xl border p-2.5 bg-card hover:bg-muted/40 hover:border-primary/40 transition-colors text-xs"
                     >
-                      <span className="font-medium text-foreground">{info.label}</span>
+                      <span className="font-medium text-foreground">{domainLabel(code)}</span>
                       <ArrowRight className="h-3.5 w-3.5 text-muted-foreground" />
                     </Link>
                   ))}
+                  {operatingScope && operatingScope.domains.length === 0 && (
+                    <p className="text-xs text-muted-foreground">
+                      Chưa có lĩnh vực đang hoạt động được phân công cho tài khoản này.
+                    </p>
+                  )}
                 </CardContent>
               </Card>
             </div>

@@ -1,0 +1,46 @@
+-- Session and opt-in long-term chat memory. Additive only.
+-- Prepared for a separately approved deployment; do not apply automatically.
+
+DEFINE TABLE IF NOT EXISTS conversation_state SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS conversation ON TABLE conversation_state TYPE record<conversation>;
+DEFINE FIELD IF NOT EXISTS owner_user ON TABLE conversation_state TYPE record<user_account>;
+DEFINE FIELD IF NOT EXISTS role_context ON TABLE conversation_state TYPE string;
+DEFINE FIELD IF NOT EXISTS state ON TABLE conversation_state TYPE object FLEXIBLE;
+DEFINE FIELD IF NOT EXISTS revision ON TABLE conversation_state TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE conversation_state TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE conversation_state TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS updated_at ON TABLE conversation_state TYPE option<datetime>;
+DEFINE INDEX IF NOT EXISTS idx_conversation_state_conversation ON TABLE conversation_state COLUMNS conversation UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_conversation_state_owner_role ON TABLE conversation_state COLUMNS owner_user, role_context;
+DEFINE INDEX IF NOT EXISTS idx_conversation_state_expiry ON TABLE conversation_state COLUMNS expires_at;
+
+DEFINE TABLE IF NOT EXISTS chat_memory_preference SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS owner_user ON TABLE chat_memory_preference TYPE record<user_account>;
+DEFINE FIELD IF NOT EXISTS role_context ON TABLE chat_memory_preference TYPE string;
+DEFINE FIELD IF NOT EXISTS enabled ON TABLE chat_memory_preference TYPE bool DEFAULT false;
+DEFINE FIELD IF NOT EXISTS enabled_at ON TABLE chat_memory_preference TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE chat_memory_preference TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS updated_at ON TABLE chat_memory_preference TYPE option<datetime>;
+DEFINE INDEX IF NOT EXISTS idx_chat_memory_preference_owner_role ON TABLE chat_memory_preference COLUMNS owner_user, role_context UNIQUE;
+
+DEFINE TABLE IF NOT EXISTS user_memory_item SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS owner_user ON TABLE user_memory_item TYPE record<user_account>;
+DEFINE FIELD IF NOT EXISTS role_context ON TABLE user_memory_item TYPE string;
+DEFINE FIELD IF NOT EXISTS memory_key ON TABLE user_memory_item TYPE string;
+DEFINE FIELD IF NOT EXISTS value ON TABLE user_memory_item TYPE any;
+DEFINE FIELD IF NOT EXISTS label ON TABLE user_memory_item TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS source_kind ON TABLE user_memory_item TYPE string;
+DEFINE FIELD IF NOT EXISTS source_conversation ON TABLE user_memory_item TYPE option<record<conversation>>;
+DEFINE FIELD IF NOT EXISTS source_message_id ON TABLE user_memory_item TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS status ON TABLE user_memory_item TYPE string DEFAULT 'active';
+DEFINE FIELD IF NOT EXISTS consent_at ON TABLE user_memory_item TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS last_used_at ON TABLE user_memory_item TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE user_memory_item TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS revision ON TABLE user_memory_item TYPE int DEFAULT 1;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE user_memory_item TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS updated_at ON TABLE user_memory_item TYPE option<datetime>;
+DEFINE INDEX IF NOT EXISTS idx_user_memory_owner_role_status ON TABLE user_memory_item COLUMNS owner_user, role_context, status;
+DEFINE INDEX IF NOT EXISTS idx_user_memory_owner_role_key ON TABLE user_memory_item COLUMNS owner_user, role_context, memory_key;
+DEFINE INDEX IF NOT EXISTS idx_user_memory_expiry ON TABLE user_memory_item COLUMNS expires_at;
+
+DEFINE FIELD IF NOT EXISTS suggested_questions ON TABLE conversation_message TYPE option<array<object>> FLEXIBLE;

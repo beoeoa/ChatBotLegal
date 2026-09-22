@@ -4,8 +4,8 @@
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: var(--font-ui);
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -41,73 +41,84 @@
   --radius-xl: calc(var(--radius) + 4px);
 }
 
+html,
+body {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  margin: 0;
+  padding: 0;
+}
+
 :root {
-  --radius: 0.65rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.141 0.005 285.823);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.141 0.005 285.823);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.141 0.005 285.823);
-  --primary: oklch(0.623 0.214 259.815);
-  --primary-foreground: oklch(0.97 0.014 254.604);
-  --secondary: oklch(0.967 0.001 286.375);
-  --secondary-foreground: oklch(0.21 0.006 285.885);
-  --muted: oklch(0.967 0.001 286.375);
-  --muted-foreground: oklch(0.552 0.016 285.938);
-  --accent: oklch(0.967 0.001 286.375);
-  --accent-foreground: oklch(0.21 0.006 285.885);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.92 0.004 286.32);
-  --input: oklch(0.92 0.004 286.32);
-  --ring: oklch(0.623 0.214 259.815);
-  --chart-1: oklch(0.646 0.222 41.116);
-  --chart-2: oklch(0.6 0.118 184.704);
-  --chart-3: oklch(0.398 0.07 227.392);
-  --chart-4: oklch(0.828 0.189 84.429);
-  --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.141 0.005 285.823);
-  --sidebar-primary: oklch(0.623 0.214 259.815);
-  --sidebar-primary-foreground: oklch(0.97 0.014 254.604);
-  --sidebar-accent: oklch(0.92 0.01 286.375);
-  --sidebar-accent-foreground: oklch(0.21 0.006 285.885);
-  --sidebar-border: oklch(0.92 0.004 286.32);
-  --sidebar-ring: oklch(0.623 0.214 259.815);
+  --radius: 0.75rem;
+  --font-ui: "Times New Roman", Times, serif;
+  --font-display: "Times New Roman", Times, serif;
+  --background: #f6f1e8;
+  --foreground: #202632;
+  --card: #fffdf8;
+  --card-foreground: #202632;
+  --popover: #fffdf8;
+  --popover-foreground: #202632;
+  --primary: #8f1d2c;
+  --primary-foreground: #ffffff;
+  --secondary: #ead8b5;
+  --secondary-foreground: #4a3019;
+  --muted: #efe7da;
+  --muted-foreground: #5f6572;
+  --accent: #dcebe3;
+  --accent-foreground: #1f5d49;
+  --destructive: #b42318;
+  --border: #d8c9b4;
+  --input: #cfbea5;
+  --ring: #b7862c;
+  --chart-1: #8f1d2c;
+  --chart-2: #2f6b56;
+  --chart-3: #b7862c;
+  --chart-4: #68558a;
+  --chart-5: #356c82;
+  --sidebar: #202632;
+  --sidebar-foreground: #fff8ec;
+  --sidebar-primary: #d3a74a;
+  --sidebar-primary-foreground: #241b0d;
+  --sidebar-accent: #51212a;
+  --sidebar-accent-foreground: #ffffff;
+  --sidebar-border: rgba(255, 248, 236, 0.18);
+  --sidebar-ring: #e8c875;
 }
 
 .dark {
-  --background: oklch(0.141 0.005 285.823);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.21 0.006 285.885);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.21 0.006 285.885);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.546 0.245 262.881);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.274 0.006 286.033);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.274 0.006 286.033);
-  --muted-foreground: oklch(0.705 0.015 286.067);
-  --accent: oklch(0.274 0.006 286.033);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.488 0.243 264.376);
-  --chart-1: oklch(0.488 0.243 264.376);
-  --chart-2: oklch(0.696 0.17 162.48);
-  --chart-3: oklch(0.769 0.188 70.08);
-  --chart-4: oklch(0.627 0.265 303.9);
-  --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.21 0.006 285.885);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.546 0.245 262.881);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.35 0.01 286.033);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.488 0.243 264.376);
+  --background: #17151a;
+  --foreground: #f8efe2;
+  --card: #242027;
+  --card-foreground: #f8efe2;
+  --popover: #242027;
+  --popover-foreground: #f8efe2;
+  --primary: #d87076;
+  --primary-foreground: #241014;
+  --secondary: #4a3523;
+  --secondary-foreground: #ffe8b0;
+  --muted: #302a31;
+  --muted-foreground: #c9bcc1;
+  --accent: #173b30;
+  --accent-foreground: #bfe8d4;
+  --destructive: #f0877d;
+  --border: #50454b;
+  --input: #5c4c53;
+  --ring: #e8c875;
+  --chart-1: #d87076;
+  --chart-2: #7ac6a5;
+  --chart-3: #e8c875;
+  --chart-4: #bda9e7;
+  --chart-5: #83c6da;
+  --sidebar: #15141a;
+  --sidebar-foreground: #f8efe2;
+  --sidebar-primary: #e8c875;
+  --sidebar-primary-foreground: #241b0d;
+  --sidebar-accent: #5d2730;
+  --sidebar-accent-foreground: #ffffff;
+  --sidebar-border: #50454b;
+  --sidebar-ring: #e8c875;
 }
 
 @layer base {
@@ -117,10 +128,31 @@
 
   html {
     @apply antialiased;
+    font-size: 18px;
   }
 
   body {
     @apply bg-background text-foreground transition-colors;
+    font-family: var(--font-ui);
+    background-image: radial-gradient(circle at 100% 0%, rgba(183, 134, 44, 0.08), transparent 28rem), linear-gradient(135deg, rgba(255, 255, 255, 0.62), transparent 42%);
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-family: var(--font-display);
+    letter-spacing: -0.015em;
+  }
+
+  button,
+  a,
+  [role='button'] {
+    cursor: pointer;
+  }
+
+  ::selection {
+    background: rgba(143, 29, 44, 0.18);
   }
 
   /* Ensure proper theme inheritance for popovers and dropdowns */
@@ -150,19 +182,31 @@
     border-color: var(--sidebar-border);
   }
 
+  .app-sidebar nav::-webkit-scrollbar {
+    width: 5px;
+  }
+
+  .app-sidebar nav::-webkit-scrollbar-thumb {
+    background: rgba(255, 248, 236, 0.2);
+    border-radius: 999px;
+  }
+
+  .app-sidebar nav::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
   /* Enhanced sidebar menu item hover effects */
   .sidebar-menu-item {
-    @apply transition-all duration-200 ease-out;
+    @apply transition-colors duration-200 ease-out;
   }
 
   .sidebar-menu-item:hover {
-    @apply scale-[1.02];
     background-color: var(--sidebar-accent) !important;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+    box-shadow: none;
   }
 
   .dark .sidebar-menu-item:hover {
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+    box-shadow: none;
   }
 
   /* Enhanced hover effects for cards */
@@ -173,7 +217,6 @@
   .card-hover:hover {
     background-color: var(--muted) !important;
     border-color: var(--border);
-    transform: translateY(-1px);
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
   }
 
@@ -189,4 +232,57 @@
   .clickable-card * {
     cursor: pointer !important;
   }
+
+  .font-display {
+    font-family: var(--font-display);
+  }
+
+  .app-main-gradient {
+    min-width: 0;
+    overflow-x: hidden;
+    background:
+      radial-gradient(circle at 100% 0%, rgba(183, 134, 44, 0.10), transparent 28rem),
+      var(--background);
+  }
+
+  /* Grid/flex children otherwise keep their intrinsic min-content width. That
+     is the source of the subtle 12px overflow seen at tablet width. Tables
+     intentionally opt back into local overflow-x-auto in their own wrapper. */
+  .app-main-gradient > *,
+  .app-main-gradient .grid > *,
+  .app-main-gradient .flex > * {
+    min-width: 0;
+  }
+
+
+  .focus-ring {
+    @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-background;
+  }
 }
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Keep long legal identifiers and controls inside their viewport at browser zoom. */
+.app-main-gradient { overflow-wrap: anywhere; }
+.app-main-gradient img, .app-main-gradient video { max-width: 100%; height: auto; }
+.app-main-gradient pre { max-width: 100%; overflow-x: auto; overflow-wrap: normal; }
+[role="dialog"] { max-height: calc(100dvh - 1rem); }
+
+/* Citizen/officer workspaces share a compact, readable UI. Scope the tokens
+   to these roles (including portaled menus); the admin theme stays unchanged. */
+html:has(.user-workspace) { font-size: 16px; }
+body:has(.user-workspace) {
+  --font-ui: "Segoe UI", Arial, sans-serif;
+  --font-display: "Segoe UI", Arial, sans-serif;
+}
+.user-workspace .app-main-gradient { background: var(--background); }
+.user-workspace [data-testid="conversation-history-scroll-region"] { scrollbar-gutter: stable; }

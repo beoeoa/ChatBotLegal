@@ -1,0 +1,6 @@
+-- Unified document identity and validity projection. Additive only.
+-- Existing source/corpus/account records are not rewritten.
+DEFINE FIELD IF NOT EXISTS legal_document_id ON TABLE source TYPE option<string>;
+DEFINE INDEX IF NOT EXISTS idx_source_legal_document_id ON TABLE source COLUMNS legal_document_id UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_legal_validity_observation_document_time ON TABLE legal_validity_observation COLUMNS document_id, observed_at;
+DEFINE INDEX IF NOT EXISTS idx_legal_validity_event_document_review ON TABLE legal_validity_event COLUMNS document_id, review_status, updated_at;

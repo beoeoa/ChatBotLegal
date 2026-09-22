@@ -3,6 +3,26 @@ import { describe, expect, it } from 'vitest'
 import { sanitizeDisplayAnswer, StreamingResponse } from './StreamingResponse'
 
 describe('section-grounding display sanitizer', () => {
+  it('keeps the instrument identity in compact citizen citations', () => {
+    const result = sanitizeDisplayAnswer('Hồ sơ [E1].', [{ evidence_ids: ['E1'], article_number: '16', document_title: 'Hộ tịch', law_number: '60/2014/QH13', viewer_url: '/legal-documents/37879?article=16' }], true)
+    expect(result).toContain('Điều 16, 60/2014/QH13')
+    expect(result).not.toContain('Nguồn 1')
+  })
+  it('keeps code and explicit URLs intact without legal evidence markers', () => {
+    const code = '```cpp\nint main() {\n    return sum(1,  2);\n}\n```'
+    const link = '[Nguồn](https://official.example/a(b)#ref-source-original)'
+    const answer = `${code}\n\nDùng \`sum()\` và ${link}`
+    expect(sanitizeDisplayAnswer(answer)).toBe(answer)
+  })
+  it('preserves direct paragraph structure, code, exceptions and backend URLs', () => {
+    const text = 'Điều kiện A.  \nNgoại lệ B [E1].\n\n`[E1]`\n\n[Điều 2](https://official.example/explicit)';
+    const rendered = sanitizeDisplayAnswer(text, [{evidence_ids:['E1'], article_number:'2', source_url:'https://official.example/source', viewer_url:'https://official.example/source'}], true);
+    expect(rendered).toContain('Điều kiện A.  \nNgoại lệ B');
+    expect(rendered).toContain('`[E1]`');
+    expect(rendered).toContain('[Điều 2](https://official.example/explicit)');
+    expect(rendered).toContain('(<https://official.example/source>)');
+    expect(rendered).not.toContain('#:~:text=');
+  });
   it('uses LegalAnswerCard for both legacy and structured payloads when V1 projection is present', () => {
     render(
       <StreamingResponse
@@ -28,7 +48,7 @@ describe('section-grounding display sanitizer', () => {
           caveats: ['Cần làm rõ thêm một phần.'],
           clarifying_questions: [],
         }}
-        answerStatus="partial_grounded"
+        answerStatus="partial"
         answerRoute="general_legal"
         evidenceCount={0}
       />,
@@ -40,7 +60,7 @@ describe('section-grounding display sanitizer', () => {
     expect(screen.queryByText('Legacy structured section must not render twice')).not.toBeInTheDocument()
   })
 
-  it('uses the explicit source-gap state and never claims verification with zero evidence', () => {
+  it('does not render delivery-state banners around the raw answer', () => {
     render(
       <StreamingResponse
         isStreaming={false}
@@ -48,19 +68,19 @@ describe('section-grounding display sanitizer', () => {
         answers={[]}
         finalAnswer="Cần bổ sung thông tin để xác định đúng thủ tục."
         groundingStatus="fully_grounded"
-        answerStatus="source_gap"
+        answerStatus="cannot_verify"
         fallbackTier="support"
         evidenceCount={0}
         blockedReason="approved_current_source_not_found"
       />,
     )
 
-    expect(screen.getByTestId('answer-status-banner')).toHaveTextContent('Cần bổ sung nguồn')
+    expect(screen.queryByTestId('answer-status-banner')).not.toBeInTheDocument()
     expect(screen.queryByText('Căn cứ hợp lệ')).not.toBeInTheDocument()
-    expect(screen.getByText(/Chưa đủ căn cứ hiện hành/)).toBeInTheDocument()
+    expect(screen.getByText('Cần bổ sung thông tin để xác định đúng thủ tục.')).toBeInTheDocument()
   })
 
-  it('never leaves internal citation or evidence markers in visible answer text', () => {
+  it('removes legacy internal citation metadata from visible answer text', () => {
     const rendered = sanitizeDisplayAnswer(
       'Nguồn [legal:481400 - 60/2014/QH13 - Điều 35] #ref-source-481400 chunk_id=abc trace_id=t-1',
       [{ chunk_id: '481400', law_number: '60/2014/QH13', article_number: '35' }],
@@ -68,6 +88,66 @@ describe('section-grounding display sanitizer', () => {
 
     expect(rendered).not.toMatch(/#ref-source|legal:|chunk_id|trace_id/i)
     expect(rendered).toContain('60/2014/QH13')
+  })
+
+  it('replaces direct evidence markers with their source links without losing punctuation', () => {
+    const rendered = sanitizeDisplayAnswer(
+      'Theo quy định tại [E1], hồ sơ được tiếp nhận. Quy định sửa đổi bởi [E2].',
+      [{
+        evidence_ids: ['E1', 'E2'],
+        document_title: 'Luật Cư trú',
+        law_number: '68/2020/QH14',
+        article_number: '28',
+        clause_number: '2',
+        source_url: 'https://example.test/luat-cu-tru',
+      }],
+    )
+
+    const linkedCitation = '[khoản 2 Điều 28 Luật Cư trú số 68/2020/QH14](<https://example.test/luat-cu-tru>)'
+    expect(rendered).toBe(
+      `Theo quy định tại ${linkedCitation}, hồ sơ được tiếp nhận. Quy định sửa đổi bởi ${linkedCitation}.`,
+    )
+    expect(rendered).not.toMatch(/\[E\d+\]/)
+  })
+
+  it('replaces an unresolved internal marker with a local readable warning', () => {
+    const rendered = sanitizeDisplayAnswer('Theo quy định tại [E99], hồ sơ được tiếp nhận.', [])
+
+    expect(rendered).toBe('Theo quy định tại nguồn chưa liên kết, hồ sơ được tiếp nhận.')
+    expect(rendered).not.toContain('[E99]')
+  })
+
+  it('uses the legal instrument kind when a citation has no document title', () => {
+    const rendered = sanitizeDisplayAnswer('Căn cứ [E1], người dân nộp hồ sơ.', [{
+      evidence_ids: ['E1'],
+      law_number: '154/2024/NĐ-CP',
+      article_number: '5',
+      source_url: 'https://vbpl.vn/154',
+    }])
+
+    expect(rendered).toBe(
+      'Căn cứ [Điều 5 Nghị định số 154/2024/NĐ-CP](<https://vbpl.vn/154>), người dân nộp hồ sơ.',
+    )
+  })
+
+  it('does not expose an invalid Điều 0 label', () => {
+    const rendered = sanitizeDisplayAnswer('Nguồn [E1].', [{
+      evidence_ids: ['E1'],
+      law_number: '23/2026/NQ-HĐND',
+      article_number: '0',
+      source_url: 'https://vbpl.vn/23-2026',
+    }])
+
+    expect(rendered).toBe(
+      'Nguồn [Nghị quyết số 23/2026/NQ-HĐND](<https://vbpl.vn/23-2026>).',
+    )
+    expect(rendered).not.toContain('Điều 0')
+  })
+
+  it('demotes model-emitted H1 while preserving the answer content', () => {
+    const rendered = sanitizeDisplayAnswer('# Thủ tục đăng ký tạm trú\n\nNội dung hướng dẫn.')
+
+    expect(rendered).toBe('## Thủ tục đăng ký tạm trú\n\nNội dung hướng dẫn.')
   })
 
   it('renders one role-aware legal answer shell with distinct grounding states', () => {
@@ -78,7 +158,7 @@ describe('section-grounding display sanitizer', () => {
         answers={[]}
         finalAnswer="Legacy aggregate must not be the primary section rendering"
         answerSections={[
-          { issue_id: 'a', title: 'Thẩm quyền', status: 'sufficiently_evidenced', answer: 'Đã xác minh', citations: [{ document_title: 'Luật Đất đai', law_number: '31/2024/QH15', article_number: '137', source_url: 'https://official.example/land' }], facet: 'rule', priority: 'critical', claim_types: ['rule'] },
+          { issue_id: 'a', title: 'Thẩm quyền', status: 'sufficiently_evidenced', answer: 'Áp dụng Điều 137 Luật 31/2024/QH15.', citations: [{ document_title: 'Luật Đất đai', law_number: '31/2024/QH15', article_number: '137', source_url: 'https://official.example/land' }], facet: 'rule', priority: 'critical', claim_types: ['rule'] },
           { issue_id: 'b', title: 'Hồ sơ', status: 'partially_evidenced', guidance: 'Hướng dẫn chung', limitation: 'Thiếu nguồn', citations: [], facet: 'documents', priority: 'high', claim_types: ['documents'] },
           { issue_id: 'c', title: 'Lệ phí', status: 'insufficiently_evidenced', limitation: 'Chưa xác minh', citations: [], clarifying_question: 'Bạn hỏi thủ tục nào?' },
         ]}
@@ -86,14 +166,14 @@ describe('section-grounding display sanitizer', () => {
     )
 
     expect(screen.getByTestId('structured-legal-answer')).toBeInTheDocument()
-    expect(screen.getByText('Hướng dẫn dành cho người dân')).toBeInTheDocument()
+    expect(screen.getByTestId('structured-legal-answer')).toHaveAccessibleName('Hướng dẫn dành cho người dân')
     expect(screen.getByText('Kết luận ngắn')).toBeInTheDocument()
     expect(screen.getAllByTestId('answer-section')).toHaveLength(3)
-    expect(screen.getByTestId('answer-section-status-sufficiently_evidenced')).toHaveTextContent('Đã xác minh')
-    expect(screen.getByTestId('answer-section-status-partially_evidenced')).toHaveTextContent('Kết luận có điều kiện')
-    expect(screen.getByTestId('answer-section-status-insufficiently_evidenced')).toHaveTextContent('Cần bổ sung thông tin')
+    expect(screen.queryByTestId('answer-section-status-sufficiently_evidenced')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('answer-section-status-partially_evidenced')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('answer-section-status-insufficiently_evidenced')).not.toBeInTheDocument()
     expect(screen.queryByText('Legacy aggregate must not be the primary section rendering')).not.toBeInTheDocument()
-    expect(screen.getByRole('link', { name: /31\/2024\/QH15/i })).toHaveAttribute('href', 'https://official.example/land')
+    expect(screen.getByRole('link', { name: /Điều 137 Luật 31\/2024\/QH15/i })).toHaveAttribute('href', 'https://official.example/land#:~:text=%C4%90i%E1%BB%81u%20137')
   })
 
   it('uses the officer presentation and highlights a verified next action', () => {
@@ -120,9 +200,9 @@ describe('section-grounding display sanitizer', () => {
       />,
     )
 
-    expect(screen.getByText('Hướng dẫn nghiệp vụ cán bộ')).toBeInTheDocument()
+    expect(screen.getByTestId('structured-legal-answer')).toHaveAccessibleName('Hướng dẫn nghiệp vụ cán bộ')
     expect(screen.getByText('Kết luận nghiệp vụ')).toBeInTheDocument()
-    expect(screen.getByText('Căn cứ hợp lệ')).toBeInTheDocument()
+    expect(screen.queryByText('Căn cứ hợp lệ')).not.toBeInTheDocument()
   })
 
   it('separates valid grounding from an incomplete answer', () => {
@@ -156,12 +236,12 @@ describe('section-grounding display sanitizer', () => {
       />,
     )
 
-    expect(screen.getByTestId('grounding-status-badge')).toHaveTextContent('Căn cứ hợp lệ')
-    expect(screen.getByTestId('answer-completeness-badge')).toHaveTextContent('Trả lời chưa đầy đủ')
+    expect(screen.queryByTestId('grounding-status-badge')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('answer-completeness-badge')).not.toBeInTheDocument()
     expect(screen.queryByText('Trả lời đầy đủ')).not.toBeInTheDocument()
   })
 
-  it('shows verified condensed mode instead of the normal grounding badge', () => {
+  it('does not render model-mode or grounding badges around the raw answer', () => {
     render(
       <StreamingResponse
         isStreaming={false}
@@ -174,9 +254,7 @@ describe('section-grounding display sanitizer', () => {
       />,
     )
 
-    expect(screen.getByTestId('answer-mode-badge')).toHaveTextContent(
-      'Nguồn đã xác minh nhưng câu trả lời đang ở chế độ rút gọn',
-    )
+    expect(screen.queryByTestId('answer-mode-badge')).not.toBeInTheDocument()
     expect(screen.queryByText('Căn cứ đầy đủ')).not.toBeInTheDocument()
     expect(screen.queryByText('Căn cứ hợp lệ')).not.toBeInTheDocument()
   })
@@ -216,7 +294,7 @@ describe('section-grounding display sanitizer', () => {
       />,
     )
 
-    expect(screen.getByText(`Kết luận: ${repeated}`)).toBeInTheDocument()
+    expect(screen.getByText((_, element) => element?.tagName === 'LI' && element.textContent === `Kết luận: ${repeated}`)).toBeInTheDocument()
     expect(screen.queryByText(`Điều kiện áp dụng: ${repeated}`)).not.toBeInTheDocument()
     expect(screen.getByText('Nội dung này áp dụng cùng căn cứ đã nêu trong kết luận ngắn ở trên.')).toBeInTheDocument()
   })
@@ -237,13 +315,13 @@ describe('section-grounding display sanitizer', () => {
     )
   })
 
-  it('links an official citation even when no internal document id exists', () => {
+  it('links an article mentioned inside the answer and omits a separate source block', () => {
     render(
       <StreamingResponse
         isStreaming={false}
         strategy={null}
         answers={[]}
-        finalAnswer="Kết quả đã kiểm chứng."
+        finalAnswer="Áp dụng Điều 7 để giải quyết."
         citations={[{
           law_number: '02/2011/QH13',
           article_number: '7',
@@ -252,10 +330,59 @@ describe('section-grounding display sanitizer', () => {
       />,
     )
 
-    expect(screen.getByRole('link', { name: 'Xem nguồn chính thức' })).toHaveAttribute(
+    expect(screen.getByRole('link', { name: 'Điều 7' })).toHaveAttribute(
       'href',
-      'https://vanban.chinhphu.vn/source',
+      'https://vanban.chinhphu.vn/source#:~:text=%C4%90i%E1%BB%81u%207',
     )
+    expect(screen.queryByText('Căn cứ pháp lý')).not.toBeInTheDocument()
+  })
+
+  it('renders a direct marker as a readable citation that opens the exact VBPL article', () => {
+    render(
+      <StreamingResponse
+        isStreaming={false}
+        strategy={null}
+        answers={[]}
+        finalAnswer="Theo quy định tại [E1], cơ quan đăng ký cư trú giải quyết hồ sơ."
+        citations={[{
+          evidence_ids: ['E1'],
+          law_number: '68/2020/QH14',
+          article_number: '28',
+          source_url: 'https://vbpl.vn/TW/Pages/vbpq-toanvan.aspx?ItemID=146648&dvid=13#:~:text=Điều%205',
+        }]}
+      />,
+    )
+
+    expect(screen.getByRole('link', { name: 'Điều 28, 68/2020/QH14' })).toHaveAttribute(
+      'href',
+      'https://vbpl.vn/TW/Pages/vbpq-toanvan.aspx?ItemID=146648&dvid=13#:~:text=%C4%90i%E1%BB%81u%2028',
+    )
+    expect(screen.getByText(/cơ quan đăng ký cư trú giải quyết hồ sơ/)).toBeInTheDocument()
+  })
+
+  it('adds a respectful UI salutation once without changing the model answer body', () => {
+    const { rerender } = render(
+      <StreamingResponse
+        isStreaming={false}
+        strategy={null}
+        answers={[]}
+        finalAnswer="Nội dung do mô hình trả về."
+        salutation="Thưa anh/chị Nguyễn Văn An,"
+      />,
+    )
+    expect(screen.getByTestId('answer-salutation')).toHaveTextContent('Thưa anh/chị Nguyễn Văn An,')
+    expect(screen.getByText('Nội dung do mô hình trả về.')).toBeInTheDocument()
+
+    rerender(
+      <StreamingResponse
+        isStreaming={false}
+        strategy={null}
+        answers={[]}
+        finalAnswer="Thưa anh/chị Nguyễn Văn An, nội dung đã có lời chào."
+        salutation="Thưa anh/chị Nguyễn Văn An,"
+      />,
+    )
+    expect(screen.queryByTestId('answer-salutation')).not.toBeInTheDocument()
   })
 
   it('renders reviewed form code, procedure, source, format and effectivity', () => {
@@ -314,8 +441,8 @@ describe('section-grounding display sanitizer', () => {
       />,
     )
 
-    fireEvent.click(screen.getByRole('button', { name: /Quy trình RAG/i }))
-    expect(screen.getByTestId('form-provenance')).toHaveTextContent('not_approved')
-    expect(screen.getByTestId('admin-evidence-coverage')).toHaveTextContent('verified')
+    fireEvent.click(screen.getByRole('button', { name: /Quy trình tra cứu/i }))
+    expect(screen.getByTestId('form-provenance')).toHaveTextContent('1 biểu mẫu bị loại')
+    expect(screen.getByTestId('admin-evidence-coverage')).toHaveTextContent('1 nhóm nội dung')
   })
 })

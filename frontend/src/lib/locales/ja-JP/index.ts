@@ -103,7 +103,6 @@ export const jaJP = {
     searchTerms: "検索ワード",
     strategy: "戦略",
     individualAnswers: "個別回答（{count}件）",
-    finalAnswer: "最終回答",
     notebookLabel: "ノートブック: {name}",
     itemNotFound: "この{type}は見つかりませんでした",
     accessibility: {
@@ -818,7 +817,6 @@ export const jaJP = {
   },
   models: {
     embedding: "Embeddingモデル",
-    tts: "音声合成（TTS）",
     stt: "音声認識（STT）",
     apiKey: "APIキー",
     deleteSuccess: "モデルを削除しました",
@@ -844,8 +842,6 @@ export const jaJP = {
     largeContextModelDesc: "大きなドキュメントの処理に使用 - Geminiを推奨",
     embeddingModelLabel: "Embeddingモデル",
     embeddingModelDesc: "セマンティック検索とベクトルEmbeddingに使用",
-    ttsModelLabel: "音声合成モデル",
-    ttsModelDesc: "ポッドキャスト生成に使用",
     sttModelLabel: "音声認識モデル",
     sttModelDesc: "音声の書き起こしに使用",
     embeddingChangeTitle: "Embeddingモデルの変更",

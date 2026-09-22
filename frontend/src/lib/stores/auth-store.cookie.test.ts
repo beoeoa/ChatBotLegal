@@ -114,7 +114,12 @@ describe('production cookie auth state', () => {
     const responsePromise = new Promise<Response>((resolve) => {
       finishLogout = resolve
     })
-    vi.spyOn(globalThis, 'fetch').mockReturnValueOnce(responsePromise)
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      if (String(input).includes('/api/auth/logout')) {
+        return responsePromise
+      }
+      return Promise.resolve(new Response(JSON.stringify({ apiUrl: 'http://localhost:5055' }), { status: 200 }))
+    })
     useAuthStore.setState({
       isAuthenticated: true,
       token: null,

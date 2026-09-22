@@ -1,6 +1,7 @@
 import { apiClient } from './client'
 
 export type LegalRetrievalTier = 'all' | 'core' | 'expanded'
+export type LegalValidityStatusFilter = 'active' | 'expiring_30' | 'not_yet_effective' | 'expired' | 'unknown'
 
 export interface LegalDocumentListItem {
   doc_id: string | number
@@ -11,6 +12,15 @@ export interface LegalDocumentListItem {
   scope?: string | null
   sector?: string | null
   effective_status: string
+  validity_status?: string | null
+  validity_sync?: {
+    status?: string | null
+    display_label?: string | null
+    effective_from?: string | null
+    effective_to?: string | null
+    current_answer_eligible?: boolean
+    historical_lookup_allowed?: boolean
+  } | null
   issued_date?: string | null
   effective_date?: string | null
   expired_date?: string | null
@@ -38,10 +48,24 @@ export interface LegalDomain {
   field_count: number
 }
 
+export interface LegalDepartmentField {
+  code: string
+  name: string
+  domains: string[]
+}
+
+export interface LegalDepartment {
+  id: string
+  name: string
+  code: string
+  fields: LegalDepartmentField[]
+}
+
 export interface LegalDocumentFilterParams {
   q?: string
   domain?: string
   tier?: LegalRetrievalTier
+  validity_status?: LegalValidityStatusFilter
   issued_from?: string
   issued_to?: string
   effective_from?: string
@@ -91,5 +115,10 @@ export const legalDocumentsApi = {
   async domains(): Promise<LegalDomain[]> {
     const response = await apiClient.get<{ domains: LegalDomain[] }>('/legal/domains')
     return response.data.domains || []
+  },
+
+  async communeCatalog(): Promise<LegalDepartment[]> {
+    const response = await apiClient.get<{ departments: LegalDepartment[] }>('/legal/commune-catalog')
+    return response.data.departments || []
   },
 }

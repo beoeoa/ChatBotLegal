@@ -90,13 +90,9 @@ export default function NotebookPage() {
         const newSourceSelections = { ...prev.sources }
         sources.forEach(source => {
           const currentMode = newSourceSelections[source.id]
-          const hasInsights = source.insights_count > 0
-
           if (currentMode === undefined) {
-            // Initial setup - default based on insights availability
-            newSourceSelections[source.id] = hasInsights ? 'insights' : 'full'
-          } else if (currentMode === 'full' && hasInsights) {
-            // Source gained insights while in 'full' mode - auto-switch to 'insights'
+            // Default to bounded source excerpts. Full text is an explicit
+            // user choice because large notebooks can contain millions of tokens.
             newSourceSelections[source.id] = 'insights'
           }
         })
@@ -202,36 +198,36 @@ export default function NotebookPage() {
 
   return (
     <AppShell>
-      <div className="flex flex-col flex-1 min-h-0">
-        <div className="flex-shrink-0 p-6 pb-0">
+      <div className="flex min-h-0 flex-1 flex-col">
+        <div className="flex-shrink-0 border-b border-border/60 bg-card/70 px-3 py-3 backdrop-blur md:px-5">
           <NotebookHeader notebook={notebook} />
         </div>
 
-        <div className="flex-1 p-6 pt-6 overflow-x-auto flex flex-col">
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-2">
           {/* Mobile: Tabbed interface - only render on mobile to avoid double-mounting */}
           {!isDesktop && (
             <>
-              <div className="lg:hidden mb-4">
+              <div className="mb-2 xl:hidden">
                 <Tabs value={mobileActiveTab} onValueChange={(value) => setMobileActiveTab(value as 'sources' | 'notes' | 'chat')}>
-                  <TabsList className="grid w-full grid-cols-3">
+                  <TabsList className="grid h-12 w-full grid-cols-3 rounded-xl">
                     <TabsTrigger value="sources" className="gap-2">
                       <FileText className="h-4 w-4" />
                       {t('navigation.sources')}
                     </TabsTrigger>
-                    <TabsTrigger value="notes" className="gap-2">
-                      <StickyNote className="h-4 w-4" />
-                      {t('common.notes')}
-                    </TabsTrigger>
                     <TabsTrigger value="chat" className="gap-2">
                       <MessageSquare className="h-4 w-4" />
                       {t('common.chat')}
+                    </TabsTrigger>
+                    <TabsTrigger value="notes" className="gap-2">
+                      <StickyNote className="h-4 w-4" />
+                      {t('common.notes')}
                     </TabsTrigger>
                   </TabsList>
                 </Tabs>
               </div>
 
               {/* Mobile: Show only active tab */}
-              <div className="flex-1 overflow-hidden lg:hidden">
+              <div className="min-h-0 flex-1 overflow-hidden xl:hidden">
                 {mobileActiveTab === 'sources' && (
                   <SourcesColumn
                     sources={sources}
@@ -261,6 +257,8 @@ export default function NotebookPage() {
                     contextSelections={contextSelections}
                     sources={sources}
                     sourcesLoading={sourcesLoading}
+                    notes={notes || []}
+                    notesLoading={notesLoading}
                   />
                 )}
               </div>
@@ -269,13 +267,13 @@ export default function NotebookPage() {
 
           {/* Desktop: Collapsible columns layout */}
           <div className={cn(
-            'hidden lg:flex h-full min-h-0 gap-6 transition-all duration-150',
+            'hidden h-full min-h-0 gap-2 transition-all duration-150 xl:flex',
             'flex-row'
           )}>
             {/* Sources Column */}
             <div className={cn(
               'transition-all duration-150',
-              sourcesCollapsed ? 'w-12 flex-shrink-0' : 'flex-none basis-1/3'
+              sourcesCollapsed ? 'w-12 flex-shrink-0' : 'w-[20rem] 2xl:w-[23rem] flex-shrink-0'
             )}>
               <SourcesColumn
                 sources={sources}
@@ -291,10 +289,22 @@ export default function NotebookPage() {
               />
             </div>
 
-            {/* Notes Column */}
+            {/* Chat is the primary workspace and remains the widest pane. */}
+            <div className="min-w-0 flex-1 transition-all duration-150">
+              <ChatColumn
+                notebookId={notebookId}
+                contextSelections={contextSelections}
+                sources={sources}
+                sourcesLoading={sourcesLoading}
+                notes={notes || []}
+                notesLoading={notesLoading}
+              />
+            </div>
+
+            {/* Notes / studio pane */}
             <div className={cn(
               'transition-all duration-150',
-              notesCollapsed ? 'w-12 flex-shrink-0' : 'flex-none basis-1/3'
+              notesCollapsed ? 'w-12 flex-shrink-0' : 'w-[19rem] 2xl:w-[22rem] flex-shrink-0'
             )}>
               <NotesColumn
                 notes={notes}
@@ -302,16 +312,6 @@ export default function NotebookPage() {
                 notebookId={notebookId}
                 contextSelections={contextSelections.notes}
                 onContextModeChange={(noteId, mode) => handleContextModeChange(noteId, mode, 'note')}
-              />
-            </div>
-
-            {/* Chat Column - always expanded, takes remaining space */}
-            <div className="transition-all duration-150 flex-1 min-w-0 lg:pr-6 lg:-mr-6">
-              <ChatColumn
-                notebookId={notebookId}
-                contextSelections={contextSelections}
-                sources={sources}
-                sourcesLoading={sourcesLoading}
               />
             </div>
           </div>

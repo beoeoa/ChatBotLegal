@@ -1,0 +1,3 @@
+-- Rollback migration 56: remove only the idempotency metadata/index.
+REMOVE INDEX IF EXISTS idx_conversation_message_turn ON TABLE conversation_message;
+REMOVE FIELD IF EXISTS turn_id ON TABLE conversation_message;

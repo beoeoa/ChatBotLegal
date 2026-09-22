@@ -294,6 +294,7 @@ class Source(ObjectModel):
     title: Optional[str] = None
     topics: Optional[List[str]] = Field(default_factory=list)
     full_text: Optional[str] = None
+    legal_document_id: Optional[str] = None
     scope: Optional[Literal["central", "haiphong", "local"]] = Field(
         default="central",
         description="Scope of the legal document: central, haiphong, or local"

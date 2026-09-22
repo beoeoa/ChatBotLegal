@@ -1,5 +1,30 @@
-import { redirect } from 'next/navigation'
+'use client'
+
+import { useEffect } from 'react'
+import { useRouter } from 'next/navigation'
+
+import { LoadingSpinner } from '@/components/common/LoadingSpinner'
+import { ADMIN_LANDING_PATH } from '@/lib/navigation/capabilities'
+import { useAuthStore } from '@/lib/stores/auth-store'
 
 export default function HomePage() {
-  redirect('/legal-import')
+  const router = useRouter()
+  const role = useAuthStore((state) => state.role)
+  const isAuthenticated = useAuthStore((state) => state.isAuthenticated)
+  const hasHydrated = useAuthStore((state) => state.hasHydrated)
+
+  useEffect(() => {
+    if (!hasHydrated) return
+    if (!isAuthenticated || !role) {
+      router.replace('/hoi-nhanh')
+      return
+    }
+    router.replace(role === 'admin' ? ADMIN_LANDING_PATH : '/search')
+  }, [hasHydrated, isAuthenticated, role, router])
+
+  return (
+    <div className="flex min-h-screen items-center justify-center">
+      <LoadingSpinner />
+    </div>
+  )
 }

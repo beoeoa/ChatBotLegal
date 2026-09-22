@@ -1,0 +1,76 @@
+-- Organization-unit operating model. Additive only: legacy department/domain
+-- fields stay available throughout the staged rollout.
+DEFINE TABLE IF NOT EXISTS organization_unit SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS unit_id ON TABLE organization_unit TYPE string;
+DEFINE FIELD IF NOT EXISTS code ON TABLE organization_unit TYPE string;
+DEFINE FIELD IF NOT EXISTS name ON TABLE organization_unit TYPE string;
+DEFINE FIELD IF NOT EXISTS short_name ON TABLE organization_unit TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS aliases ON TABLE organization_unit TYPE array<string> DEFAULT [];
+DEFINE FIELD IF NOT EXISTS parent_unit_id ON TABLE organization_unit TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS support_enabled ON TABLE organization_unit TYPE bool DEFAULT true;
+DEFINE FIELD IF NOT EXISTS is_active ON TABLE organization_unit TYPE bool DEFAULT true;
+DEFINE FIELD IF NOT EXISTS sort_order ON TABLE organization_unit TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS created ON TABLE organization_unit TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS updated ON TABLE organization_unit TYPE option<datetime>;
+DEFINE INDEX IF NOT EXISTS idx_organization_unit_unit_id ON TABLE organization_unit COLUMNS unit_id UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_organization_unit_code ON TABLE organization_unit COLUMNS code UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_organization_unit_active_sort ON TABLE organization_unit COLUMNS is_active, sort_order;
+
+DEFINE TABLE IF NOT EXISTS organization_unit_domain SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS organization_unit_id ON TABLE organization_unit_domain TYPE string;
+DEFINE FIELD IF NOT EXISTS domain_code ON TABLE organization_unit_domain TYPE string;
+DEFINE FIELD IF NOT EXISTS responsibility ON TABLE organization_unit_domain TYPE string DEFAULT 'primary';
+DEFINE FIELD IF NOT EXISTS effective_from ON TABLE organization_unit_domain TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS effective_to ON TABLE organization_unit_domain TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS created ON TABLE organization_unit_domain TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS updated ON TABLE organization_unit_domain TYPE option<datetime>;
+DEFINE INDEX IF NOT EXISTS idx_organization_unit_domain_identity ON TABLE organization_unit_domain COLUMNS organization_unit_id, domain_code UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_organization_unit_domain_route ON TABLE organization_unit_domain COLUMNS domain_code, responsibility, effective_to;
+
+DEFINE TABLE IF NOT EXISTS officer_unit_grant SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS officer_user ON TABLE officer_unit_grant TYPE record<user_account>;
+DEFINE FIELD IF NOT EXISTS organization_unit_id ON TABLE officer_unit_grant TYPE string;
+DEFINE FIELD IF NOT EXISTS domain_codes ON TABLE officer_unit_grant TYPE array<string> DEFAULT [];
+DEFINE FIELD IF NOT EXISTS reason ON TABLE officer_unit_grant TYPE string;
+DEFINE FIELD IF NOT EXISTS granted_by ON TABLE officer_unit_grant TYPE option<record<user_account>>;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE officer_unit_grant TYPE datetime;
+DEFINE FIELD IF NOT EXISTS revoked_at ON TABLE officer_unit_grant TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS created ON TABLE officer_unit_grant TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS updated ON TABLE officer_unit_grant TYPE option<datetime>;
+DEFINE INDEX IF NOT EXISTS idx_officer_unit_grant_officer ON TABLE officer_unit_grant COLUMNS officer_user, expires_at;
+DEFINE INDEX IF NOT EXISTS idx_officer_unit_grant_unit ON TABLE officer_unit_grant COLUMNS organization_unit_id, expires_at;
+
+DEFINE TABLE IF NOT EXISTS document_organization_unit SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS document_id ON TABLE document_organization_unit TYPE string;
+DEFINE FIELD IF NOT EXISTS organization_unit_id ON TABLE document_organization_unit TYPE string;
+DEFINE FIELD IF NOT EXISTS relationship ON TABLE document_organization_unit TYPE string DEFAULT 'reviewing';
+DEFINE FIELD IF NOT EXISTS assignment_source ON TABLE document_organization_unit TYPE string DEFAULT 'admin';
+DEFINE FIELD IF NOT EXISTS confidence ON TABLE document_organization_unit TYPE number DEFAULT 1;
+DEFINE FIELD IF NOT EXISTS confirmation_status ON TABLE document_organization_unit TYPE string DEFAULT 'confirmed';
+DEFINE FIELD IF NOT EXISTS created ON TABLE document_organization_unit TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS updated ON TABLE document_organization_unit TYPE option<datetime>;
+DEFINE INDEX IF NOT EXISTS idx_document_organization_unit_identity ON TABLE document_organization_unit COLUMNS document_id, organization_unit_id, relationship UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_document_organization_unit_unit ON TABLE document_organization_unit COLUMNS organization_unit_id, confirmation_status;
+
+DEFINE TABLE IF NOT EXISTS procedure_organization_unit SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS procedure_id ON TABLE procedure_organization_unit TYPE string;
+DEFINE FIELD IF NOT EXISTS organization_unit_id ON TABLE procedure_organization_unit TYPE string;
+DEFINE FIELD IF NOT EXISTS responsibility ON TABLE procedure_organization_unit TYPE string DEFAULT 'primary';
+DEFINE FIELD IF NOT EXISTS created ON TABLE procedure_organization_unit TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS updated ON TABLE procedure_organization_unit TYPE option<datetime>;
+DEFINE INDEX IF NOT EXISTS idx_procedure_organization_unit_identity ON TABLE procedure_organization_unit COLUMNS procedure_id, organization_unit_id UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_procedure_organization_unit_unit ON TABLE procedure_organization_unit COLUMNS organization_unit_id, responsibility;
+
+DEFINE FIELD IF NOT EXISTS organization_unit_id ON TABLE user_profile TYPE option<string>;
+DEFINE INDEX IF NOT EXISTS idx_user_profile_organization_unit ON TABLE user_profile COLUMNS organization_unit_id;
+DEFINE FIELD IF NOT EXISTS primary_organization_unit_id ON TABLE support_session TYPE option<string>;
+DEFINE INDEX IF NOT EXISTS idx_support_session_unit_queue ON TABLE support_session COLUMNS primary_organization_unit_id, queue_status;
+DEFINE FIELD IF NOT EXISTS default_organization_unit_id ON TABLE legal_crawl_source TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS unassigned_policy ON TABLE legal_crawl_source TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS assignment_state ON TABLE legal_crawl_candidate TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS primary_organization_unit_id ON TABLE legal_crawl_candidate TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS proposed_organization_unit_ids ON TABLE legal_crawl_candidate TYPE option<array<string>>;
+DEFINE FIELD IF NOT EXISTS organization_assignment_confidence ON TABLE legal_crawl_candidate TYPE option<number>;
+DEFINE INDEX IF NOT EXISTS idx_legal_crawl_candidate_unit_state ON TABLE legal_crawl_candidate COLUMNS primary_organization_unit_id, assignment_state, status;
+DEFINE FIELD IF NOT EXISTS primary_organization_unit_id ON TABLE ward_procedure TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS supporting_organization_unit_ids ON TABLE ward_procedure TYPE option<array<string>>;

@@ -7,8 +7,16 @@ import { Button } from '@/components/ui/button'
 import { ShieldAlert, AlertTriangle, ArrowRight, ExternalLink } from 'lucide-react'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import { useCredentialStatus, useEnvStatus } from '@/lib/hooks/use-credentials'
+import { useAuthStore } from '@/lib/stores/auth-store'
 
 export function SetupBanner() {
+  const role = useAuthStore((state) => state.role)
+  // Credential configuration is administrator-only. Do not mount its queries
+  // for other roles: they would retry forbidden requests on every page.
+  return role === 'admin' ? <AdminSetupBanner /> : null
+}
+
+function AdminSetupBanner() {
   const { t } = useTranslation()
   const { data: credentialStatus } = useCredentialStatus()
   const { data: envStatus } = useEnvStatus()

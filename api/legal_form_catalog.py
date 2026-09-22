@@ -19,6 +19,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 from urllib.parse import urlparse
+from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parents[1]
 FORMS_DIR = ROOT / "notebook_data" / "forms"
@@ -551,6 +552,14 @@ def _form_is_runtime_approved(item: dict[str, Any]) -> bool:
     )
 
 
+def _procedure_is_runtime_approved(item: dict[str, Any]) -> bool:
+    """Recognize an approved procedure record, including legacy curated rows."""
+    return (
+        item.get("review_status", "approved") == "approved"
+        and item.get("approved", True) is True
+    )
+
+
 def _apply_reviewed_current_form_overlays(
     forms: Iterable[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -737,6 +746,72 @@ def _official_runtime_procedure_bridge(
     return bridged
 
 
+def _official_runtime_bridge_pairs(
+    *,
+    forms: Iterable[dict[str, Any]],
+    bindings: Iterable[dict[str, Any]],
+    bridged_procedures: Iterable[dict[str, Any]],
+) -> set[tuple[str, str]]:
+    """Release reviewed three-tier bindings already used by the runtime bridge.
+
+    The official procedure bridge is created only from approved, attested
+    bindings. Keep its form pair available to the public resolver even when an
+    older compatibility manifest still names only the legacy procedure slug.
+    This does not approve a candidate or change an active release pointer: the
+    binding, form and matching attestation must already be approved.
+    """
+
+    bridge_attestations: dict[str, set[str]] = {}
+    for procedure in bridged_procedures:
+        procedure_id = normalize_procedure_id(procedure.get("procedure_id"))
+        provenance = procedure.get("provenance")
+        if not procedure_id or not isinstance(provenance, dict):
+            continue
+        attestations = {
+            str(value).strip()
+            for value in provenance.get("binding_attestation_ids") or []
+            if str(value or "").strip()
+        }
+        if attestations:
+            bridge_attestations[procedure_id] = attestations
+
+    forms_by_id = {
+        str(form.get("form_id") or "").strip(): form
+        for form in forms
+        if isinstance(form, dict) and str(form.get("form_id") or "").strip()
+    }
+    pairs: set[tuple[str, str]] = set()
+    for binding in bindings:
+        if not isinstance(binding, dict) or not _binding_is_approved(binding):
+            continue
+        procedure_id = normalize_procedure_id(binding.get("procedure_id"))
+        form_id = str(binding.get("form_id") or "").strip()
+        attestation_id = str(binding.get("attestation_id") or "").strip()
+        form = forms_by_id.get(form_id)
+        if (
+            not procedure_id
+            or not form_id
+            or not attestation_id
+            or attestation_id not in bridge_attestations.get(procedure_id, set())
+            or not form
+            or not _form_is_runtime_approved(form)
+        ):
+            continue
+        form_attestation = str(
+            (form.get("provenance") or {}).get("attestation_id")
+            if isinstance(form.get("provenance"), dict)
+            else ""
+        ).strip()
+        form_procedure_ids = {
+            normalize_procedure_id(value)
+            for value in form.get("procedure_ids") or []
+            if str(value or "").strip()
+        }
+        if form_attestation == attestation_id and procedure_id in form_procedure_ids:
+            pairs.add((procedure_id, form_id))
+    return pairs
+
+
 def _parse_date(value: Any) -> date | None:
     if not value:
         return None
@@ -875,6 +950,23 @@ class FormCatalog:
             if runtime_requirement_pairs is not None
             else None
         )
+        reviewed_ids = {
+            pid
+            for pid, item in self._procedures_by_id.items()
+            if _procedure_is_runtime_approved(item)
+        }
+        released_form_ids = {
+            pid
+            for pid, form_id in self._approved_binding_pairs
+            if pid in self._procedures_by_id
+            and (self._runtime_requirement_pairs is None
+                 or (pid, form_id) in self._runtime_requirement_pairs)
+            and _form_is_runtime_approved(self._forms_by_id.get(form_id, {}))
+        }
+        # Some historical procedure seed records remain pending even though a
+        # separately reviewed, release-bound form/binding is already public.
+        # Preserve those exact identities without exposing other candidates.
+        self._serving_procedure_ids = reviewed_ids | released_form_ids
 
     @classmethod
     def load_default(cls) -> "FormCatalog":
@@ -886,6 +978,41 @@ class FormCatalog:
         bindings = _safe_json(bindings_path, {"bindings": []}).get(
             "bindings", []
         )
+        # Admin-managed procedures live in the operational ``ward_procedure``
+        # table.  CRUD writes an atomic projection so the deterministic chat
+        # resolver sees the same approved procedure/form data without making a
+        # database round-trip for every question.  Keep the reviewed static
+        # catalog authoritative when an ID collides.
+        try:
+            from api.procedure_runtime_catalog import load_managed_runtime_catalog
+
+            managed = load_managed_runtime_catalog()
+            static_ids = {
+                normalize_procedure_id(item.get("procedure_id"))
+                for item in procedures
+                if isinstance(item, dict) and item.get("procedure_id")
+            }
+            procedures = list(procedures) + [
+                item
+                for item in managed.get("procedures", [])
+                if isinstance(item, dict)
+                and normalize_procedure_id(item.get("procedure_id")) not in static_ids
+            ]
+            forms = list(forms) + [
+                item
+                for item in managed.get("forms", [])
+                if isinstance(item, dict)
+                and str(item.get("form_id") or "").strip()
+            ]
+            bindings = list(bindings) + [
+                item
+                for item in managed.get("bindings", [])
+                if isinstance(item, dict)
+            ]
+        except Exception:
+            # A stale/missing projection must never make the legal catalog
+            # unavailable; the next admin write will repair it.
+            pass
         legacy_pairs = _verified_legacy_attestation_pairs(
             forms=forms,
             bindings=bindings,
@@ -915,19 +1042,38 @@ class FormCatalog:
             for item in procedures
             if isinstance(item, dict) and item.get("procedure_id")
         }
+        bridged_procedures = _official_runtime_procedure_bridge(
+            forms=forms,
+            bindings=bindings,
+            three_tier_payload=three_tier_payload,
+        )
         procedures = list(procedures) + [
             item
-            for item in _official_runtime_procedure_bridge(
-                forms=forms,
-                bindings=bindings,
-                three_tier_payload=three_tier_payload,
-            )
+            for item in bridged_procedures
             if normalize_procedure_id(item.get("procedure_id")) not in known_ids
         ]
         requirement_pairs = _runtime_requirement_pairs(
             _runtime_requirement_manifest_path()
         )
         requirement_pairs.update(legacy_pairs)
+        requirement_pairs.update(
+            _official_runtime_bridge_pairs(
+                forms=forms,
+                bindings=bindings,
+                bridged_procedures=bridged_procedures,
+            )
+        )
+        # Managed procedure rows are explicitly approved by the Admin CRUD
+        # gate.  Their projection is still subject to the normal form gate,
+        # but must be included in the runtime requirement allow-list so a
+        # newly linked approved form is visible without a release-file edit.
+        for binding in bindings:
+            if not isinstance(binding, dict) or not _binding_is_approved(binding):
+                continue
+            pid = normalize_procedure_id(binding.get("procedure_id"))
+            form_id = str(binding.get("form_id") or "").strip()
+            if pid and form_id:
+                requirement_pairs.add((pid, form_id))
         return cls(
             procedures=procedures,
             forms=forms,
@@ -939,6 +1085,9 @@ class FormCatalog:
     def get_procedure(self, procedure_id: str) -> dict[str, Any] | None:
         item = self._procedures_by_id.get(normalize_procedure_id(procedure_id))
         return dict(item) if item else None
+
+    def is_serving_procedure(self, procedure_id: str) -> bool:
+        return normalize_procedure_id(procedure_id) in self._serving_procedure_ids
 
     def resolve_procedures(
         self,
@@ -971,6 +1120,7 @@ class FormCatalog:
                 pid = normalize_procedure_id(procedure_id)
                 if (
                     pid not in self._procedures_by_id
+                    or pid not in self._serving_procedure_ids
                     or (candidate_ids is not None and pid not in candidate_ids)
                     or (pid, form_id) not in self._approved_binding_pairs
                 ):
@@ -1081,10 +1231,62 @@ class FormCatalog:
             }
             for pid, (score, phrases, match_type) in scored.items()
         ]
+        # Prefer a reviewed national procedure identity when the question
+        # contains an exact remediation alias.  The legacy catalog often has
+        # a broad candidate slug (for example ``tro_cap_xa_hoi``) that is not
+        # safe to expose as the procedure identity for a named benefit.
+        # Mapping is conditional on the official record already being
+        # approved; it does not activate a staging or form release.
+        remediation_aliases = (
+            ("dang ky lai khai sinh", "dang_ky_khai_sinh", "1.004884"),
+            ("tro cap huu tri xa hoi", "tro_cap_xa_hoi", "1.014027"),
+            ("dang ky tam tru", "dang_ky_tam_tru", "1.004194"),
+        )
+        for alias, legacy_id, official_id in remediation_aliases:
+            if alias not in query or official_id not in self._procedures_by_id:
+                continue
+            official = self._procedures_by_id[official_id]
+            if not (
+                str(official.get("official_procedure_code") or "").strip()
+                == official_id
+                and str(official.get("source_status") or "").casefold()
+                == "verified"
+                and str(official.get("review_status") or "").casefold()
+                == "approved"
+                and official.get("approved") is True
+            ):
+                continue
+            for match in matches:
+                if match.get("procedure_id") == legacy_id:
+                    # A comparison can explicitly name both first-time and
+                    # repeat registration. Do not rewrite its first identity
+                    # into the second and erase one requested procedure.
+                    remainder = query.replace(alias, " ")
+                    if alias == "dang ky lai khai sinh" and "dang ky khai sinh" in remainder:
+                        matches.append({**match, "procedure_id": official_id})
+                    else:
+                        match["procedure_id"] = official_id
+        # A pending but more specific procedure must suppress a broader
+        # released match (for example reissuing versus first issuing a permit).
+        # Equal-score reviewed identities win instead of the pending seed.
+        pending_top_score = max(
+            (
+                int(match["score"])
+                for match in matches
+                if match["procedure_id"] not in self._serving_procedure_ids
+            ),
+            default=0,
+        )
+        matches = [
+            match
+            for match in matches
+            if match["procedure_id"] in self._serving_procedure_ids
+        ]
         # The curated catalog and the official three-tier bridge can contain
         # the same procedure under a legacy slug and a current national code.
-        # Keep one deterministic identity and prefer the current official
-        # record so a correct query is not reported as ambiguous.
+        # Keep one deterministic identity. An exact national code or locked
+        # remediation alias selects the official identity; a generic name-only
+        # query keeps the already-released compatibility identity.
         preferred_by_name: dict[tuple[str, str], dict[str, Any]] = {}
         for item in matches:
             procedure = self._procedures_by_id.get(item["procedure_id"], {})
@@ -1104,6 +1306,7 @@ class FormCatalog:
             current_procedure = self._procedures_by_id.get(
                 current["procedure_id"], {}
             )
+
             def has_released_form(procedure_id: str) -> bool:
                 return any(
                     pair in self._approved_binding_pairs
@@ -1121,20 +1324,34 @@ class FormCatalog:
                         )
                     )
                 )
-            item_preference = (
-                has_released_form(item["procedure_id"]),
-                item["score"],
-                bool(procedure.get("official_procedure_code")),
-                bool(procedure.get("official_procedure_url")),
-                str(item["procedure_id"]).replace(".", "").isdigit(),
-            )
-            current_preference = (
-                has_released_form(current["procedure_id"]),
-                current["score"],
-                bool(current_procedure.get("official_procedure_code")),
-                bool(current_procedure.get("official_procedure_url")),
-                str(current["procedure_id"]).replace(".", "").isdigit(),
-            )
+
+            def procedure_preference(
+                candidate: Mapping[str, Any],
+                procedure_row: Mapping[str, Any],
+            ) -> tuple[bool, bool, bool, int, bool, bool]:
+                official_code = str(
+                    procedure_row.get("official_procedure_code") or ""
+                ).strip()
+                code_requested = bool(
+                    official_code
+                    and _contains_folded_phrase(query, fold_text(official_code))
+                )
+                is_official_bridge = bool(official_code)
+                return (
+                    code_requested,
+                    has_released_form(str(candidate["procedure_id"])),
+                    # Preserve the already-released legacy identity for a
+                    # generic name-only query. Exact national codes and the
+                    # locked remediation aliases still select the official
+                    # identity deterministically.
+                    not is_official_bridge,
+                    int(candidate["score"]),
+                    bool(procedure_row.get("official_procedure_url")),
+                    str(candidate["procedure_id"]).replace(".", "").isdigit(),
+                )
+
+            item_preference = procedure_preference(item, procedure)
+            current_preference = procedure_preference(current, current_procedure)
             if item_preference > current_preference:
                 preferred_by_name[key] = item
         matches = list(preferred_by_name.values())
@@ -1164,6 +1381,8 @@ class FormCatalog:
             )
         ]
         matches.sort(key=lambda item: (-item["score"], item["procedure_id"]))
+        if pending_top_score > (matches[0]["score"] if matches else 0):
+            return {"matches": [], "ambiguous": False}
         capped = matches[: max(1, min(limit, 6))]
         ambiguous = (
             len(capped) > 1
@@ -1210,6 +1429,8 @@ class FormCatalog:
         )
         if procedure is None:
             return GateResult(False, "PROCEDURE_RECORD_MISSING")
+        if normalize_procedure_id(procedure_id) not in self._serving_procedure_ids:
+            return GateResult(False, "PROCEDURE_NOT_APPROVED")
         if not form.get("legal_basis"):
             return GateResult(False, "LEGAL_BASIS_MISSING")
         provenance = form.get("provenance")
@@ -1389,6 +1610,7 @@ class FormCatalog:
                 data_gap_status = "VERIFIED_DATA_GAP"
         return {
             "procedure_matches": detected["matches"],
+            "procedure_ambiguous": bool(procedure_ids is None and detected["ambiguous"]),
             # The normal public caller asks for three cards, but an explicit
             # procedure review may request every required form.  Do not cut a
             # legally required fourth form merely because the UI's default is
@@ -1403,6 +1625,11 @@ class FormCatalog:
     @staticmethod
     def _public_form(form: dict[str, Any], procedure_id: str) -> dict[str, Any]:
         download_url = form.get("official_download_url")
+        if str(form.get("file_format") or "").casefold() not in {"", "online"}:
+            download_url = (
+                f"/api/procedures/forms-catalog/canonical/{quote(str(form.get('form_id') or ''), safe='')}/download"
+                f"?procedure_id={quote(procedure_id, safe='')}"
+            )
         return {
             "form_id": form.get("form_id"),
             "procedure_id": procedure_id,

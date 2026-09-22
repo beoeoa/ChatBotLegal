@@ -1,4 +1,5 @@
 import asyncio
+import os
 import traceback
 from typing import Any, Dict, List, Optional
 
@@ -21,6 +22,16 @@ from open_notebook.graphs.chat import graph as chat_graph
 from open_notebook.utils.graph_utils import get_session_message_count
 
 router = APIRouter()
+
+
+def _notebook_context_max_tokens() -> int:
+    try:
+        return max(
+            2_000,
+            min(64_000, int(os.getenv("OPEN_NOTEBOOK_CONTEXT_MAX_TOKENS", "10000"))),
+        )
+    except (TypeError, ValueError):
+        return 10_000
 
 
 async def _assert_notebook_access(notebook_id: str, request: Request, *, action: str = "view") -> None:
@@ -83,6 +94,7 @@ class ExecuteChatRequest(BaseModel):
     model_override: Optional[str] = Field(
         None, description="Optional model override for this message"
     )
+    full_text_requested: bool = False
 
 
 class ExecuteChatResponse(BaseModel):
@@ -93,6 +105,8 @@ class ExecuteChatResponse(BaseModel):
 class BuildContextRequest(BaseModel):
     notebook_id: str = Field(..., description="Notebook ID")
     context_config: Dict[str, Any] = Field(..., description="Context configuration")
+    query: str = Field(default="", max_length=20_000)
+    full_text_requested: bool = False
 
 
 class BuildContextResponse(BaseModel):
@@ -406,7 +420,15 @@ async def execute_chat(request: ExecuteChatRequest, raw_request: Request):
         # Prepare state for execution
         state_values = dict(current_state.values) if current_state else {}
         existing_messages = list(state_values.get("messages", []))
-        state_values["context"] = request.context
+        from open_notebook.utils.context_budget import bounded_context
+        effective_context = request.context
+        if not request.full_text_requested:
+                effective_context, _, _ = bounded_context(
+                effective_context,
+                query=request.message,
+                max_tokens=_notebook_context_max_tokens(),
+            )
+        state_values["context"] = effective_context
         state_values["notebook"] = notebook
         state_values["model_override"] = model_override
 
@@ -432,7 +454,7 @@ async def execute_chat(request: ExecuteChatRequest, raw_request: Request):
             graph_config,
             {
                 "messages": [user_message, ai_message],
-                "context": request.context,
+                "context": effective_context,
                 "notebook": notebook,
                 "model_override": model_override,
             },
@@ -505,6 +527,22 @@ async def build_context(request: BuildContextRequest, raw_request: Request):
 
                     if "insights" in status:
                         source_context = await source.get_context(context_size="short")
+                        # Newly linked legal documents often have extracted text
+                        # before asynchronous insights are available. Keep the
+                        # selected source useful without inventing a summary.
+                        if not source_context.get("insights") and getattr(source, "full_text", None):
+                            from open_notebook.utils.context_budget import (
+                                query_relevant_excerpt,
+                            )
+
+                            source_context = {
+                                **source_context,
+                                "excerpts": query_relevant_excerpt(
+                                    str(source.full_text),
+                                    request.query,
+                                    max_chars=12_000,
+                                ),
+                            }
                         context_data["sources"].append(source_context)
                         total_content += str(source_context)
                     elif "full content" in status:
@@ -542,6 +580,26 @@ async def build_context(request: BuildContextRequest, raw_request: Request):
             for source in sources:
                 try:
                     source_context = await source.get_context(context_size="short")
+                    full_text = getattr(source, "full_text", None)
+                    if not source_context.get("insights") and not full_text and source.id:
+                        try:
+                            hydrated_source = await Source.get(str(source.id))
+                            full_text = getattr(hydrated_source, "full_text", None)
+                        except Exception:
+                            full_text = None
+                    if not source_context.get("insights") and full_text:
+                        from open_notebook.utils.context_budget import (
+                            query_relevant_excerpt,
+                        )
+
+                        source_context = {
+                            **source_context,
+                            "excerpts": query_relevant_excerpt(
+                                str(full_text),
+                                request.query,
+                                max_chars=12_000,
+                            ),
+                        }
                     context_data["sources"].append(source_context)
                     total_content += str(source_context)
                 except Exception as e:
@@ -557,6 +615,16 @@ async def build_context(request: BuildContextRequest, raw_request: Request):
                 except Exception as e:
                     logger.warning(f"Error processing note {note.id}: {str(e)}")
                     continue
+
+        from open_notebook.utils.context_budget import bounded_context
+        if not request.full_text_requested:
+            context_data, _, truncated = bounded_context(
+                context_data,
+                query=request.query,
+                max_tokens=_notebook_context_max_tokens(),
+            )
+            if truncated:
+                total_content = str(context_data)
 
         # Calculate character and token counts
         char_count = len(total_content)

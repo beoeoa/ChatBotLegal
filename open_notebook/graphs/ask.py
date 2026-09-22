@@ -133,7 +133,8 @@ async def call_model_with_messages(
 ) -> dict:
     # Legal retrieval already embeds the complete question with VNLegal-LAL.
     # Avoid spending a separate LLM call to paraphrase the same query.
-    return {"strategy": _fallback_strategy(state["question"])}
+    search_query = state.get("retrieval_question") or state["question"]
+    return {"strategy": _fallback_strategy(search_query)}
 
 
 async def trigger_queries(state: ThreadState, config: RunnableConfig):
@@ -197,8 +198,11 @@ async def provide_answer(
 ) -> dict:
     try:
         search_started = time.perf_counter()
+        search_query = state.get("retrieval_question") or state["term"]
+        logger.info("DEBUG_RETRIEVAL: retrieval_question='{}', term='{}', final_search_query='{}'",
+                    state.get("retrieval_question"), state.get("term"), search_query)
         results = await _legal_search(
-            state.get("retrieval_question") or state["term"],
+            search_query,
             state.get("domain"),
             state.get("legal_as_of"),
             request_id=state.get("request_id"),
@@ -238,6 +242,24 @@ async def provide_answer(
             len(results),
         )
         payload = dict(state)
+        try:
+            from api.system_settings import active_settings
+
+            runtime_settings = await active_settings()
+            payload["system_name"] = (
+                runtime_settings.system_name or "Pháp luật Hải Phòng"
+            ).strip()
+            payload["organization_name"] = (
+                runtime_settings.organization_name or ""
+            ).strip()
+            payload["system_prompt_addendum"] = (
+                runtime_settings.system_prompt_addendum or ""
+            ).strip()
+        except Exception as exc:
+            logger.warning(
+                "Ask graph settings unavailable; using built-in prompt contract: {}",
+                type(exc).__name__,
+            )
         
         # Forms are attached only by the canonical resolver in the API
         # response. Do not inject legacy catalog matches into an LLM prompt.
@@ -685,13 +707,15 @@ async def write_final_answer(
         # that may discard the useful answer on timeout.
         if repair_reason in {"invalid_citation", "unsupported_legal_reference"}:
             safe_draft = _safe_draft_after_failed_repair(draft, evidence)
-            if safe_draft:
+            if safe_draft and len(safe_draft) >= len(draft) * 0.6:
                 telemetry.record_ask_outcome("repair", "skipped")
                 logger.info(
                     "Returning deterministically salvaged grounded draft with {} characters",
                     len(safe_draft),
                 )
                 return {"final_answer": _enrich_citations(safe_draft, evidence)}
+            logger.info("Retaining full draft (len={}) instead of over-stripping", len(draft))
+            return {"final_answer": _enrich_citations(draft, evidence)}
 
         telemetry.record_ask_outcome("repair", "attempted")
         repair_started = time.perf_counter()

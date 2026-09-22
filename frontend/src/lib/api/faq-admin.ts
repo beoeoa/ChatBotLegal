@@ -16,6 +16,9 @@ export interface FaqItem {
   guidance_label: string
   requires_forms: boolean
   steps: string[]
+  documents_required: string[]
+  duration: string
+  fee: string
   form_ids: string[]
   forms: Array<{
     id: string
@@ -35,15 +38,23 @@ export interface FaqItem {
   revision_id: string
   revision_number: number
   confirmed_procedure_id: string
+  primary_organization_unit_id?: string | null
   public_state: 'pending' | 'needs_review' | 'confirmed' | 'released' | 'dismissed' | 'blocked'
+  /** True only when this revision belongs to the currently active public release. */
+  in_active_release?: boolean
 }
 
 export interface FaqListResponse {
+  state_counts?: Record<string, number>
   total: number
   items: FaqItem[]
+  active_release_id?: string | null
+  active_release_count?: number
+  historical_released_count?: number
 }
 
 export interface FaqCreatePayload {
+  organization_unit_id?: string
   faq_key?: string
   question: string
   answer: string
@@ -52,12 +63,16 @@ export interface FaqCreatePayload {
   guidance_label?: string
   requires_forms?: boolean
   steps?: string[]
+  documents_required?: string[]
+  duration?: string
+  fee?: string
   domain: string
   confirmed_procedure_id: string
   ward_scope?: string | null
 }
 
 export interface FaqUpdatePayload {
+  organization_unit_id?: string
   question?: string
   answer?: string
   submission_place?: string
@@ -65,6 +80,9 @@ export interface FaqUpdatePayload {
   guidance_label?: string
   requires_forms?: boolean
   steps?: string[]
+  documents_required?: string[]
+  duration?: string
+  fee?: string
   domain?: string
   confirmed_procedure_id?: string
   ward_scope?: string | null
@@ -76,7 +94,10 @@ export interface FaqRelease {
   version: number
   status: 'candidate' | 'validated' | 'active' | 'retired' | 'blocked'
   form_release_id: string
-  manifest: { gate_report?: { passed: boolean; errors: string[] } }
+  manifest: {
+    gate_report?: { passed: boolean; errors: string[] }
+    withdrawal?: { revision_ids: string[]; reason: string }
+  }
 }
 
 export const DOMAIN_OPTIONS: Record<string, string> = {
@@ -107,17 +128,8 @@ export const faqAdminApi = {
     limit?: number
     offset?: number
   }): Promise<FaqListResponse> => {
-    const response = await apiClient.get<FaqListResponse>('/faq/governance/revisions')
-    let items = response.data.items
-    if (params?.domain) items = items.filter(item => item.domain === params.domain)
-    if (params?.review_status) items = items.filter(item => item.public_state === params.review_status)
-    if (params?.q) {
-      const query = params.q.toLocaleLowerCase('vi')
-      items = items.filter(item => `${item.question} ${item.answer}`.toLocaleLowerCase('vi').includes(query))
-    }
-    const offset = params?.offset ?? 0
-    const limit = params?.limit ?? 200
-    return { total: items.length, items: items.slice(offset, offset + limit) }
+    const response = await apiClient.get<FaqListResponse>('/faq/governance/revisions', { params })
+    return response.data
   },
 
   /** Get a single FAQ by ID */
@@ -133,12 +145,16 @@ export const faqAdminApi = {
       question: data.question,
       answer: data.answer,
       canonical_domain: data.domain,
+      organization_unit_id: data.organization_unit_id,
       confirmed_procedure_id: data.confirmed_procedure_id,
       requires_forms: data.requires_forms,
       submission_place: data.submission_place,
       legal_basis: data.legal_basis,
       guidance_label: data.guidance_label,
       steps: data.steps,
+      documents_required: data.documents_required,
+      duration: data.duration,
+      fee: data.fee,
       ward_scope: data.ward_scope,
       evidence: {},
     })
@@ -158,6 +174,10 @@ export const faqAdminApi = {
     return response.data
   },
 
+  deleteRevision: async (revisionId: string): Promise<void> => {
+    await apiClient.delete(`/faq/governance/revisions/${encodeURIComponent(revisionId)}`)
+  },
+
   previewRelease: async (revisionIds: string[]): Promise<FaqRelease> => {
     const response = await apiClient.post<FaqRelease>('/faq/governance/releases/preview', { revision_ids: revisionIds })
     return response.data
@@ -165,6 +185,14 @@ export const faqAdminApi = {
 
   validateRelease: async (releaseId: string): Promise<FaqRelease> => {
     const response = await apiClient.post<FaqRelease>(`/faq/governance/releases/${encodeURIComponent(releaseId)}/validate`)
+    return response.data
+  },
+
+  previewWithdrawal: async (revisionIds: string[], reason: string, activeReleaseId: string): Promise<FaqRelease> => {
+    const response = await apiClient.post<FaqRelease>('/faq/governance/releases/preview', {
+      revision_ids: [], withdraw_revision_ids: revisionIds,
+      withdrawal_reason: reason, expected_active_release_id: activeReleaseId,
+    })
     return response.data
   },
 

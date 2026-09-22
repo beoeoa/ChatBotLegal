@@ -13,7 +13,6 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
-import httpx
 from bs4 import BeautifulSoup
 from loguru import logger
 
@@ -114,11 +113,6 @@ class BaseCrawler:
     
     def __init__(self, source: LegalSource):
         self.source = source
-        self.client = httpx.Client(
-            headers={'User-Agent': USER_AGENT},
-            timeout=30,
-            follow_redirects=True,
-        )
         self._last_fetch: dict[str, Any] = {
             "url": "",
             "html": "",
@@ -129,10 +123,10 @@ class BaseCrawler:
         }
     
     def fetch_page(self, url: str) -> str | None:
-        """Fetch a page and return HTML content.
+        """Fetch a page through Crawl4AI and return rendered HTML.
 
-        Prefer crawl4ai when source.needs_js is True; fallback to plain httpx.
-        Also stores last fetch extras on self._last_fetch for PDF-link recovery.
+        HTML crawling has one deterministic engine. Missing browser support is
+        fail-closed and never falls back to a plain HTTP response.
         """
         self._last_fetch = {
             "url": url,
@@ -143,64 +137,30 @@ class BaseCrawler:
             "reason": "",
         }
 
-        # 1) JS-capable fetch via crawl4ai when needed
-        if getattr(self.source, "needs_js", False):
-            try:
-                import asyncio
-                from api.crawlers.crawl4ai_fetcher import fetch_rendered
-
-                try:
-                    loop = asyncio.get_running_loop()
-                except RuntimeError:
-                    loop = None
-
-                if loop and loop.is_running():
-                    # Called from async context via run_in_executor; create a fresh loop in this thread
-                    result = asyncio.run(fetch_rendered(url))
-                else:
-                    result = asyncio.run(fetch_rendered(url))
-
-                self._last_fetch.update({
-                    "status": result.get("status", "error"),
-                    "html": result.get("html", "") or "",
-                    "rendered_text": result.get("rendered_text", "") or "",
-                    "pdf_links": result.get("pdf_links", []) or [],
-                    "reason": result.get("reason", "") or "",
-                    "url": result.get("final_url", url) or url,
-                })
-                html = self._last_fetch["html"]
-                if self._last_fetch["status"] == "ok" and html and len(html) > 100:
-                    return html
-                logger.warning(
-                    f"crawl4ai fetch weak for {url}: status={self._last_fetch['status']} reason={self._last_fetch['reason'][:160]}"
-                )
-            except Exception as e:
-                logger.warning(f"crawl4ai fetch failed for {url}: {e}")
-
-        # 2) Fallback plain HTTP
         try:
-            resp = self.client.get(url)
-            resp.raise_for_status()
-            html = resp.text
+            import asyncio
+
+            from api.crawlers.crawl4ai_fetcher import fetch_rendered
+
+            result = asyncio.run(fetch_rendered(url, check_robots_txt=True))
             self._last_fetch.update({
-                "status": "ok",
-                "html": html,
-                "reason": "httpx_fallback" if getattr(self.source, "needs_js", False) else "httpx",
+                "status": result.get("status", "error"),
+                "html": result.get("html", "") or "",
+                "rendered_text": result.get("rendered_text", "") or "",
+                "pdf_links": result.get("pdf_links", []) or [],
+                "reason": result.get("reason", "") or "",
+                "url": result.get("final_url", url) or url,
             })
-            # best-effort PDF link scrape from static HTML
-            try:
-                soup = BeautifulSoup(html, "html.parser")
-                pdfs = []
-                for a in soup.select('a[href]'):
-                    href = a.get("href") or ""
-                    if ".pdf" in href.lower():
-                        pdfs.append(urljoin(url, href))
-                self._last_fetch["pdf_links"] = list(dict.fromkeys(pdfs))
-            except Exception:
-                pass
-            return html
+            html = self._last_fetch["html"]
+            if self._last_fetch["status"] == "ok" and html and len(html) > 100:
+                return html
+            logger.warning(
+                f"crawl4ai fetch weak for {url}: status={self._last_fetch['status']} "
+                f"reason={self._last_fetch['reason'][:160]}"
+            )
+            return None
         except Exception as e:
-            logger.warning(f"Failed to fetch {url}: {e}")
+            logger.warning(f"crawl4ai fetch failed for {url}: {e}")
             self._last_fetch.update({"status": "error", "reason": str(e)})
             return None
     
@@ -308,9 +268,10 @@ class BaseCrawler:
     def discover_sitemap_urls(self, sitemap_url: str) -> list[str]:
         """Discover URLs from a sitemap.xml."""
         try:
-            resp = self.client.get(sitemap_url)
-            resp.raise_for_status()
-            soup = self.parse_html(resp.text)
+            content = self.fetch_page(sitemap_url)
+            if not content:
+                return []
+            soup = self.parse_html(content)
             urls = []
             for loc in soup.select('url loc, sitemap loc'):
                 urls.append(loc.get_text(strip=True))

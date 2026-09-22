@@ -1,0 +1,7 @@
+-- Migration 56: idempotent assistant turn identity.
+-- The key is scoped to a conversation so browser retries cannot create a
+-- second assistant snapshot for the same logical turn. Existing messages
+-- without a turn_id remain valid and are not rewritten.
+DEFINE FIELD IF NOT EXISTS turn_id ON TABLE conversation_message TYPE option<string>;
+DEFINE INDEX IF NOT EXISTS idx_conversation_message_turn
+ON TABLE conversation_message COLUMNS conversation, turn_id UNIQUE;

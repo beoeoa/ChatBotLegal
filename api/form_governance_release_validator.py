@@ -14,6 +14,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Callable, Mapping
 from uuid import UUID
+from urllib.parse import urlparse
 
 from api.form_governance_models import canonical_sha256
 from api.official_source_adapters import is_allowlisted_official_url
@@ -30,6 +31,12 @@ DVC_ORIGIN = "https://dichvucong.gov.vn"
 DVC_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0 Safari/537.36"
+)
+FORM_SOURCE_USER_AGENT = (
+    # VBPL's public edge rejects the detailed Chrome token but accepts the
+    # browser navigation marker. Keep this deliberately generic and never
+    # send a user's cookies or credentials.
+    "Mozilla/5.0"
 )
 
 
@@ -115,6 +122,18 @@ def validate_release_manifest(
             errors.append("FORM_PROCEDURE_SOURCE_NOT_OFFICIAL")
         if not _effective(procedure, legal_as_of):
             errors.append("FORM_PROCEDURE_NOT_EFFECTIVE")
+        primary_unit = str(
+            procedure.get("primary_organization_unit_id") or ""
+        ).strip()
+        supporting_units = [
+            str(value).strip()
+            for value in procedure.get("supporting_organization_unit_ids") or []
+            if str(value).strip()
+        ]
+        if len(supporting_units) != len(set(supporting_units)):
+            errors.append("FORM_PROCEDURE_UNIT_DUPLICATE")
+        if primary_unit and primary_unit in supporting_units:
+            errors.append("FORM_PROCEDURE_PRIMARY_UNIT_DUPLICATE")
 
     source_checks = {"required": len(assets), "passed": 0, "mode": "metadata_only"}
     for asset in assets:
@@ -155,6 +174,14 @@ def validate_release_manifest(
             errors.append("FORM_CONDITION_REQUIRED")
         if binding.get("audience") not in {"citizen", "officer", "both"}:
             errors.append("FORM_BINDING_AUDIENCE_INVALID")
+        bound_asset = next((asset for asset in assets if str(asset.get("form_id") or "") == form_id), None)
+        if bound_asset:
+            allowed = set(bound_asset.get("audiences") or [])
+            if "both" in allowed:
+                allowed.update({"citizen", "officer"})
+            required = {"citizen", "officer"} if binding.get("audience") == "both" else {binding.get("audience")}
+            if not required.issubset(allowed):
+                errors.append("FORM_BINDING_AUDIENCE_MISMATCH")
         if not _effective(binding, legal_as_of):
             errors.append("FORM_BINDING_NOT_EFFECTIVE")
 
@@ -291,6 +318,26 @@ class HttpFormSourceVerifier:
         self.transport = transport
         self.runtime_root = (runtime_root or Path(__file__).resolve().parents[1] / "release-data").resolve()
 
+    @staticmethod
+    def _source_headers(source_url: str) -> dict[str, str]:
+        """Use a normal browser navigation profile for official source pages.
+
+        Some allowlisted government portals (notably VBPL) reject a bare
+        programmatic request with HTTP 403 even though the same public page is
+        available in a browser.  The referer is limited to the source's own
+        origin; we never forward user credentials or cookies.
+        """
+        parsed = urlparse(str(source_url or "").strip())
+        origin = f"{parsed.scheme}://{parsed.hostname}/" if parsed.scheme and parsed.hostname else ""
+        headers = {
+            "User-Agent": FORM_SOURCE_USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.7,en;q=0.5",
+        }
+        if origin:
+            headers["Referer"] = origin
+        return headers
+
     def _verify_runtime_file(self, asset: Mapping[str, Any]) -> str | None:
         runtime_path = str(asset.get("runtime_path") or "").strip()
         expected_url = (
@@ -344,6 +391,7 @@ class HttpFormSourceVerifier:
                 follow_redirects=True,
                 verify=build_verified_ssl_context(),
                 transport=self.transport,
+                headers=self._source_headers(source_url),
             ) as client:
                 with client.stream("GET", source_url) as response:
                     response.raise_for_status()
@@ -445,6 +493,7 @@ class HttpFormSourceVerifier:
                 follow_redirects=True,
                 verify=build_verified_ssl_context(),
                 transport=self.transport,
+                headers=self._source_headers(url),
             ) as client:
                 with client.stream("GET", url) as response:
                     response.raise_for_status()
@@ -479,6 +528,7 @@ class HttpFormSourceVerifier:
                 follow_redirects=True,
                 verify=build_verified_ssl_context(),
                 transport=self.transport,
+                headers=self._source_headers(url),
             ) as client:
                 with client.stream("GET", url) as response:
                     response.raise_for_status()

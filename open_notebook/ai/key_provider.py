@@ -17,6 +17,9 @@ from typing import Optional
 
 from loguru import logger
 
+from open_notebook.ai.openai_compatible_utils import (
+    normalize_openai_compatible_base_url,
+)
 from open_notebook.domain.credential import Credential
 
 # =============================================================================
@@ -118,6 +121,9 @@ async def _provision_simple_provider(provider: str) -> bool:
         True if key was set from database, False otherwise
     """
     provider_lower = provider.lower()
+    if provider_lower == "ollama" and os.getenv("PORTABLE_OLLAMA_URL", "").strip():
+        os.environ["OLLAMA_API_BASE"] = os.environ["PORTABLE_OLLAMA_URL"].strip()
+        return True
     config_info = PROVIDER_CONFIG.get(provider_lower)
     if not config_info:
         return False
@@ -236,7 +242,9 @@ async def _provision_openai_compatible() -> bool:
         logger.debug("Set OPENAI_COMPATIBLE_API_KEY from Credential")
         any_set = True
     if cred.base_url:
-        os.environ["OPENAI_COMPATIBLE_BASE_URL"] = cred.base_url
+        os.environ["OPENAI_COMPATIBLE_BASE_URL"] = normalize_openai_compatible_base_url(
+            cred.base_url
+        )
         logger.debug("Set OPENAI_COMPATIBLE_BASE_URL from Credential")
         any_set = True
 

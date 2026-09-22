@@ -103,7 +103,6 @@ export const bnIN = {
     searchTerms: "অনুসন্ধান শব্দ",
     strategy: "কৌশল",
     individualAnswers: "ব্যক্তিগত উত্তর ({count})",
-    finalAnswer: "চূড়ান্ত উত্তর",
     notebookLabel: "নোটবুক: {name}",
     itemNotFound: "এই {type} খুঁজে পাওয়া যায়নি",
     accessibility: {
@@ -819,7 +818,6 @@ export const bnIN = {
   },
   models: {
     embedding: "এমবেডিং মডেল",
-    tts: "টেক্সট টু স্পিচ (TTS)",
     stt: "স্পিচ টু টেক্সট (STT)",
     apiKey: "API কী",
     deleteSuccess: "মডেল সফলভাবে মুছে ফেলা হয়েছে",
@@ -845,8 +843,6 @@ export const bnIN = {
     largeContextModelDesc: "বড় ডকুমেন্ট প্রক্রিয়াকরণের জন্য ব্যবহৃত - Gemini প্রস্তাবিত",
     embeddingModelLabel: "এমবেডিং মডেল",
     embeddingModelDesc: "সেমান্টিক সার্চ এবং ভেক্টর এমবেডিংয়ের জন্য ব্যবহৃত",
-    ttsModelLabel: "টেক্সট-টু-স্পিচ মডেল",
-    ttsModelDesc: "পডকাস্ট তৈরির জন্য ব্যবহৃত",
     sttModelLabel: "স্পিচ-টু-টেক্সট মডেল",
     sttModelDesc: "অডিও ট্রান্সক্রিপশনের জন্য ব্যবহৃত",
     embeddingChangeTitle: "এমবেডিং মডেল পরিবর্তন",

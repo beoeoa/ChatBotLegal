@@ -1,0 +1,211 @@
+# Full-system Render staging Blueprint. Paid resources are created only after
+# this file is pushed and the owner confirms the Blueprint in Render Dashboard.
+# Keep the public frontend in maintenance mode until legal and role UAT passes.
+services:
+  - type: pserv
+    name: chatbotlegal-surreal
+    runtime: docker
+    plan: 0.5c-512mb
+    region: singapore
+    dockerfilePath: deploy/render/Dockerfile.surreal
+    dockerContext: .
+    autoDeployTrigger: "off"
+    disk:
+      name: surreal-data
+      mountPath: /mydata
+      sizeGB: 2
+    envVars:
+      - key: PORT
+        value: "8000"
+      - key: SURREAL_USER
+        value: root
+      - key: SURREAL_PASS
+        generateValue: true
+      - key: SURREAL_PATH
+        value: rocksdb:/mydata/mydatabase.db
+      - key: SURREAL_BIND
+        value: 0.0.0.0:8000
+
+  - type: pserv
+    name: chatbotlegal-retrieval
+    runtime: docker
+    plan: 2c-4g
+    region: singapore
+    dockerfilePath: Dockerfile.retrieval
+    dockerContext: .
+    dockerCommand: python -m scripts.render_retrieval_entrypoint
+    autoDeployTrigger: "off"
+    disk:
+      name: reviewed-legal-data
+      mountPath: /data
+      sizeGB: 10
+    envVars:
+      - key: PORT
+        value: "8765"
+      - key: LEGAL_DATA_ROOT
+        value: /data/legal
+      - key: LEGAL_CHROMA_PATH
+        value: /data/legal/chroma_store
+      - key: LEGAL_CHROMA_COLLECTION
+        value: legal_core_288_vnlegal_1024_20260914_resegmented
+      - key: LEGAL_CHROMA_SOURCE_COLLECTION
+        value: legal_core_288_vnlegal_1024_20260914_resegmented
+      - key: LEGAL_CHROMA_INCREMENTAL_COLLECTION
+        value: legal_core_288_admin_overlay_20260908
+      - key: LEGAL_ALLOW_LEGACY_DIRECT_IMPORT
+        value: "false"
+      - key: LEGAL_ALLOW_INCREMENTAL_IMPORT
+        value: "false"
+      - key: LEGAL_EMBED_DEVICE
+        value: cpu
+      - key: VNLEGAL_LAL_MODEL_PATH
+        value: /data/legal/vnlegal-lal-model
+      - key: VNLEGAL_LAL_MODEL_FINGERPRINT
+        value: 29020cd8c81d5439420992fc7e8c08eb16fa2883f4fefadb1e6bb4918116b9aa
+      - key: LEGAL_SERVING_MANIFEST_POINTER
+        value: /data/legal/serving_manifests/active_core_288_serving_manifest.json
+      - key: LEGAL_SERVING_MANIFEST_REQUIRED
+        value: "true"
+      - key: LEGAL_MANAGEMENT_ONLY
+        value: "false"
+      - key: LEGAL_DATABASE_URL
+        fromDatabase:
+          name: chatbotlegal-postgres
+          property: connectionString
+
+  - type: pserv
+    name: chatbotlegal-api
+    runtime: docker
+    plan: 1c-2g
+    region: singapore
+    dockerfilePath: deploy/Dockerfile.api
+    dockerContext: .
+    dockerCommand: /bin/sh /app/scripts/render_api_entrypoint.sh
+    autoDeployTrigger: "off"
+    disk:
+      name: account-and-runtime-data
+      mountPath: /app/data
+      sizeGB: 2
+    envVars:
+      - key: PORT
+        value: "5055"
+      - key: PRODUCTION_MODE
+        value: "true"
+      - key: PUBLIC_QUICK_CHAT_ONLY_MODE
+        value: "false"
+      - key: OPEN_NOTEBOOK_ADMIN_PASSWORD
+        sync: false
+      - key: OPEN_NOTEBOOK_ENCRYPTION_KEY
+        generateValue: true
+      - key: OPEN_NOTEBOOK_DATA_DIR
+        value: /app/data
+      - key: OPEN_NOTEBOOK_RETURN_RESET_TOKEN
+        value: "false"
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: SURREAL_HOSTPORT
+        fromService:
+          type: pserv
+          name: chatbotlegal-surreal
+          property: hostport
+      - key: SURREAL_PASSWORD
+        fromService:
+          type: pserv
+          name: chatbotlegal-surreal
+          envVarKey: SURREAL_PASS
+      - key: SURREAL_USER
+        value: root
+      - key: SURREAL_NAMESPACE
+        value: open_notebook
+      - key: SURREAL_DATABASE
+        value: open_notebook
+      - key: LEGAL_HOSTPORT
+        fromService:
+          type: pserv
+          name: chatbotlegal-retrieval
+          property: hostport
+      - key: API_PRIVATE_HOST
+        fromService:
+          type: pserv
+          name: chatbotlegal-api
+          property: host
+      - key: FRONTEND_ORIGIN
+        fromService:
+          type: web
+          name: chatbotlegal-frontend
+          envVarKey: RENDER_EXTERNAL_URL
+      - key: LEGAL_DATABASE_URL
+        fromDatabase:
+          name: chatbotlegal-postgres
+          property: connectionString
+      - key: DATABASE_URL
+        fromDatabase:
+          name: chatbotlegal-postgres
+          property: connectionString
+      - key: FEATURE018_DATABASE_URL
+        fromDatabase:
+          name: chatbotlegal-postgres
+          property: connectionString
+      - key: FAQ_GOVERNANCE_DATABASE_URL
+        fromDatabase:
+          name: chatbotlegal-postgres
+          property: connectionString
+      - key: PROCEDURE_FAST_PATH_ENABLED
+        value: "false"
+      - key: INTENT_FAST_PATH_ENABLED
+        value: "false"
+      - key: PUBLIC_QUICK_CHAT_FAST_PATH_ENABLED
+        value: "true"
+      - key: PUBLIC_QUICK_CHAT_LLM_FALLBACK
+        value: "false"
+      - key: PUBLIC_QUICK_CHAT_QUOTA_PATH
+        value: /app/data/public-quick-chat-quota.sqlite3
+      - key: CHAT_UNIFIED_ROUTER_V1_ENABLED
+        value: "true"
+      - key: CHAT_LLM_ROUTER_V2_ENABLED
+        value: "false"
+      - key: READINESS_MODEL_PROBE_ENABLED
+        value: "true"
+      - key: LEGAL_CRAWLER_ENABLED
+        value: "false"
+      - key: LEGAL_IMPORT_WORKER_ENABLED
+        value: "false"
+      - key: LEGAL_VALIDITY_SYNC_ENABLED
+        value: "false"
+      - key: FORM_GOVERNANCE_SOURCE
+        value: json_compat
+      - key: FORM_GOVERNANCE_ROUTER_MODE
+        value: disabled
+
+  - type: web
+    name: chatbotlegal-frontend
+    runtime: docker
+    plan: 0.5c-512mb
+    region: singapore
+    dockerfilePath: deploy/Dockerfile.frontend
+    dockerContext: .
+    autoDeployTrigger: "off"
+    healthCheckPath: /
+    maintenanceMode:
+      enabled: true
+    envVars:
+      - key: PORT
+        value: "8502"
+      - key: INTERNAL_API_HOSTPORT
+        fromService:
+          type: pserv
+          name: chatbotlegal-api
+          property: hostport
+      - key: NEXT_PUBLIC_ASK_SSE_ENABLED
+        value: "false"
+      - key: NEXT_PUBLIC_FIREBASE_ENABLED
+        value: "false"
+
+databases:
+  - name: chatbotlegal-postgres
+    plan: 0.5c-1g
+    region: singapore
+    postgresMajorVersion: "18"
+    databaseName: legal_chatbot
+    diskSizeGB: 5
+    ipAllowList: []

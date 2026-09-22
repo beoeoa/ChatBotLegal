@@ -172,10 +172,13 @@ export function SourcesColumn({
         collapsedIcon={FileText}
         collapsedLabel={t('navigation.sources')}
       >
-        <Card className="h-full flex flex-col flex-1 overflow-hidden">
-          <CardHeader className="pb-3 flex-shrink-0">
+        <Card className="flex h-full flex-1 flex-col overflow-hidden rounded-2xl border-border/80 bg-card shadow-sm">
+          <CardHeader className="flex-shrink-0 border-b border-border/60 px-4 py-3">
             <div className="flex items-center justify-between gap-2">
-              <CardTitle className="text-lg">{t('navigation.sources')}</CardTitle>
+              <div>
+                <CardTitle className="text-xl">Nguồn hồ sơ</CardTitle>
+                <p className="mt-1 text-xs text-muted-foreground">Chọn tài liệu dùng làm căn cứ</p>
+              </div>
               <div className="flex items-center gap-2">
                 <DropdownMenu open={dropdownOpen} onOpenChange={setDropdownOpen}>
                   <DropdownMenuTrigger asChild>
@@ -201,7 +204,7 @@ export function SourcesColumn({
             </div>
           </CardHeader>
 
-          <CardContent ref={scrollContainerRef} className="flex-1 overflow-y-auto min-h-0">
+          <CardContent ref={scrollContainerRef} className="min-h-0 flex-1 overflow-y-auto bg-background/25 p-3">
             {sources && sources.length > 0 && (
               <div className="grid grid-cols-2 gap-2 mb-3">
                 <Select value={selectedDomain} onValueChange={setSelectedDomain}>

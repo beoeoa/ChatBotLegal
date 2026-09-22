@@ -157,7 +157,7 @@ async def assert_notebook_access(
         raise HTTPException(status_code=403, detail=OFFICER_DENIAL)
     if record.get("ownership_status") == "needs_admin_review":
         raise HTTPException(status_code=403, detail="Hồ sơ chưa xác định chủ sở hữu, chờ quản trị viên xử lý.")
-    if _same_user(record.get("owner_user"), user_id) or role == "admin":
+    if _same_user(record.get("owner_user"), user_id):
         return record
     raise HTTPException(status_code=403, detail=OFFICER_DENIAL)
 
@@ -171,7 +171,7 @@ async def assert_source_access(source_id: str, request: Request, *, action: Acti
         raise HTTPException(status_code=403, detail=OFFICER_DENIAL)
     if record.get("ownership_status") == "needs_admin_review":
         raise HTTPException(status_code=403, detail="Tài liệu chưa xác định chủ sở hữu, chờ quản trị viên xử lý.")
-    if _same_user(record.get("owner_user"), user_id) or role == "admin":
+    if _same_user(record.get("owner_user"), user_id):
         return record
     if record.get("source_scope") == "shared-admin-reviewed" and action in ("view", "download", "export"):
         return record

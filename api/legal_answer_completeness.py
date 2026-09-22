@@ -114,6 +114,189 @@ def _contains_any(value: str, markers: Sequence[str]) -> bool:
     return any(marker in value for marker in markers)
 
 
+def requested_answer_facets(question: str) -> tuple[str, ...]:
+    """Return factual facets explicitly requested by natural wording."""
+
+    text = _fold(question)
+    facets: list[str] = []
+
+    def add(name: str, *markers: str) -> None:
+        if any(marker in text for marker in markers) and name not in facets:
+            facets.append(name)
+
+    add(
+        "authority",
+        "ai co trach nhiem", "co quan nao", "nop o dau", "gui den dau",
+        "yeu cau co quan nao", "thuoc ve ai", "tham quyen",
+    )
+    if (
+        any(marker in text for marker in (
+            "thoi han", "thoi hieu", "bao lau", "cham nhat", "may ngay",
+            "may thang", "thoi gian nao",
+        ))
+        or re.search(r"\bbao nhieu\s+(?:ngay|thang|nam)\b", text)
+    ):
+        facets.append("deadline")
+    add(
+        "condition",
+        "dieu kien", "truong hop nao", "doi tuong nao", "muc thu nhap",
+        "co phai", "phai dap ung", "duoc cap lai", "phai cap doi",
+    )
+    add(
+        "documents",
+        "ho so", "giay to", "can nop gi", "duoc cap gi", "trich luc",
+        "hop phap hoa", "dich sang tieng viet",
+    )
+    add(
+        "amount_basis",
+        "muc thu", "muc phat", "muc huong", "muc thu nhap",
+        "bao nhieu tien", "dua tren can cu", "xac dinh dua tren",
+    )
+    add("sanction", "xu phat", "bi phat", "muc phat")
+    add(
+        "remedy",
+        "khac phuc", "phai lam gi", "tam dinh chi", "huy bo",
+        "tra lai tai san", "khoi phuc",
+    )
+    add(
+        "scope",
+        "ap dung cho", "hoat dong nao", "doi tuong nao", "pham vi nao",
+    )
+    add(
+        "action",
+        "cap, gia han", "cap gia han", "gia han hoac thu hoi",
+        "cap doi hoac duoc cap lai", "cap doi, cap lai",
+    )
+    add(
+        "exception",
+        "khi khong", "mien", "truong hop dac biet", "cap doi hoac",
+        "nhap, tro lai hoac thoi quoc tich", "tinh trang khan cap",
+        "khong to chuc day hoc",
+    )
+    if (
+        "khieu nai" in text
+        and any(marker in text for marker in ("cach phuc vu", "thai do phuc vu"))
+        and any(marker in text for marker in ("co phai", "loai don", "phan loai"))
+    ):
+        facets.append("feedback_classification")
+    return tuple(facets)
+
+
+def _facet_supported(facet: str, text: str) -> bool:
+    if facet == "authority":
+        return bool(re.search(
+            r"\b(?:uy ban nhan dan|ubnd|co quan|bo tu phap|so tu phap|"
+            r"phong tu phap|cong chuc tu phap|nguoi than thich|vo|chong|"
+            r"cha|me|con)\b",
+            text,
+        ))
+    if facet == "deadline":
+        return bool(
+            re.search(r"\b\d+[.,]?\d*\s*(?:ngay|thang|nam|gio)\b", text)
+            or any(marker in text for marker in (
+                "thoi han", "thoi gian con lai", "ngay lam viec",
+                "so thang hoc thuc te", "so thang thuc hoc",
+            ))
+        )
+    if facet == "condition":
+        return any(marker in text for marker in (
+            "dieu kien", "truong hop", "doi tuong", "thu nhap",
+            "doc than", "ket hon", "cap doi", "cap lai", "bi mat",
+            "hu hong", "thay doi", "cai chinh",
+        ))
+    if facet == "documents":
+        return any(marker in text for marker in (
+            "ho so", "giay to", "ban sao", "trich luc", "xac nhan thong tin",
+            "hop phap hoa lanh su", "dich sang tieng viet",
+            "chung thuc chu ky nguoi dich",
+        ))
+    if facet == "amount_basis":
+        return bool(
+            re.search(r"\b\d+[.,]?\d*\s*(?:trieu|dong|phan tram|%)\b", text)
+            or any(marker in text for marker in (
+                "muc thu", "can cu", "khoi luong", "muc do doc hai",
+                "thu nhap", "so thang hoc thuc te", "so thang thuc hoc",
+            ))
+        )
+    if facet == "sanction":
+        return "phat" in text and bool(
+            re.search(r"\b\d+[.,]?\d*\s*(?:trieu|dong)\b", text)
+        )
+    if facet == "remedy":
+        return any(marker in text for marker in (
+            "bien phap khac phuc", "tam dinh chi", "huy bo", "tra lai tai san",
+            "khoi phuc lai tinh trang", "dung thi hanh",
+        ))
+    if facet == "scope":
+        return any(marker in text for marker in (
+            "san pham", "hang hoa", "xa thai", "khai thac khoang san",
+            "doi tuong", "pham vi", "hoat dong",
+        ))
+    if facet == "action":
+        return all(marker in text for marker in ("cap", "gia han", "thu hoi")) or all(
+            marker in text for marker in ("cap doi", "cap lai")
+        )
+    if facet == "exception":
+        return any(marker in text for marker in (
+            "khong thu", "mien", "truong hop", "cap doi", "cap lai",
+            "nhap quoc tich", "tro lai quoc tich", "thoi quoc tich",
+        ))
+    if facet == "feedback_classification":
+        return any(marker in text for marker in (
+            "kien nghi", "phan anh", "khong phai la khieu nai",
+            "khong phai khieu nai",
+        ))
+    return False
+
+
+def assess_requested_facets(
+    *,
+    question: str,
+    answer: str,
+    sources: Sequence[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
+    """Find requested facets omitted from an answer but present in evidence.
+
+    This check never supplies a legal fact. It merely determines whether a
+    bounded completion pass is allowed to re-read the existing evidence.
+    """
+
+    requested = requested_answer_facets(question)
+    answer_text = _fold(answer)
+    evidence_text = _fold(
+        " ".join(
+            str(source.get(field) or "")
+            for source in sources
+            for field in (
+                "article_title", "chunk_heading", "clean_matched_child_content",
+                "matched_child_content", "clean_content", "content",
+            )
+        )
+    )
+    covered = tuple(
+        facet for facet in requested if _facet_supported(facet, answer_text)
+    )
+    evidence_available = tuple(
+        facet for facet in requested if _facet_supported(facet, evidence_text)
+    )
+    missing = tuple(facet for facet in requested if facet not in covered)
+    repairable = tuple(
+        facet for facet in missing if facet in evidence_available
+    )
+    unsupported = tuple(
+        facet for facet in missing if facet not in evidence_available
+    )
+    return {
+        "requested": list(requested),
+        "covered": list(covered),
+        "evidence_available": list(evidence_available),
+        "missing": list(missing),
+        "repairable_missing": list(repairable),
+        "unsupported_missing": list(unsupported),
+        "completion_allowed": bool(repairable),
+    }
+
+
 def _matching_exact_sources(
     question: str,
     sources: Sequence[Mapping[str, Any]],
@@ -253,6 +436,49 @@ def _trace_coverage_ratio(trace: Mapping[str, Any] | None) -> float | None:
     return None
 
 
+def _postcheck_complete(trace: Mapping[str, Any] | None) -> bool:
+    """Return whether the final provider answer passed the direct postcheck.
+
+    Direct Markdown answers do not necessarily contain a legacy ``Kết luận``
+    section, so completeness cannot rely on heading parsing alone. This
+    helper accepts only the explicit postcheck contract and never infers
+    completeness from citation count or facet labels.
+    """
+
+    if not isinstance(trace, Mapping):
+        return False
+    candidates: list[Mapping[str, Any]] = [trace]
+    nested = trace.get("claim_validation")
+    if isinstance(nested, Mapping):
+        candidates.append(nested)
+    for candidate in candidates:
+        claims = [
+            item
+            for item in candidate.get("checked_claims") or []
+            if isinstance(item, Mapping)
+            and str(item.get("status") or "").casefold() in {"supported", "verified"}
+        ]
+        rejected = [
+            item
+            for item in candidate.get("rejected_claims") or []
+            if isinstance(item, Mapping)
+        ]
+        missing = [
+            str(item).strip()
+            for item in candidate.get("missing_facets") or []
+            if str(item).strip()
+        ]
+        if (
+            candidate.get("post_generation_validation") is True
+            and candidate.get("recheck_passed") is True
+            and claims
+            and not rejected
+            and not missing
+        ):
+            return True
+    return False
+
+
 def assess_answer_completeness(
     *,
     question: str,
@@ -298,6 +524,11 @@ def assess_answer_completeness(
         coverage_ratio = (
             sum(covered_flags) / len(covered_flags) if covered_flags else 0.0
         )
+    elif _postcheck_complete(orchestration_trace):
+        # A direct, citation-bound factual answer has no structural units to
+        # count. The explicit postcheck result is the stronger signal for
+        # this narrow case, and is still conservative about missing facets.
+        coverage_ratio = 1.0
 
     required_checks = ["coverage"]
     checks: dict[str, bool] = {
@@ -359,4 +590,8 @@ def assess_answer_completeness(
     }
 
 
-__all__ = ["assess_answer_completeness"]
+__all__ = [
+    "assess_answer_completeness",
+    "assess_requested_facets",
+    "requested_answer_facets",
+]

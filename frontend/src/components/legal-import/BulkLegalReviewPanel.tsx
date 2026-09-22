@@ -14,6 +14,7 @@ import type {
   FormResolutionCampaignShortlist,
   FormResolutionCampaignStatus,
 } from '@/lib/api/legal-import'
+import { systemStatusLabel } from '@/lib/utils/system-labels'
 
 interface BulkLegalReviewPanelProps {
   preview: FormLegalReviewPreview | null
@@ -26,6 +27,33 @@ interface BulkLegalReviewPanelProps {
   campaignShortlist?: FormResolutionCampaignShortlist | null
   campaignRunning?: boolean
   onRunCampaign?: () => void
+}
+
+const REVIEW_REASON_LABELS: Record<string, string> = {
+  NO_UNAMBIGUOUS_OFFICIAL_SOURCE_MATCH: 'Chưa xác định được một nguồn Nhà nước duy nhất',
+  OFFICIAL_FILE_MAPPING_UNRESOLVED: 'Chưa ghép được tệp nguồn với đúng thủ tục',
+  OFFICIAL_PACKAGE_FILE_RETRY_REQUIRED: 'Cần tải lại tệp từ nguồn chính thức',
+  OFFICIAL_EFORM_REQUIRES_SEPARATE_GATE: 'Biểu mẫu điện tử cần được kiểm tra riêng',
+  VERIFIED_DATA_GAP: 'Thiếu dữ liệu đã xác minh',
+  NOT_EFFECTIVE: 'Biểu mẫu chưa có hiệu lực',
+  EXPIRED: 'Biểu mẫu đã hết hiệu lực',
+}
+
+function reviewReasonLabel(value: string) {
+  return REVIEW_REASON_LABELS[value] || 'Cần kiểm tra thêm dữ liệu nguồn'
+}
+
+function campaignStageLabel(value?: string | null) {
+  const labels: Record<string, string> = {
+    discovery: 'Tìm nguồn chính thức',
+    download: 'Tải tệp nguồn',
+    validation: 'Kiểm tra dữ liệu',
+    mapping: 'Ghép biểu mẫu với thủ tục',
+    attestation: 'Chờ xác nhận pháp lý',
+    release: 'Kiểm tra trước khi phát hành',
+    completed: 'Đã hoàn tất',
+  }
+  return labels[String(value || '').trim().toLowerCase()] || 'Đang xử lý'
 }
 
 function reviewItemKey(
@@ -59,7 +87,7 @@ function MetadataRow({
       <div className="flex flex-wrap items-center gap-2">
         <h4 className="font-medium">{item.canonical_name || item.canonical_form_id}</h4>
         {item.form_code && <Badge variant="outline">Mã: {item.form_code}</Badge>}
-        <Badge variant="outline">{item.review_status || 'chưa rõ trạng thái'}</Badge>
+        <Badge variant="outline">{systemStatusLabel(item.review_status)}</Badge>
         {excluded && <Badge variant="destructive">Không được duyệt</Badge>}
       </div>
       <dl className="grid gap-2 text-sm md:grid-cols-2">
@@ -70,7 +98,7 @@ function MetadataRow({
           </div>
         )}
         <div>
-          <dt className="text-muted-foreground">procedure_id</dt>
+            <dt className="text-muted-foreground">Mã thủ tục</dt>
           <dd className="font-mono text-xs">{item.procedure_id || 'Thiếu'}</dd>
         </div>
         <div>
@@ -89,7 +117,7 @@ function MetadataRow({
         </div>
         <div>
           <dt className="text-muted-foreground">Trạng thái pháp lý</dt>
-          <dd>{item.legal_review_status || 'not_reviewed'}</dd>
+          <dd>{systemStatusLabel(item.legal_review_status, 'Chưa kiểm tra')}</dd>
         </div>
         {item.issuing_instrument && (
           <div>
@@ -106,12 +134,12 @@ function MetadataRow({
       </dl>
       <div className="space-y-1 text-xs">
         <p>
-          <span className="text-muted-foreground">File: </span>
-          <span className="break-all">{item.local_path || 'Thiếu file'}</span>
+          <span className="text-muted-foreground">Tệp lưu trữ: </span>
+          <span className="break-all">{item.local_path || 'Chưa có tệp'}</span>
         </p>
         <p>
-          <span className="text-muted-foreground">Checksum: </span>
-          <span className="break-all font-mono">{item.sha256 || 'Thiếu checksum'}</span>
+          <span className="text-muted-foreground">Mã kiểm tra tệp: </span>
+          <span className="break-all font-mono">{item.sha256 || 'Chưa có mã kiểm tra'}</span>
         </p>
         <p>
           <span className="text-muted-foreground">Căn cứ pháp lý: </span>
@@ -144,20 +172,20 @@ function MetadataRow({
         <div className="flex flex-wrap gap-2">
           {item.reason_codes.map((reason) => (
             <Badge key={reason} variant="outline">
-              {reason}
+              {reviewReasonLabel(reason)}
             </Badge>
           ))}
         </div>
       )}
       {item.effectivity_reason_code && (
         <p className="text-xs text-muted-foreground">
-          Hiệu lực: <span className="font-mono">{item.effectivity_reason_code}</span>
+          Hiệu lực: {reviewReasonLabel(item.effectivity_reason_code)}
         </p>
       )}
       {item.exclusion_reason_codes?.length ? (
         <div className="flex flex-wrap gap-2">
           {item.exclusion_reason_codes.map((reason) => (
-            <Badge key={reason} variant="destructive">{reason}</Badge>
+            <Badge key={reason} variant="destructive">{reviewReasonLabel(reason)}</Badge>
           ))}
         </div>
       ) : null}
@@ -219,7 +247,7 @@ export function BulkLegalReviewPanel({
       count: preview?.reason_counts.OFFICIAL_PACKAGE_FILE_RETRY_REQUIRED ?? 0,
     },
     {
-      label: 'eForm cần kiểm tra riêng',
+      label: 'Biểu mẫu điện tử cần kiểm tra riêng',
       count: preview?.reason_counts.OFFICIAL_EFORM_REQUIRES_SEPARATE_GATE ?? 0,
     },
   ].filter((item) => item.count > 0)
@@ -234,7 +262,7 @@ export function BulkLegalReviewPanel({
           </CardTitle>
           <CardDescription>
             Đây là quyết định của người đang đăng nhập. Hệ thống chỉ đồng bộ những
-            biểu mẫu vượt toàn bộ hard gate và không tự động phê duyệt pháp lý.
+            biểu mẫu đáp ứng đầy đủ điều kiện bắt buộc và không tự động phê duyệt pháp lý.
           </CardDescription>
         </div>
       </CardHeader>
@@ -245,15 +273,15 @@ export function BulkLegalReviewPanel({
             <div>
               <p className="font-medium text-blue-950">Tự động hoàn thiện nguồn biểu mẫu</p>
               <p className="mt-1 text-sm text-blue-800">
-                Hệ thống tự tìm nguồn Nhà nước, tải và kiểm tra file, checksum, thủ tục và hiệu lực.
+                Hệ thống tự tìm nguồn Nhà nước, tải và kiểm tra tệp, tính toàn vẹn, thủ tục và hiệu lực.
                 Biểu mẫu chỉ được chuyển tới danh sách xác nhận; không có quyết định pháp lý tự động.
               </p>
               {campaignStatus && campaignStatus.status !== 'not_started' ? (
                 <p className="mt-2 text-xs text-blue-800" data-testid="form-campaign-status">
-                  Trạng thái: {campaignStatus.status} · Công đoạn: {campaignStatus.stage}
+                  Trạng thái: {systemStatusLabel(campaignStatus.status)} · Công đoạn: {campaignStageLabel(campaignStatus.stage)}
                   {campaignStatus.schema_version === 'form-resolution-campaign-v1' ? (
                     <>
-                      {' · '}Bản ghi liên kết đạt cổng kỹ thuật:{' '}
+                      {' · '}Bản ghi liên kết đạt điều kiện:{' '}
                       {campaignStatus.counts.ready_for_attestation ?? 0}
                       {' · '}Bản ghi liên kết còn vướng:{' '}
                       {campaignStatus.counts.remaining_unresolved
@@ -284,7 +312,7 @@ export function BulkLegalReviewPanel({
               {campaignRunning
                 ? 'Đang tự động xử lý...'
                 : campaignPreviewInvalid
-                  ? 'Tạo lại lô từ checksum mới'
+                  ? 'Tạo lại lô từ dữ liệu nguồn mới'
                   : 'Tự động xử lý biểu mẫu còn lại'}
             </Button>
           </div>
@@ -293,16 +321,16 @@ export function BulkLegalReviewPanel({
         {campaignStatus?.schema_version === 'form-resolution-campaign-v1' ? (
           <details open={hasReviewItems} className="rounded-lg border bg-muted/10 p-3">
             <summary className="cursor-pointer font-medium">
-              Tình trạng kỹ thuật: <span data-testid="form-campaign-status">{campaignStatus.status} · {campaignStatus.stage}</span>
+              Tình trạng xử lý: <span data-testid="form-campaign-status">{systemStatusLabel(campaignStatus.status)} · {campaignStageLabel(campaignStatus.stage)}</span>
             </summary>
             <div className="mt-3 space-y-3">
             {(campaignStatus.manifest_drift || campaignStatus.source_snapshot_drift) ? (
               <div className="rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-900" data-testid="form-manifest-drift">
-                Dữ liệu nguồn đã thay đổi checksum. Chiến dịch bị khóa cho đến khi tạo lại baseline.
+                Dữ liệu nguồn đã thay đổi. Lô xử lý bị khóa cho đến khi tạo lại từ dữ liệu mới.
               </div>
             ) : (
               <div className="rounded-lg border border-green-300 bg-green-50 p-3 text-sm text-green-900" data-testid="form-manifest-stable">
-                Manifest và bản chụp nguồn khớp checksum; có thể tiếp tục xử lý ứng viên.
+                Dữ liệu kiểm tra khớp với nguồn; có thể tiếp tục xử lý các biểu mẫu đề xuất.
               </div>
             )}
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -318,8 +346,8 @@ export function BulkLegalReviewPanel({
                 </div>
               ))}
             </div>
-            <p className="break-all font-mono text-xs text-muted-foreground">
-              Manifest: {campaignStatus.manifest_sha256 || 'chưa khóa'}
+            <p className="text-xs text-muted-foreground">
+              Tính toàn vẹn của lô: {campaignStatus.manifest_sha256 ? 'Đã xác nhận' : 'Chưa xác nhận'}
             </p>
             </div>
           </details>
@@ -341,7 +369,7 @@ export function BulkLegalReviewPanel({
             </div>
             <div className="mt-3 flex flex-wrap gap-2">
               {Object.entries(campaignStatus.reason_counts).map(([reason, count]) => (
-                <Badge key={reason} variant="outline">{reason}: {count}</Badge>
+                <Badge key={reason} variant="outline">{reviewReasonLabel(reason)}: {count}</Badge>
               ))}
             </div>
           </div>
@@ -350,7 +378,7 @@ export function BulkLegalReviewPanel({
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
           {[
             ['Biểu mẫu đang quản lý', activeCatalog],
-            ['Đạt hard gate', eligible],
+            ['Đạt điều kiện bắt buộc', eligible],
             ['Cần bổ sung', preview?.summary.excluded_forms ?? 0],
             ['Đã xác nhận trước đó', preview?.summary.already_approved_forms ?? 0],
             ['Không có mẫu nhà nước', catalogExcluded],
@@ -383,7 +411,7 @@ export function BulkLegalReviewPanel({
             <div className="mt-3 flex flex-wrap gap-2">
               {Object.entries(preview?.reason_counts || {}).map(([reason, count]) => (
                 <Badge key={reason} variant="outline">
-                  {reason}: {count}
+                  {reviewReasonLabel(reason)}: {count}
                 </Badge>
               ))}
             </div>
@@ -422,11 +450,11 @@ export function BulkLegalReviewPanel({
         {hasReviewItems && preview?.catalog_excluded_items?.length ? (
           <details>
             <summary className="cursor-pointer font-medium">
-              Đã loại khỏi catalog phục vụ
+              Đã loại khỏi danh mục phục vụ
             </summary>
             <p className="mt-2 text-sm text-muted-foreground">
               Các bản ghi này không có biểu mẫu được liệt kê tại nguồn thủ tục chính thức.
-              Hệ thống giữ metadata để kiểm toán nhưng không đưa vào hàng chờ duyệt hoặc trả cho người dùng.
+              Hệ thống giữ thông tin mô tả để kiểm tra lịch sử nhưng không đưa vào hàng chờ duyệt hoặc trả cho người dùng.
             </p>
             <div className="mt-3 space-y-3">
               {preview.catalog_excluded_items.map((item, index) => (
@@ -474,7 +502,7 @@ export function BulkLegalReviewPanel({
 
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <p className="text-xs text-muted-foreground">
-            reviewer_id được lấy từ tài khoản Admin đang đăng nhập và không thể sửa tại đây.
+            Người xác nhận được lấy từ tài khoản quản trị viên đang đăng nhập và không thể sửa tại đây.
           </p>
           <Button
             type="button"

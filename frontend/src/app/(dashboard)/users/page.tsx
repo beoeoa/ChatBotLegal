@@ -1,8 +1,8 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import Link from 'next/link'
-import { ArrowLeft, BookOpenText, Building2, Clock3, ExternalLink, Eye, History, KeyRound, LockKeyhole, Mail, MoreHorizontal, Pencil, Phone, Plus, RefreshCw, RotateCcw, Search, ShieldCheck, SlidersHorizontal, Trash2, Unlock, UserCheck, UserMinus, UsersRound, UserX } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { BookOpenText, Building2, Clock3, ExternalLink, Eye, History, KeyRound, LockKeyhole, Mail, MoreHorizontal, Pencil, Phone, Plus, RefreshCw, RotateCcw, Search, ShieldCheck, SlidersHorizontal, Trash2, Unlock, UserCheck, UserMinus, UsersRound, UserX } from 'lucide-react'
+import { toast } from 'sonner'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -22,6 +22,9 @@ import {
   type AccountAction,
   validateAccountContactInput,
 } from '@/lib/utils/user-account-actions'
+import { formatApiError } from '@/lib/utils/error-handler'
+import { activityActionLabel, roleLabel } from '@/lib/utils/system-labels'
+import type { SettingsResponse } from '@/lib/types/api'
 
 type UserRole = 'citizen' | 'officer' | 'admin'
 
@@ -40,6 +43,7 @@ type ManagedUser = {
     phone?: string
     ward?: string
     department?: string
+    organization_unit_id?: string | null
     allowed_domains?: string[]
     job_title?: string
     notes?: string
@@ -90,12 +94,20 @@ type AccountForm = {
   phone: string
   ward: string
   department: string
+  organization_unit_id: string
   allowed_domains: string[]
   job_title: string
   notes: string
 }
 
 const DEFAULT_WARD = 'Phường Lê Chân, Hải Phòng'
+const DAY_IN_MS = 24 * 60 * 60 * 1000
+
+export function futureDateTimeLocal(days: number, now = new Date()): string {
+  const expiresAt = new Date(now.getTime() + days * DAY_IN_MS)
+  const localTimestamp = new Date(expiresAt.getTime() - expiresAt.getTimezoneOffset() * 60_000)
+  return localTimestamp.toISOString().slice(0, 16)
+}
 
 const ROLE_LABEL: Record<UserRole, string> = {
   citizen: 'Người dân',
@@ -123,15 +135,6 @@ const GROUNDING_STATUS_LABEL: Record<string, string> = {
   unknown: 'Chưa xác định',
 }
 
-const DEPARTMENT_OPTIONS = [
-  { value: 'Tư pháp - Hộ tịch', domains: ['ho_tich_chung_thuc'] },
-  { value: 'Địa chính - Xây dựng', domains: ['dat_dai_xay_dung'] },
-  { value: 'Văn hóa - Xã hội', domains: ['an_sinh_y_te_giao_duc'] },
-  { value: 'Hành chính công', domains: ['hanh_chinh_cong'] },
-  { value: 'Trật tự đô thị', domains: ['trat_tu_do_thi'] },
-  { value: 'Khiếu nại - Tố cáo - Xử phạt', domains: ['khieu_nai_to_cao_xu_phat'] },
-] as const
-
 const DOMAIN_LABEL: Record<string, string> = {
   ho_tich_chung_thuc: 'Hộ tịch và chứng thực',
   ho_tich: 'Hộ tịch',
@@ -158,6 +161,7 @@ function createEmptyForm(): AccountForm {
     phone: '',
     ward: DEFAULT_WARD,
     department: '',
+    organization_unit_id: '',
     allowed_domains: [],
     job_title: '',
     notes: '',
@@ -172,8 +176,15 @@ function formatDateTime(value?: string | null) {
 }
 
 function errorMessage(detail: unknown, fallback: string) {
-  if (typeof detail === 'string' && detail.trim()) return detail
-  return fallback
+  return formatApiError({ detail }, fallback)
+}
+
+type OfficerUnitGrant = {
+  id: string
+  organization_unit_id: string
+  domain_codes: string[]
+  reason: string
+  expires_at: string
 }
 
 function domainLabel(domain: string) {
@@ -203,16 +214,31 @@ export default function UsersPage() {
   const currentUserId = useAuthStore((state) => state.userId)
 
   const [users, setUsers] = useState<ManagedUser[]>([])
+  const [organizationUnits, setOrganizationUnits] = useState<Array<{ id: string; name: string; domain_codes: string[]; is_active: boolean }>>([])
+  const [organizationRoutingMode, setOrganizationRoutingMode] = useState<
+    'legacy' | 'shadow' | 'hybrid' | 'unit_primary'
+  >('legacy')
+  const [unitGrants, setUnitGrants] = useState<OfficerUnitGrant[]>([])
+  const [grantUnitId, setGrantUnitId] = useState('')
+  const [grantDomains, setGrantDomains] = useState<string[]>([])
+  const [grantReason, setGrantReason] = useState('')
+  const [grantExpiresAt, setGrantExpiresAt] = useState('')
+  const [savingGrant, setSavingGrant] = useState(false)
   const [form, setForm] = useState<AccountForm>(createEmptyForm)
   const [editingUserId, setEditingUserId] = useState<string | null>(null)
   const [formOpen, setFormOpen] = useState(false)
-  const [customDepartment, setCustomDepartment] = useState(false)
   const [searchText, setSearchText] = useState('')
-  const [statusFilter, setStatusFilter] = useState<AccountStatusFilter>('all')
+  // Tombstoned test/legacy accounts remain available through the explicit
+  // “Đã xóa” filter, but should not dominate the initial working list.
+  const [statusFilter, setStatusFilter] = useState<AccountStatusFilter>('active')
   const [roleFilter, setRoleFilter] = useState<'all' | UserRole>('all')
   const [page, setPage] = useState(1)
   const [loading, setLoading] = useState(true)
   const [submitting, setSubmitting] = useState(false)
+  // Keep a synchronous lock in addition to the disabled button. React state
+  // updates happen after the event handler returns, so a rapid double-click
+  // could otherwise start two POST requests before the button re-renders.
+  const submitLockRef = useRef(false)
   const [message, setMessage] = useState<string | null>(null)
   const [detailUser, setDetailUser] = useState<ManagedUser | null>(null)
   const [editReason, setEditReason] = useState('')
@@ -262,6 +288,27 @@ export default function UsersPage() {
     return nextHeaders
   }, [role, token])
 
+  useEffect(() => {
+    if (role !== 'admin') return
+    void getApiUrl()
+      .then((apiUrl) => fetch(`${apiUrl}/api/settings`, { headers, cache: 'no-store' }))
+      .then(async (response): Promise<Partial<SettingsResponse>> => (
+        response?.ok ? await response.json() as SettingsResponse : {}
+      ))
+      .then((settings: Partial<SettingsResponse>) => {
+        setOrganizationUnits(
+          Array.isArray(settings.organization_units)
+            ? settings.organization_units
+            : []
+        )
+        setOrganizationRoutingMode(settings.organization_routing_mode || 'legacy')
+      })
+      .catch(() => {
+        setOrganizationUnits([])
+        setOrganizationRoutingMode('legacy')
+      })
+  }, [headers, role])
+
   const loadUsers = useCallback(async () => {
     if (authRequired !== false && role !== 'admin') {
       setLoading(false)
@@ -276,7 +323,7 @@ export default function UsersPage() {
       if (!response.ok) throw new Error(errorMessage(data.detail, 'Không tải được danh sách tài khoản.'))
       setUsers(Array.isArray(data) ? data : [])
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Không tải được danh sách tài khoản.')
+      setMessage(formatApiError(error, 'Không tải được danh sách tài khoản.'))
     } finally {
       setLoading(false)
     }
@@ -307,7 +354,7 @@ export default function UsersPage() {
       setAuditLogs(Array.isArray(data) ? data : [])
     } catch (error) {
       setAuditLogs([])
-      setAuditError(error instanceof Error ? error.message : 'Không tải được lịch sử thao tác.')
+      setAuditError(formatApiError(error, 'Không tải được lịch sử thao tác.'))
     } finally {
       setAuditLoading(false)
     }
@@ -340,7 +387,7 @@ export default function UsersPage() {
       setAskHistoryRows(Array.isArray(data) ? data : [])
     } catch (error) {
       setAskHistoryRows([])
-      setAskHistoryError(error instanceof Error ? error.message : 'Không tải được lịch sử hỏi đáp.')
+      setAskHistoryError(formatApiError(error, 'Không tải được lịch sử hỏi đáp.'))
     } finally {
       setAskHistoryLoading(false)
     }
@@ -400,11 +447,15 @@ export default function UsersPage() {
     setForm(createEmptyForm())
     setEditingUserId(null)
     setEditReason('')
-    setCustomDepartment(false)
+    setUnitGrants([])
+    setGrantUnitId('')
+    setGrantReason('')
+    setGrantExpiresAt('')
   }
 
   const openCreateForm = () => {
     resetForm()
+    setMessage(null)
     setFormOpen(true)
   }
 
@@ -420,13 +471,94 @@ export default function UsersPage() {
       phone: user.profile?.phone || '',
       ward: user.profile?.ward || DEFAULT_WARD,
       department,
+      organization_unit_id: user.profile?.organization_unit_id || '',
       allowed_domains: user.profile?.allowed_domains || [],
       job_title: user.profile?.job_title || '',
       notes: user.profile?.notes || '',
     })
-    setCustomDepartment(Boolean(department) && !DEPARTMENT_OPTIONS.some((item) => item.value === department))
     setEditReason('')
+    setMessage(null)
     setFormOpen(true)
+    setUnitGrants([])
+    if (user.role === 'officer' && organizationRoutingMode !== 'legacy') {
+      void loadUnitGrants(user.id)
+    }
+  }
+
+  const loadUnitGrants = async (userId: string) => {
+    try {
+      const apiUrl = await getApiUrl()
+      const response = await fetch(`${apiUrl}/api/users/${userId}/unit-grants`, {
+        headers,
+        cache: 'no-store'
+      })
+      const data = await response.json()
+      if (!response.ok) throw new Error(errorMessage(data.detail, 'Không tải được quyền hỗ trợ liên phòng.'))
+      setUnitGrants(Array.isArray(data) ? data : [])
+    } catch (error) {
+      setMessage(formatApiError(error, 'Không tải được quyền hỗ trợ liên phòng.'))
+    }
+  }
+
+  const addUnitGrant = async () => {
+    if (!editingUserId || !grantUnitId || grantReason.trim().length < 5 || !grantExpiresAt) {
+      setMessage('Chọn phòng ban, thời hạn và nhập lý do cấp quyền hỗ trợ.')
+      return
+    }
+    const unit = organizationUnits.find((item) => item.id === grantUnitId)
+    if (!unit) return
+    setSavingGrant(true)
+    try {
+      const apiUrl = await getApiUrl()
+      const response = await fetch(`${apiUrl}/api/users/${editingUserId}/unit-grants`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { ...headers, ...sessionSecurityHeaders('POST') },
+        body: JSON.stringify({
+          organization_unit_id: unit.id,
+            domain_codes: grantDomains,
+          reason: grantReason.trim(),
+          expires_at: new Date(grantExpiresAt).toISOString()
+        })
+      })
+      const data = await response.json()
+      if (!response.ok) throw new Error(errorMessage(data.detail, 'Không thể cấp quyền hỗ trợ liên phòng.'))
+        setGrantUnitId('')
+        setGrantDomains([])
+      setGrantReason('')
+      setGrantExpiresAt('')
+      await loadUnitGrants(editingUserId)
+      toast.success('Đã cấp quyền hỗ trợ liên phòng có thời hạn.')
+    } catch (error) {
+      setMessage(formatApiError(error, 'Không thể cấp quyền hỗ trợ liên phòng.'))
+    } finally {
+      setSavingGrant(false)
+    }
+  }
+
+  const revokeUnitGrant = async (grant: OfficerUnitGrant) => {
+    if (!editingUserId || !window.confirm('Thu hồi quyền hỗ trợ liên phòng này?')) return
+    try {
+      const apiUrl = await getApiUrl()
+      const response = await fetch(
+        `${apiUrl}/api/users/${editingUserId}/unit-grants/${encodeURIComponent(grant.id)}`,
+        {
+          method: 'DELETE',
+          credentials: 'include',
+          headers: {
+            ...headers,
+            'X-Business-Reason': encodeBusinessReason('Thu hồi quyền hỗ trợ liên phòng theo quyết định quản trị'),
+            ...sessionSecurityHeaders('DELETE')
+          }
+        }
+      )
+      const data = await response.json()
+      if (!response.ok) throw new Error(errorMessage(data.detail, 'Không thể thu hồi quyền hỗ trợ.'))
+      await loadUnitGrants(editingUserId)
+      toast.success('Đã thu hồi quyền hỗ trợ liên phòng.')
+    } catch (error) {
+      setMessage(formatApiError(error, 'Không thể thu hồi quyền hỗ trợ.'))
+    }
   }
 
   const updateRole = (nextRole: UserRole) => {
@@ -434,29 +566,15 @@ export default function UsersPage() {
       ...current,
       role: nextRole,
       department: nextRole === 'officer' ? current.department : '',
+      organization_unit_id: nextRole === 'officer' ? current.organization_unit_id : '',
       allowed_domains: nextRole === 'officer' ? current.allowed_domains : [],
       job_title: nextRole === 'officer' ? current.job_title : '',
-    }))
-    if (nextRole !== 'officer') setCustomDepartment(false)
-  }
-
-  const selectDepartment = (value: string) => {
-    if (value === '__custom__') {
-      setCustomDepartment(true)
-      setForm((current) => ({ ...current, department: '', allowed_domains: [] }))
-      return
-    }
-    const option = DEPARTMENT_OPTIONS.find((item) => item.value === value)
-    setCustomDepartment(false)
-    setForm((current) => ({
-      ...current,
-      department: value,
-      allowed_domains: option ? [...option.domains] : current.allowed_domains,
     }))
   }
 
   const handleSave = async () => {
     const isEditing = Boolean(editingUserId)
+    if (submitting || submitLockRef.current) return
     if (form.username.trim().length < 3) {
       setMessage('Tên đăng nhập cần có ít nhất 3 ký tự.')
       return
@@ -470,8 +588,11 @@ export default function UsersPage() {
       setMessage('Mật khẩu khởi tạo cần có ít nhất 12 ký tự.')
       return
     }
-    if (form.role === 'officer' && !form.department.trim()) {
-      setMessage('Vui lòng chọn hoặc nhập đơn vị công tác của cán bộ.')
+    if (
+      form.role === 'officer' &&
+      !form.organization_unit_id
+    ) {
+      setMessage('Vui lòng chọn phòng ban chính của cán bộ.')
       return
     }
     if (isEditing && editReason.trim().length < 3) {
@@ -479,6 +600,7 @@ export default function UsersPage() {
       return
     }
 
+    submitLockRef.current = true
     setSubmitting(true)
     setMessage(null)
     try {
@@ -491,7 +613,8 @@ export default function UsersPage() {
         full_name: form.full_name.trim(),
         phone: form.phone.trim(),
         ward: form.ward.trim() || DEFAULT_WARD,
-        department: form.role === 'officer' ? form.department.trim() : '',
+      department: form.role === 'officer' ? form.department.trim() : '',
+        organization_unit_id: form.role === 'officer' ? form.organization_unit_id || null : null,
         allowed_domains: form.role === 'officer' ? form.allowed_domains : [],
         job_title: form.role === 'officer' ? form.job_title.trim() : '',
         notes: form.notes.trim(),
@@ -511,13 +634,18 @@ export default function UsersPage() {
       )
       const data = await response.json()
       if (!response.ok) throw new Error(errorMessage(data.detail, 'Không thể lưu tài khoản.'))
-      setMessage(isEditing ? 'Đã cập nhật tài khoản.' : 'Đã tạo tài khoản mới.')
+      const successMessage = isEditing
+        ? `Đã cập nhật tài khoản ${payload.username} thành công.`
+        : `Đã tạo tài khoản ${payload.username} thành công.`
+      setMessage(successMessage)
+      toast.success(successMessage)
       resetForm()
       setFormOpen(false)
       await loadUsers()
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Không thể lưu tài khoản.')
+      setMessage(formatApiError(error, 'Không thể lưu tài khoản.'))
     } finally {
+      submitLockRef.current = false
       setSubmitting(false)
     }
   }
@@ -573,7 +701,7 @@ export default function UsersPage() {
       setAction(null)
       await loadUsers()
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Không thể thực hiện thao tác.')
+      setMessage(formatApiError(error, 'Không thể thực hiện thao tác.'))
     } finally {
       setSubmitting(false)
     }
@@ -668,11 +796,60 @@ export default function UsersPage() {
               <div className="space-y-4 rounded-xl border border-primary/15 bg-primary/[0.035] p-4">
                 <div className="flex items-start gap-3"><span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary"><Building2 className="h-4 w-4" /></span><div><h3 className="font-semibold">Phân công cán bộ</h3><p className="text-sm text-muted-foreground">Đơn vị và phạm vi quyết định dữ liệu nghiệp vụ cán bộ được sử dụng.</p></div></div>
                 <div className="grid gap-4 md:grid-cols-2">
-                  <div className="space-y-2"><Label htmlFor="department">Đơn vị công tác</Label><select id="department" className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm" value={customDepartment ? '__custom__' : form.department} onChange={(event) => selectDepartment(event.target.value)}><option value="">Chọn đơn vị</option>{DEPARTMENT_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.value}</option>)}<option value="__custom__">Đơn vị khác</option></select></div>
+                  <div className="space-y-2"><Label htmlFor="organization-unit">Đơn vị cấp 2 theo cơ cấu hệ thống</Label><select id="organization-unit" className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm" value={form.organization_unit_id} onChange={(event) => { const unit = organizationUnits.find((item) => item.id === event.target.value); setForm((current) => ({ ...current, organization_unit_id: event.target.value, department: unit?.name || current.department, allowed_domains: unit?.domain_codes || current.allowed_domains })) }}><option value="">Chưa xác định — cần quản trị viên xác nhận</option>{organizationUnits.filter((unit) => unit.is_active).map((unit) => <option key={unit.id} value={unit.id}>{unit.name}</option>)}</select></div>
+                  <div className="space-y-2"><Label>Phạm vi được kế thừa</Label><div className="min-h-10 rounded-md border bg-muted/30 px-3 py-2 text-sm">{organizationUnits.find(unit => unit.id === form.organization_unit_id && unit.is_active)?.domain_codes.map(domainLabel).join(', ') || 'Chọn phòng ban đang hoạt động để hệ thống tự xác định'}</div><p className="text-xs text-muted-foreground">Lĩnh vực được tính động từ phòng ban, không nhập độc lập tại tài khoản.</p></div>
                   <div className="space-y-2"><Label htmlFor="job-title">Chức vụ</Label><Input id="job-title" value={form.job_title} onChange={(event) => setForm({ ...form, job_title: event.target.value })} placeholder="Ví dụ: Công chức tư pháp - hộ tịch" /></div>
                 </div>
-                {customDepartment && <div className="space-y-2"><Label htmlFor="custom-department">Tên đơn vị</Label><Input id="custom-department" value={form.department} onChange={(event) => setForm({ ...form, department: event.target.value })} /></div>}
-                <details className="rounded-md border bg-background p-3"><summary className="cursor-pointer text-sm font-medium">Điều chỉnh phạm vi nghiệp vụ</summary><div className="mt-3 flex flex-wrap gap-x-5 gap-y-3">{Object.entries(DOMAIN_LABEL).map(([id, label]) => <label key={id} className="flex cursor-pointer items-center gap-2 text-sm"><input type="checkbox" checked={form.allowed_domains.includes(id)} onChange={(event) => setForm((current) => ({ ...current, allowed_domains: event.target.checked ? [...current.allowed_domains, id] : current.allowed_domains.filter((domain) => domain !== id) }))} />{label}</label>)}</div></details>
+                {editingUserId && organizationRoutingMode !== 'legacy' && (
+                  <div className="space-y-3 rounded-lg border bg-background p-3">
+                    <div>
+                      <p className="text-sm font-medium">Hỗ trợ liên phòng có thời hạn</p>
+                      <p className="text-xs text-muted-foreground">Không sửa lĩnh vực của tài khoản. Mỗi quyền đều có lý do, ngày hết hạn và lịch sử quản trị.</p>
+                    </div>
+                    {unitGrants.length > 0 ? (
+                      <div className="space-y-2">
+                        {unitGrants.map((grant) => (
+                          <div key={grant.id} className="flex flex-col gap-2 rounded-md border p-2 text-xs sm:flex-row sm:items-center sm:justify-between">
+                            <div>
+                              <p className="font-medium">{organizationUnits.find((unit) => unit.id === grant.organization_unit_id)?.name || 'Phòng ban hỗ trợ'}</p>
+                              <p className="text-muted-foreground">Đến {formatDateTime(grant.expires_at)} · {grant.reason}</p>
+                              <p>{grant.domain_codes.length ? grant.domain_codes.join(', ') : 'Toàn bộ phạm vi của phòng ban'}</p>
+                            </div>
+                            <Button type="button" size="sm" variant="ghost" className="text-destructive" onClick={() => void revokeUnitGrant(grant)}>Thu hồi</Button>
+                          </div>
+                        ))}
+                      </div>
+                    ) : <p className="text-xs text-muted-foreground">Chưa có quyền hỗ trợ liên phòng còn hiệu lực.</p>}
+                    <div className="grid gap-2 md:grid-cols-3">
+                      <select className="h-10 rounded-md border bg-background px-3 text-sm" value={grantUnitId} onChange={(event) => { setGrantUnitId(event.target.value); setGrantDomains([]) }} aria-label="Phòng ban hỗ trợ">
+                        <option value="">Chọn phòng ban hỗ trợ</option>
+                        {organizationUnits.filter((unit) => unit.is_active && unit.id !== form.organization_unit_id).map((unit) => <option key={unit.id} value={unit.id}>{unit.name}</option>)}
+                      </select>
+                      <div className="space-y-2">
+                        <Input type="datetime-local" value={grantExpiresAt} onChange={(event) => setGrantExpiresAt(event.target.value)} aria-label="Thời hạn quyền hỗ trợ" />
+                        <div className="flex flex-wrap gap-1" role="group" aria-label="Chọn nhanh thời hạn quyền hỗ trợ">
+                          {[1, 7, 30].map((days) => (
+                            <Button
+                              key={days}
+                              type="button"
+                              size="sm"
+                              variant="ghost"
+                              className="h-7 px-2 text-xs"
+                              onClick={() => setGrantExpiresAt(futureDateTimeLocal(days))}
+                            >
+                              {days} ngày
+                            </Button>
+                          ))}
+                        </div>
+                      </div>
+                      <Input value={grantReason} onChange={(event) => setGrantReason(event.target.value)} placeholder="Lý do cấp quyền (ít nhất 5 ký tự)" aria-label="Lý do cấp quyền" />
+                    </div>
+                    {grantUnitId && <fieldset className="space-y-2 text-sm"><legend>Giới hạn lĩnh vực hỗ trợ (không chọn để hỗ trợ toàn phòng)</legend>
+                      {organizationUnits.find(unit => unit.id === grantUnitId)?.domain_codes.map(domain => <label key={domain} className="mr-3 inline-flex items-center gap-2"><input type="checkbox" checked={grantDomains.includes(domain)} onChange={event => setGrantDomains(current => event.target.checked ? [...current, domain] : current.filter(value => value !== domain))} />{domain}</label>)}
+                    </fieldset>}
+                    <Button type="button" size="sm" variant="outline" disabled={savingGrant} onClick={() => void addUnitGrant()}>{savingGrant ? 'Đang cấp quyền...' : 'Cấp quyền hỗ trợ'}</Button>
+                  </div>
+                )}
               </div>
             )}
 
@@ -723,7 +900,8 @@ export default function UsersPage() {
                   <div className="flex items-center justify-end gap-1">
                     <Button size="icon" variant="ghost" className="h-9 w-9" onClick={() => setDetailUser(user)} aria-label={`Xem hồ sơ ${user.username}`} title="Xem hồ sơ"><Eye className="h-4 w-4" /></Button>
                     {!user.is_deleted && <Button size="icon" variant="ghost" className="h-9 w-9" onClick={() => openEditForm(user)} aria-label={`Sửa ${user.username}`} title="Sửa thông tin"><Pencil className="h-4 w-4" /></Button>}
-                    <DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className="h-9 w-9" aria-label={`Thao tác khác cho ${user.username}`}><MoreHorizontal className="h-4 w-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end" className="w-56"><DropdownMenuItem onSelect={() => openAskHistory(user)}><BookOpenText className="mr-2 h-4 w-4" />Lịch sử hỏi đáp</DropdownMenuItem><DropdownMenuItem onSelect={() => openAuditLog(user)}><History className="mr-2 h-4 w-4" />Lịch sử thao tác</DropdownMenuItem>{!user.is_deleted && <DropdownMenuItem onSelect={() => openAction('reset-password', user)}><KeyRound className="mr-2 h-4 w-4" />Đặt lại mật khẩu</DropdownMenuItem>}{!user.is_deleted && <DropdownMenuSeparator />}{!user.is_deleted && (user.is_active ? <DropdownMenuItem disabled={user.id === currentUserId} onSelect={() => openAction('deactivate', user)}><LockKeyhole className="mr-2 h-4 w-4" />Khóa tài khoản</DropdownMenuItem> : <DropdownMenuItem onSelect={() => openAction('activate', user)}><Unlock className="mr-2 h-4 w-4" />Mở khóa tài khoản</DropdownMenuItem>)}{!user.is_deleted && <DropdownMenuItem className="text-destructive focus:text-destructive" disabled={user.id === currentUserId} onSelect={() => openAction('soft-delete', user)}><Trash2 className="mr-2 h-4 w-4" />Xóa tài khoản</DropdownMenuItem>}</DropdownMenuContent></DropdownMenu>
+                    {/* This menu opens modal dialogs; non-modal avoids Radix's body pointer-lock race when the menu closes. */}
+                    <DropdownMenu modal={false}><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className="h-9 w-9" aria-label={`Thao tác khác cho ${user.username}`}><MoreHorizontal className="h-4 w-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end" className="w-56"><DropdownMenuItem onSelect={() => openAskHistory(user)}><BookOpenText className="mr-2 h-4 w-4" />Lịch sử hỏi đáp</DropdownMenuItem><DropdownMenuItem onSelect={() => openAuditLog(user)}><History className="mr-2 h-4 w-4" />Lịch sử thao tác</DropdownMenuItem>{!user.is_deleted && <DropdownMenuItem onSelect={() => openAction('reset-password', user)}><KeyRound className="mr-2 h-4 w-4" />Đặt lại mật khẩu</DropdownMenuItem>}{!user.is_deleted && <DropdownMenuSeparator />}{!user.is_deleted && (user.is_active ? <DropdownMenuItem disabled={user.id === currentUserId} onSelect={() => openAction('deactivate', user)}><LockKeyhole className="mr-2 h-4 w-4" />Khóa tài khoản</DropdownMenuItem> : <DropdownMenuItem onSelect={() => openAction('activate', user)}><Unlock className="mr-2 h-4 w-4" />Mở khóa tài khoản</DropdownMenuItem>)}{!user.is_deleted && <DropdownMenuItem className="text-destructive focus:text-destructive" disabled={user.id === currentUserId} onSelect={() => openAction('soft-delete', user)}><Trash2 className="mr-2 h-4 w-4" />Xóa tài khoản</DropdownMenuItem>}</DropdownMenuContent></DropdownMenu>
                   </div>
                 </article>
               ))}
@@ -851,7 +1029,7 @@ export default function UsersPage() {
             <div className="space-y-3">
               {auditLogs.map((log) => (
                 <div key={log.id} className="rounded-lg border p-4">
-                  <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between"><div><p className="font-medium">{AUDIT_ACTION_LABEL[log.action] || log.action}</p><p className="mt-1 text-sm text-muted-foreground">Người thực hiện: {log.actor_role ? ROLE_LABEL[log.actor_role as UserRole] || log.actor_role : 'Hệ thống'}{log.actor_user ? ` · ${log.actor_user}` : ''}</p></div><time className="text-xs text-muted-foreground">{formatDateTime(log.created)}</time></div>
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between"><div><p className="font-medium">{AUDIT_ACTION_LABEL[log.action] || activityActionLabel(log.action)}</p><p className="mt-1 text-sm text-muted-foreground">Người thực hiện: {log.actor_role ? roleLabel(log.actor_role) : 'Hệ thống'}{log.actor_user ? ` · ${log.actor_user}` : ''}</p></div><time className="text-xs text-muted-foreground">{formatDateTime(log.created)}</time></div>
                   {Boolean(log.details?.reason) && <p className="mt-3 rounded-md bg-muted px-3 py-2 text-sm"><span className="font-medium">Lý do:</span> {String(log.details?.reason)}</p>}
                 </div>
               ))}

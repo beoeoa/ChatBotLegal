@@ -30,6 +30,16 @@ _ARTICLE_HEADING = re.compile(
     r"[ \t]*(?P<title>[^\r\n]*)$",
     re.IGNORECASE,
 )
+# Reviewed re-segmentation of amending instruments needs a stricter parser
+# than the generic heading scanner above.  OCR frequently writes ``Điêu`` or
+# ``Dieu`` while quoted replacement provisions introduce additional ``Điều``
+# headings inside the body.  This expression only identifies candidates; the
+# sequential parser below decides which candidates are instrument-level.
+_OCR_ARTICLE_HEADING = re.compile(
+    r"^[ \t]*(?:[ĐÐDđ]i[ềêe]u)[ \t]+(?P<number>\d+[a-zA-Z]?)"
+    r"(?:[ \t]*[.:])?[ \t]*(?P<title>[^\r\n]*)$",
+    re.IGNORECASE,
+)
 _APPENDIX_HEADING = re.compile(
     r"^[ \t]*Phụ[ \t]+lục"
     r"(?:[ \t]+(?:số[ \t]+)?(?P<label>(?:[IVXLCDM]+|\d+[a-zA-Z]?)))?"
@@ -163,6 +173,148 @@ def parse_structural_parents(content: str) -> list[dict[str, str]]:
                 "source_end_offset": int(end),
             }
         )
+    return parents
+
+
+def parse_sequential_instrument_parents(
+    content: str,
+    *,
+    expected_last_article: int | None = None,
+    preserve_preamble: bool = True,
+    recognize_bare_appendix: bool = True,
+) -> list[dict[str, str]]:
+    """Parse only the sequential top-level Articles of one instrument.
+
+    Amending decrees routinely quote complete Articles of another instrument.
+    Treating every line-level ``Điều`` as a parent therefore corrupts both the
+    amended Article and the quoted text.  Instrument Articles, unlike quoted
+    provisions, form the deterministic sequence 1, 2, 3, ...; this parser
+    accepts only that sequence and leaves all other headings inside the
+    current parent's source text.
+
+    ``expected_last_article`` is a review gate, not an inference mechanism. A
+    corpus repair should provide the human/read-only-preview verified final
+    number so an OCR omission aborts instead of silently producing a partial
+    document.
+    """
+
+    normalized = _normalize_v2_text(content)
+    if not normalized:
+        return []
+
+    candidates: list[dict[str, Any]] = []
+    offset = 0
+    for line_with_ending in normalized.splitlines(keepends=True):
+        line = line_with_ending.rstrip("\n")
+        match = _OCR_ARTICLE_HEADING.match(line)
+        if match:
+            raw_number = str(match.group("number") or "").strip()
+            if raw_number.isdigit():
+                candidates.append(
+                    {
+                        "number": int(raw_number),
+                        "raw_number": raw_number,
+                        "title_suffix": str(match.group("title") or "")
+                        .strip()
+                        .lstrip(" .:"),
+                        "start": offset,
+                        "body_start": offset + len(line_with_ending),
+                    }
+                )
+        offset += len(line_with_ending)
+
+    selected: list[dict[str, Any]] = []
+    expected = 1
+    for candidate in candidates:
+        if int(candidate["number"]) == expected:
+            selected.append(candidate)
+            expected += 1
+
+    if not selected:
+        return []
+    observed_last = int(selected[-1]["number"])
+    if expected_last_article is not None and observed_last != int(expected_last_article):
+        raise ValueError(
+            "sequential_instrument_article_count_mismatch:"
+            f"expected={int(expected_last_article)}:observed={observed_last}"
+        )
+
+    boundaries: list[dict[str, Any]] = []
+    if preserve_preamble and str(normalized[: int(selected[0]["start"])]).strip():
+        boundaries.append(
+            {
+                "article_number": "0",
+                "title": "Phần mở đầu",
+                "parent_kind": "preamble",
+                "parent_number": "0",
+                "start": 0,
+                "body_start": 0,
+            }
+        )
+    for candidate in selected:
+        number = str(candidate["raw_number"])
+        title = f"Điều {number}"
+        if candidate["title_suffix"]:
+            title = f"{title}. {candidate['title_suffix']}"
+        boundaries.append(
+            {
+                "article_number": number,
+                "title": title,
+                "parent_kind": "article",
+                "parent_number": number,
+                "start": int(candidate["start"]),
+                "body_start": int(candidate["body_start"]),
+            }
+        )
+
+    # A bare ``Phụ lục`` is common after OCR and is reliable here only after
+    # the reviewed last top-level Article.  More specific labelled appendix
+    # headings continue to use the generic parser.
+    if recognize_bare_appendix:
+        last_article_start = int(selected[-1]["start"])
+        offset = 0
+        for line_with_ending in normalized.splitlines(keepends=True):
+            line = line_with_ending.rstrip("\n")
+            folded = "".join(
+                character
+                for character in unicodedata.normalize("NFD", line.strip())
+                if not unicodedata.combining(character)
+            ).replace("đ", "d").replace("Đ", "D").casefold()
+            if offset > last_article_start and folded == "phu luc":
+                boundaries.append(
+                    {
+                        "article_number": "PL-1",
+                        "title": line.strip(),
+                        "parent_kind": "appendix",
+                        "parent_number": "1",
+                        "start": offset,
+                        "body_start": offset + len(line_with_ending),
+                    }
+                )
+                break
+            offset += len(line_with_ending)
+
+    boundaries.sort(key=lambda item: int(item["start"]))
+    parents: list[dict[str, str]] = []
+    for index, boundary in enumerate(boundaries):
+        end = (
+            int(boundaries[index + 1]["start"])
+            if index + 1 < len(boundaries)
+            else len(normalized)
+        )
+        body = normalized[int(boundary["body_start"]):end].strip()
+        if body:
+            parents.append(
+                {
+                    "article_number": str(boundary["article_number"]),
+                    "title": str(boundary["title"]),
+                    "content": body,
+                    "parent_kind": str(boundary["parent_kind"]),
+                    "parent_number": str(boundary["parent_number"]),
+                    "source_start_offset": int(boundary["start"]),
+                    "source_end_offset": int(end),
+                }
+            )
     return parents
 
 

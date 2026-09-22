@@ -22,6 +22,10 @@ from typing import Any, Callable, Mapping, Sequence
 
 PairScorer = Callable[[list[tuple[str, str]]], Sequence[float]]
 _TRUE = {"1", "true", "yes", "on"}
+# The Vietnamese model is deliberately opt-in.  The adapter remains local-only
+# and never downloads a mutable Hugging Face revision at request time.
+VIETNAMESE_RERANKER_MODEL_ID = "AITeamVN/Vietnamese_Reranker"
+VIETNAMESE_RERANKER_MODEL_LABEL = "vietnamese-reranker"
 
 
 def _safe_label(value: str | None, fallback: str) -> str:
@@ -205,6 +209,7 @@ class OptionalCrossEncoderReranker:
             batch_size=int(os.getenv("LEGAL_RERANKER_BATCH_SIZE", "8")),
             max_length=int(os.getenv("LEGAL_RERANKER_MAX_LENGTH", "512")),
             learned_weight=float(os.getenv("LEGAL_RERANKER_WEIGHT", "1.0")),
+            model_label=os.getenv("LEGAL_RERANKER_MODEL_LABEL") or None,
         )
 
     @property

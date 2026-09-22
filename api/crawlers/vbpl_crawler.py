@@ -1,11 +1,15 @@
 """VBPL.vn crawler - crawl legal documents from Thư viện Pháp luật Vietnam."""
 
 from __future__ import annotations
+
 import re
 from urllib.parse import urljoin
+
 from bs4 import BeautifulSoup
 from loguru import logger
+
 from api.crawlers.base_crawler import BaseCrawler, normalize_text
+
 
 class VBPLCrawler(BaseCrawler):
     """Specialized crawler for VBPL.vn - Thư viện Pháp luật Vietnam."""
@@ -53,9 +57,10 @@ class VBPLCrawler(BaseCrawler):
         urls = []
         try:
             import xml.etree.ElementTree as ET
-            resp = self.client.get(sitemap_url)
-            resp.raise_for_status()
-            root = ET.fromstring(resp.content)
+            content = self.fetch_page(sitemap_url)
+            if not content:
+                return []
+            root = ET.fromstring(content.encode("utf-8"))
             ns = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
             for url_elem in root.findall(".//sm:url", ns):
                 loc = url_elem.find("sm:loc", ns)

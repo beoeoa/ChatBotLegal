@@ -25,8 +25,9 @@ export function useMediaQuery(query: string): boolean {
 }
 
 /**
- * Returns true if viewport is >= 1024px (Tailwind's 'lg' breakpoint)
+ * Returns true when the three-pane notebook workspace has enough room.
+ * At 1024px the permanent app sidebar leaves too little width for three panes.
  */
 export function useIsDesktop(): boolean {
-  return useMediaQuery('(min-width: 1024px)')
+  return useMediaQuery('(min-width: 1280px)')
 }

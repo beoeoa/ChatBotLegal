@@ -1,0 +1,5 @@
+-- Legal import pipeline serving projection. Additive only: expose the
+-- collection and chatbot readiness recorded by the approved import job.
+DEFINE FIELD IF NOT EXISTS vector_collection ON TABLE legal_crawl_candidate TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS chatbot_ready ON TABLE legal_crawl_candidate TYPE option<bool>;
+DEFINE FIELD IF NOT EXISTS vector_collection ON TABLE legal_import_job TYPE option<string>;

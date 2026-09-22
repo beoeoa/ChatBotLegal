@@ -34,6 +34,59 @@ const message = (id: string, role: AskMessage['role'], content: string, status?:
 })
 
 describe('AskMessageHistory', () => {
+  it('shows a persisted image attachment above the user message bubble', () => {
+    render(<AskMessageHistory role="citizen" showRagTrace={false} messages={[
+      {
+        ...message('user-image', 'user', 'Bạn đọc giúp tôi ảnh này'),
+        attachments: [{
+          kind: 'uploaded_document_context_v1',
+          value: {
+            name: 'van-ban.png',
+            size: 258477,
+            type: 'image/png',
+            file_id: '5813aa4e611d4558a254b86ad645bef1',
+            status: 'complete',
+          },
+        }],
+      },
+    ]} />)
+
+    expect(screen.getByTestId('sent-image-attachment')).toHaveAttribute(
+      'href',
+      '/api/media/files/5813aa4e611d4558a254b86ad645bef1',
+    )
+    expect(screen.getByRole('img', { name: 'Ảnh đính kèm: van-ban.png' })).toBeInTheDocument()
+    expect(screen.getByText('van-ban.png · 253 KB')).toBeInTheDocument()
+    expect(screen.getByText('Bạn đọc giúp tôi ảnh này')).toBeInTheDocument()
+  })
+
+  it('shows a document attachment from history without requiring a preview URL', () => {
+    render(<AskMessageHistory role="citizen" showRagTrace={false} messages={[
+      {
+        ...message('user-file', 'user', 'Tóm tắt tài liệu'),
+        attachments: [{
+          kind: 'uploaded_document_context_v1',
+          value: {
+            name: 'quyet-dinh.docx',
+            size: 4096,
+            type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            status: 'complete',
+          },
+        }],
+      },
+    ]} />)
+
+    expect(screen.getByTestId('sent-file-attachment')).toHaveTextContent('quyet-dinh.docx')
+    expect(screen.getByTestId('sent-file-attachment')).toHaveTextContent('4 KB')
+  })
+
+  it('does not label a partial model answer as independently verified', () => {
+    render(<AskMessageHistory role="citizen" showRagTrace={false} messages={[
+      {...message('partial', 'assistant', 'Phần đã trả lời', 'complete'), outcome:'partial'},
+    ]} />)
+    expect(screen.getByText(/nội dung kết luận chưa được kiểm chứng độc lập/)).toBeInTheDocument()
+    expect(screen.queryByText(/chỉ bao gồm phần đã được kiểm chứng/)).not.toBeInTheDocument()
+  })
   it('renders exactly one polished card per completed answer and preserves the first after a second question', async () => {
     const { rerender } = render(
       <AskMessageHistory
@@ -85,6 +138,32 @@ describe('AskMessageHistory', () => {
     expect(screen.queryByTestId('polished-answer-card')).not.toBeInTheDocument()
   })
 
+  it('shows early sources as being checked without calling them final evidence', () => {
+    render(
+      <AskMessageHistory
+        role="citizen"
+        showRagTrace={false}
+        pendingStageLabel="Đang soạn câu trả lời"
+        pendingCitations={[
+          {
+            law_number: '62/2020/QH14',
+            article_number: '1',
+            source_url: 'https://vbpl.vn/62',
+          },
+        ]}
+        messages={[message('u1', 'user', 'Điều 1?'), message('a1', 'assistant', '', 'pending')]}
+      />,
+    )
+
+    expect(screen.getByText('Nguồn đang được đối chiếu (1)')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Điều 1 Luật số 62/2020/QH14' })).toHaveAttribute(
+      'href',
+      'https://vbpl.vn/62#:~:text=%C4%90i%E1%BB%81u%201',
+    )
+    expect(screen.getByText('Chỉ được gắn làm căn cứ khi câu trả lời cuối cùng hoàn tất.')).toBeInTheDocument()
+    expect(screen.queryByTestId('polished-answer-card')).not.toBeInTheDocument()
+  })
+
   it('forwards optional structured sections while keeping the legacy content', async () => {
     render(
       <AskMessageHistory
@@ -126,7 +205,7 @@ describe('AskMessageHistory', () => {
     expect(card).toHaveAttribute('data-has-trace', 'false')
   })
 
-  it('shows a public validity label, verification date, warning and official source', async () => {
+  it('keeps citation metadata for inline links but hides the separate validity boxes', async () => {
     render(
       <AskMessageHistory
         role="citizen"
@@ -148,13 +227,9 @@ describe('AskMessageHistory', () => {
       />,
     )
 
-    expect(await screen.findByText('Hết hiệu lực một phần')).toBeInTheDocument()
-    expect(screen.getByText(/Xác minh 08\/08\/2026/)).toBeInTheDocument()
-    expect(screen.getByText('Dữ liệu xác minh có thể đã cũ')).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: /Nguồn xác minh hiệu lực/ })).toHaveAttribute(
-      'href',
-      'https://vbpl.vn/van-ban/example',
-    )
+    expect(await screen.findByTestId('polished-answer-card')).toHaveAttribute('data-citation-count', '1')
+    expect(screen.queryByTestId('citation-validity-notice')).not.toBeInTheDocument()
+    expect(screen.queryByText('Hết hiệu lực một phần')).not.toBeInTheDocument()
   })
 
   it('does not forward a blocked validity source to the answer renderer', async () => {
@@ -180,6 +255,147 @@ describe('AskMessageHistory', () => {
     expect(await screen.findByTestId('polished-answer-card')).toHaveAttribute('data-citation-count', '0')
     expect(screen.queryByTestId('citation-validity-notice')).not.toBeInTheDocument()
     expect(screen.queryByText('Hết hiệu lực')).not.toBeInTheDocument()
+  })
+
+  it('shows suggestions only below the latest answer and clicking only delegates text', async () => {
+    const onSuggestionClick = vi.fn()
+    render(
+      <AskMessageHistory
+        role="citizen"
+        showRagTrace={false}
+        onSuggestionClick={onSuggestionClick}
+        messages={[
+          {
+            ...message('a1', 'assistant', 'Câu trả lời cũ', 'complete'),
+            suggested_questions: [{ text: 'Gợi ý cũ?', issue_id: 'issue-1', facet: 'documents' }],
+          },
+          {
+            ...message('a2', 'assistant', 'Câu trả lời mới', 'complete'),
+            suggested_questions: [{ text: 'Cần chuẩn bị giấy tờ gì?', issue_id: 'issue-1', facet: 'documents' }],
+          },
+        ]}
+      />,
+    )
+
+    expect(screen.queryByRole('button', { name: 'Gợi ý cũ?' })).not.toBeInTheDocument()
+    fireEvent.click(await screen.findByRole('button', { name: 'Cần chuẩn bị giấy tờ gì?' }))
+    expect(onSuggestionClick).toHaveBeenCalledOnce()
+    expect(onSuggestionClick).toHaveBeenCalledWith('Cần chuẩn bị giấy tờ gì?')
+  })
+
+  it('shows at most three backend-projected related documents under the latest answer', async () => {
+    render(
+      <AskMessageHistory
+        role="citizen"
+        showRagTrace={false}
+        messages={[
+          {
+            ...message('a1', 'assistant', 'Câu trả lời', 'complete'),
+            related_documents: Array.from({ length: 4 }, (_, index) => ({
+              document_id: `doc-${index + 1}`,
+              title: `Văn bản ${index + 1}`,
+              law_number: `${index + 1}/2026/NĐ-CP`,
+              source_url: `https://example.test/${index + 1}`,
+            })),
+          },
+        ]}
+      />,
+    )
+
+    expect(await screen.findByTestId('related-documents')).toBeInTheDocument()
+    expect(screen.getByText('Nghị định số 1/2026/NĐ-CP')).toBeInTheDocument()
+    expect(screen.getByText('Nghị định số 3/2026/NĐ-CP')).toBeInTheDocument()
+    expect(screen.queryByText('Nghị định số 4/2026/NĐ-CP')).not.toBeInTheDocument()
+  })
+
+  it('uses backend validation reason and never offers retry for rejected claims', async () => {
+    const onRetryClick = vi.fn()
+    render(
+      <AskMessageHistory
+        role="citizen"
+        showRagTrace={false}
+        onRetryClick={onRetryClick}
+        messages={[
+          message('u1', 'user', 'Điều 1?'),
+          {
+            ...message('a1', 'assistant', 'Chưa thể kết luận', 'complete'),
+            outcome: 'partial',
+            reason_code: 'CLAIM_VALIDATION_FAILED',
+            retryable: false,
+          },
+        ]}
+      />,
+    )
+
+    expect(await screen.findByTestId('answer-delivery-notice')).toHaveTextContent(
+      'chưa thể tạo kết luận đã kiểm chứng',
+    )
+    expect(screen.queryByRole('button', { name: 'Thử lại' })).not.toBeInTheDocument()
+    expect(onRetryClick).not.toHaveBeenCalled()
+  })
+
+  it('does not claim a source was found when source-only has no public citation', async () => {
+    render(
+      <AskMessageHistory
+        role="citizen"
+        showRagTrace={false}
+        messages={[{
+          ...message('a1', 'assistant', 'Không tìm thấy văn bản trong kho.', 'complete'),
+          outcome: 'source_only',
+          evidence_count: 1,
+          citations: [],
+        }]}
+      />,
+    )
+
+    expect(await screen.findByTestId('answer-delivery-notice')).toHaveTextContent(
+      'Chưa tìm thấy nguồn pháp luật phù hợp',
+    )
+    expect(screen.queryByText('Đã tìm thấy nguồn nhưng chưa thể tạo kết luận pháp lý an toàn.')).not.toBeInTheDocument()
+  })
+
+  it('does not claim retained legal sources for a source-free conversation timeout', async () => {
+    render(
+      <AskMessageHistory
+        role="citizen"
+        showRagTrace={false}
+        messages={[{
+          ...message('a1', 'assistant', 'Xin lỗi, vui lòng thử lại.', 'complete'),
+          outcome: 'failed',
+          reason_code: 'PROVIDER_TIMEOUT',
+          evidence_count: 0,
+        }]}
+      />,
+    )
+
+    expect(await screen.findByTestId('answer-delivery-notice')).toHaveTextContent(
+      'lượt này không sử dụng nguồn pháp luật',
+    )
+    expect(screen.queryByText(/giữ lại phần nguồn đã tìm được/)).not.toBeInTheDocument()
+  })
+
+  it('offers full-text and detail actions for an article outline', async () => {
+    const onSuggestionClick = vi.fn()
+    render(
+      <AskMessageHistory
+        role="citizen"
+        showRagTrace={false}
+        onSuggestionClick={onSuggestionClick}
+        messages={[
+          message('u1', 'user', 'Điều 1 quy định gì?'),
+          {
+            ...message('a1', 'assistant', 'Tổng quan Điều 1', 'complete'),
+            outcome: 'answered',
+            scope: 'article_outline',
+            citations: [{ law_number: '62/2020/QH14', source_url: 'https://vbpl.vn/62' }],
+          },
+        ]}
+      />,
+    )
+
+    expect(screen.getByTestId('view-full-article')).toHaveAttribute('href', 'https://vbpl.vn/62')
+    fireEvent.click(screen.getByTestId('analyze-article-detail'))
+    expect(onSuggestionClick).toHaveBeenCalledWith('Điều 1 quy định gì? Hãy phân tích chi tiết từng nhóm nội dung của Điều này.')
   })
 })
 

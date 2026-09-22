@@ -245,6 +245,9 @@ def evaluate_rows(records: list[dict[str, Any]]) -> dict[str, Any]:
         },
         "errors": sum(bool(row.get("error")) for row in records),
         "outside_manifest_count": sum(int(row.get("outside_manifest_count") or 0) for row in records),
+        "invalid_forbidden_source_count": sum(
+            int(row.get("invalid_forbidden_source_count") or 0) for row in records
+        ),
         "invalid_temporal_count": sum(int(row.get("invalid_temporal_count") or 0) for row in records),
         "timeout_count": sum(bool(row.get("timeout")) for row in records),
         "oom_count": sum(bool(row.get("oom")) for row in records),
@@ -347,4 +350,3 @@ def safety_pass(splits: Mapping[str, Mapping[str, Any]]) -> bool:
         and int(summary.get("oom_count") or 0) == 0
         for summary in splits.values()
     )
-

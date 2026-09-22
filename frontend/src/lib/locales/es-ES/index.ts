@@ -103,7 +103,6 @@ export const esES = {
     searchTerms: "Términos de búsqueda",
     strategy: "Estrategia",
     individualAnswers: "Respuestas individuales ({count})",
-    finalAnswer: "Respuesta final",
     notebookLabel: "Cuaderno: {name}",
     itemNotFound: "No se pudo encontrar este {type}",
     accessibility: {
@@ -819,7 +818,6 @@ export const esES = {
   },
   models: {
     embedding: "Modelos de embedding",
-    tts: "Texto a voz (TTS)",
     stt: "Voz a texto (STT)",
     apiKey: "Clave API",
     deleteSuccess: "Modelo eliminado exitosamente",
@@ -845,8 +843,6 @@ export const esES = {
     largeContextModelDesc: "Usado para procesar documentos grandes - Se recomienda Gemini",
     embeddingModelLabel: "Modelo de embedding",
     embeddingModelDesc: "Usado para búsqueda semántica y embeddings vectoriales",
-    ttsModelLabel: "Modelo de texto a voz",
-    ttsModelDesc: "Usado para generación de podcasts",
     sttModelLabel: "Modelo de voz a texto",
     sttModelDesc: "Usado para transcripción de audio",
     embeddingChangeTitle: "Cambio de modelo de embedding",

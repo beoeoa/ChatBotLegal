@@ -44,6 +44,7 @@ import { toast } from 'sonner'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import { SourceInsightDialog } from '@/components/source/SourceInsightDialog'
 import { NotebookAssociations } from '@/components/source/NotebookAssociations'
+import { formatApiError } from '@/lib/utils/error-handler'
 
 interface SourceDetailContentProps {
   sourceId: string
@@ -134,7 +135,7 @@ export function SourceDetailContent({
     } catch (err) {
       const detail = isAxiosError(err) ? err.response?.data?.detail : undefined
       console.warn('Unable to embed content:', detail || err)
-      toast.error(typeof detail === 'string' ? detail : t('common.error'))
+      toast.error(formatApiError(err, t('common.error')))
     } finally {
       setIsEmbedding(false)
     }

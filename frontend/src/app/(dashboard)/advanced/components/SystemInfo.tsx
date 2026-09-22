@@ -18,6 +18,15 @@ export function SystemInfo() {
     dbStatus?: 'online' | 'offline'
   } | null>(null)
   const [isLoading, setIsLoading] = useState(true)
+  const connectionSourceLabel = config?.apiUrlSource === 'runtime'
+    ? 'Cấu hình lúc chạy'
+    : config?.apiUrlSource === 'environment'
+      ? 'Cấu hình máy chủ'
+      : config?.apiUrlSource === 'override'
+        ? 'Cấu hình tùy chỉnh'
+        : config?.apiUrlSource === 'fallback'
+          ? 'Cấu hình dự phòng'
+          : 'Chưa xác định'
 
   useEffect(() => {
     const loadConfig = async () => {
@@ -52,10 +61,10 @@ export function SystemInfo() {
 
         <div className="space-y-3">
           <div className="flex items-center justify-between gap-4">
-              <span className="text-sm font-medium">URL API</span>
+              <span className="text-sm font-medium">Địa chỉ máy chủ ứng dụng</span>
             <div className="flex flex-col items-end gap-1 text-right">
-              <Badge variant="outline" className="font-mono text-xs">{config?.apiUrl || t('advanced.kh?ng r?')}</Badge>
-              <span className="text-xs text-muted-foreground">{config?.apiUrlSource || t('advanced.kh?ng r?')}</span>
+              <Badge variant="outline" className="font-mono text-xs">{config?.apiUrl || 'Chưa xác định'}</Badge>
+              <span className="text-xs text-muted-foreground">{connectionSourceLabel}</span>
             </div>
           </div>
 
@@ -67,13 +76,13 @@ export function SystemInfo() {
           <div className="flex items-center justify-between gap-4">
               <span className="text-sm font-medium">Cơ sở dữ liệu</span>
             <Badge variant={config?.dbStatus === 'offline' ? 'destructive' : 'outline'}>
-              {config?.dbStatus || t('advanced.kh?ng r?')}
+              {config?.dbStatus === 'online' ? 'Đang kết nối' : config?.dbStatus === 'offline' ? 'Mất kết nối' : 'Chưa xác định'}
             </Badge>
           </div>
 
           <div className="flex items-center justify-between gap-4">
             <span className="text-sm font-medium">{t('advanced.currentVersion')}</span>
-            <Badge variant="outline">{config?.version || t('advanced.kh?ng r?')}</Badge>
+            <Badge variant="outline">{config?.version || 'Chưa xác định'}</Badge>
           </div>
 
           {config?.latestVersion && (
@@ -95,7 +104,7 @@ export function SystemInfo() {
               </Badge>
             ) : (
               <Badge variant="outline" className="text-muted-foreground">
-                {t('advanced.kh?ng r?')}
+                Chưa xác định
               </Badge>
             )}
           </div>

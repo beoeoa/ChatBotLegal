@@ -38,8 +38,8 @@ describe('Config Priority', () => {
     expect(url).toBe('http://runtime-url.com')
   })
 
-  it('should fall back to env var if runtime config returns empty/null', async () => {
-    // Setup: Env var set, Runtime config returns empty string (simulating not set)
+  it('should prefer the same-origin proxy over a stale build-time URL', async () => {
+    // Setup: an old build-time URL is still set, while runtime config is empty.
     process.env.NEXT_PUBLIC_API_URL = 'http://env-url.com'
     
     // First fetch: /config returns empty apiUrl
@@ -48,17 +48,18 @@ describe('Config Priority', () => {
       json: async () => ({ apiUrl: '' }),
     } as Response)
 
-    // Second fetch: api/config check using env url
+    // Second fetch: same-origin api/config succeeds without touching the old URL.
     fetchMock.mockResolvedValueOnce({
       ok: true,
       json: async () => ({ version: '1.0.0' }),
     } as Response)
 
     const url = await getApiUrl()
-    expect(url).toBe('http://env-url.com')
+    expect(url).toBe('')
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/config', expect.objectContaining({ cache: 'no-store' }))
   })
 
-  it('should fall back to env var if runtime config returns empty object', async () => {
+  it('should fall back to the environment URL when the same-origin proxy is unavailable', async () => {
     // Setup: Env var set, Runtime config returns empty object
     process.env.NEXT_PUBLIC_API_URL = 'http://env-url.com'
     
@@ -68,7 +69,13 @@ describe('Config Priority', () => {
       json: async () => ({}), // Missing apiUrl
     } as Response)
 
-    // Second fetch: api/config check using env url
+    // Second fetch: same-origin proxy is unavailable.
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 502,
+    } as Response)
+
+    // Third fetch: the configured environment URL remains a valid fallback.
     fetchMock.mockResolvedValueOnce({
       ok: true,
       json: async () => ({ version: '1.0.0' }),
@@ -96,5 +103,17 @@ describe('Config Priority', () => {
 
     const url = await getApiUrl()
     expect(url).toBe('')
+  })
+
+  it('keeps the same-origin proxy usable when runtime metadata times out', async () => {
+    delete process.env.NEXT_PUBLIC_API_URL
+
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ apiUrl: '' }),
+    } as Response)
+    fetchMock.mockRejectedValueOnce(new DOMException('timed out', 'AbortError'))
+
+    await expect(getApiUrl()).resolves.toBe('')
   })
 })

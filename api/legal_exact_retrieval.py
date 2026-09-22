@@ -94,7 +94,7 @@ _REVIEWED_TITLE_ALIASES: tuple[tuple[str, str, str | None], ...] = (
     (
         "nguoi chiu trach nhiem truoc nha nuoc doi voi viec su dung dat",
         "31/2024/QH15",
-        "7",
+        "6",
     ),
     (
         "nguoi chiu trach nhiem truoc nha nuoc doi voi dat duoc giao",

@@ -39,10 +39,13 @@ from api.legal_effectivity_service import (
     run_effectivity_check,
 )
 from api.legal_profile_access import assert_legal_case_access
+from api.legal_serving_dashboard import load_active_serving_release
 from api.observability import telemetry
 from api.retention_service import run_retention_purge, upcoming_expiration_report
 from api.routers import faq as faq_router
 from api.routers import live_support, ward_procedures
+from api.support_repository import SupportActor
+from api.system_settings import active_organization_units, normalize_legal_domains
 from api.user_service import (
     get_user_profile,
     list_audit_logs,
@@ -87,6 +90,9 @@ class DashboardFreshness(BaseModel):
     generated_at: str
     cache_ttl_seconds: int
     cached: bool = False
+    refreshing: bool = False
+    stale: bool = False
+    age_seconds: float | None = None
 
 
 class DashboardAttentionItem(BaseModel):
@@ -113,6 +119,12 @@ class AdminDashboardResponse(BaseModel):
     crawl_import: DashboardSection
     knowledge: DashboardSection
     users: DashboardSection
+    organization: DashboardSection = Field(
+        default_factory=lambda: DashboardSection(
+            status="unavailable",
+            reason_code="not_loaded",
+        )
+    )
     support: DashboardSection
     models: DashboardSection
     runtime_metrics: DashboardSection
@@ -123,12 +135,44 @@ class AdminDashboardResponse(BaseModel):
     metrics: dict[str, Any]
 
 
-DASHBOARD_CACHE_TTL_SECONDS = 30
-DASHBOARD_SECTION_TIMEOUT_SECONDS = 3.5
+DASHBOARD_CACHE_TTL_SECONDS = 300
+# The repository client is intentionally serialized.  Keep each optional panel
+# bounded so a slow projection cannot hold the connection for tens of seconds
+# while the dashboard is warming.
+DASHBOARD_SECTION_TIMEOUT_SECONDS = 1.0
+LEGAL_REPOSITORY_SECTION_TIMEOUT_SECONDS = 8.0
+# Settings and the active procedure release are compact, but a cold local
+# settings repository can take a little longer than the operational panels.
+# They are still bounded independently and never block a browser request.
+DASHBOARD_METADATA_SECTION_TIMEOUT_SECONDS = 3.0
 _dashboard_cache: dict[str, Any] | None = None
 _dashboard_cache_created_at = 0.0
 _dashboard_cache_lock = asyncio.Lock()
+_dashboard_refresh_task: asyncio.Task[None] | None = None
+_dashboard_refresh_last_attempt = 0.0
 _dashboard_timezone = ZoneInfo("Asia/Ho_Chi_Minh")
+
+
+def invalidate_dashboard_cache() -> None:
+    """Mark the projection stale without making the next page load block."""
+
+    global _dashboard_cache_created_at
+    _dashboard_cache_created_at = 0.0
+
+
+def _internal_admin_request() -> Request:
+    """Build a content-free request for startup/background projections."""
+
+    request = Request({
+        "type": "http",
+        "method": "GET",
+        "path": "/api/admin/control/dashboard",
+        "headers": [],
+    })
+    request.state.user_role = "admin"
+    request.state.user_id = "system:dashboard-projection"
+    request.state.username = "system"
+    return request
 
 
 async def _require_admin(request: Request) -> str:
@@ -208,13 +252,27 @@ async def _model_configuration_summary() -> dict[str, Any]:
         DefaultModels.get_instance(),
     )
     by_type = Counter(str(row.get("type") or "unknown") for row in model_rows)
-    providers = sorted(
+    credential_providers = sorted(
         {
             str(row.get("provider") or "").strip()
             for row in credential_rows
             if str(row.get("provider") or "").strip()
         }
     )
+    provider_set = set(credential_providers)
+    env_provider_vars = {
+        "openai": ("OPENAI_API_KEY",), "anthropic": ("ANTHROPIC_API_KEY",), "google": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
+        "deepseek": ("DEEPSEEK_API_KEY",), "openrouter": ("OPENROUTER_API_KEY",), "ollama": ("OLLAMA_API_BASE",),
+        "mistral": ("MISTRAL_API_KEY",), "groq": ("GROQ_API_KEY",), "voyage": ("VOYAGE_API_KEY",),
+        "xai": ("XAI_API_KEY",), "dashscope": ("DASHSCOPE_API_KEY",), "minimax": ("MINIMAX_API_KEY",),
+        "openai_compatible": ("OPENAI_COMPATIBLE_BASE_URL", "OPENAI_COMPATIBLE_API_KEY"),
+    }
+    provider_set.update(
+        provider for provider, variables in env_provider_vars.items()
+        if any(os.environ.get(variable) for variable in variables)
+    )
+    credential_providers = sorted(provider_set)
+    model_by_id = {str(row.get("id")): row for row in model_rows if row.get("id")}
     default_fields = (
         "default_chat_model",
         "large_context_model",
@@ -223,19 +281,81 @@ async def _model_configuration_summary() -> dict[str, Any]:
         "default_text_to_speech_model",
         "default_speech_to_text_model",
     )
+    def resolved(model_id: Any, modality: str) -> dict[str, Any]:
+        wanted = str(model_id or "").strip()
+        row = model_by_id.get(wanted)
+        provider = str((row or {}).get("provider") or "").strip() or None
+        configured = bool(wanted and row)
+        available = bool(configured and provider and provider in provider_set)
+        return {
+            "id": wanted or None,
+            "display_name": str((row or {}).get("name") or "Chưa cấu hình") if configured else "Chưa cấu hình",
+            "provider": provider,
+            "modality": modality,
+            "configured": configured,
+            "available": available,
+            "source": "database" if configured else "none",
+        }
+
+    chat = resolved(getattr(defaults, "default_chat_model", None), "chat")
+    embedding = resolved(getattr(defaults, "default_embedding_model", None), "embedding")
+    config_revision = None
+    try:
+        revisions = await list_config_revisions("model_defaults", limit=1)
+        if revisions:
+            latest = revisions[0]
+            config_revision = str(latest.get("id") or latest.get("created_at") or "") or None
+    except Exception:
+        config_revision = None
+
+    active_vector_embedding: dict[str, Any] = {
+        "id": None,
+        "display_name": "Chưa xác định",
+        "provider": None,
+        "modality": "embedding",
+        "configured": False,
+        "available": True,
+        "source": "index_manifest",
+        "fingerprint": None,
+    }
+    try:
+        release = load_active_serving_release()
+        payload = release.manifest.payload
+        vector = payload.get("vector_index") if isinstance(payload.get("vector_index"), dict) else {}
+        active_id = str(vector.get("embedding_model_id") or vector.get("model_id") or "").strip() or None
+        active_vector_embedding["id"] = active_id
+        fingerprint = str(
+            vector.get("embedding_fingerprint")
+            or payload.get("embedding_recipe_fingerprint")
+            or payload.get("model_artifact_fingerprint")
+            or ""
+        ).strip() or None
+        active_vector_embedding["fingerprint"] = fingerprint
+        active_vector_embedding["display_name"] = str(vector.get("model") or vector.get("embedding_model") or "Đang phục vụ theo manifest")
+        active_vector_embedding["configured"] = bool(fingerprint)
+    except Exception:
+        pass
+    embedding_warning = bool(
+        embedding.get("configured")
+        and active_vector_embedding.get("id")
+        and embedding.get("id") != active_vector_embedding.get("id")
+    )
     return {
         "credential_count": len(credential_rows),
         "model_count": len(model_rows),
-        "providers": providers,
+        "providers": credential_providers,
+        "available_providers": credential_providers,
         "models_by_type": dict(by_type),
         "defaults": {
             field: getattr(defaults, field, None)
             for field in default_fields
         },
-        "ready_for_answers": bool(
-            getattr(defaults, "default_chat_model", None)
-            and getattr(defaults, "default_embedding_model", None)
-        ),
+        "resolved_defaults": {"chat": chat, "embedding": embedding},
+        "active_vector_embedding": active_vector_embedding,
+        "embedding_index_warning": embedding_warning,
+        "config_revision": config_revision,
+        "observed_at": _now().isoformat(),
+        "ready_for_answers": bool(chat["configured"] and embedding["configured"] and chat["available"]),
     }
 
 
@@ -243,6 +363,23 @@ def _dashboard_unavailable(reason_code: str = "read_failed") -> dict[str, Any]:
     """Keep dashboard partially useful without disclosing exception internals."""
 
     return {"status": "unavailable", "reason_code": reason_code}
+
+
+def _dashboard_warming_snapshot() -> dict[str, Any]:
+    """Minimal first paint while the metadata projection refreshes in background."""
+    observed = _now().isoformat()
+    section = {"status": "warming", "reason_code": "refresh_in_progress", "observed_at": observed}
+    return {
+        "observed_at": observed,
+        "freshness": {"generated_at": observed, "cache_ttl_seconds": DASHBOARD_CACHE_TTL_SECONDS,
+                       "cached": False, "refreshing": True, "stale": False, "age_seconds": 0},
+        "attention_items": [], "operational_alerts": [],
+        "health": section, "legal_repository": section, "crawl_import": section,
+        "knowledge": section, "users": section, "organization": section,
+        "support": section, "models": section, "runtime_metrics": section,
+        "audit_7d": section, "recent_audit": section,
+        "legal_cases": {"total": 0, "open": 0}, "metrics": {},
+    }
 
 
 async def _dashboard_read(
@@ -279,12 +416,21 @@ def _safe_users_summary(users: Any) -> dict[str, Any]:
         return users
     rows = users if isinstance(users, list) else []
     role_counts = Counter(str(row.get("role") or "unknown") for row in rows)
+    active_role_counts = Counter(str(row.get("role") or "unknown") for row in rows
+                                 if row.get("is_active") is not False and not row.get("is_deleted"))
     domain_counts: Counter[str] = Counter()
     ward_counts: Counter[str] = Counter()
+    organization_unit_counts: Counter[str] = Counter()
+    officers_without_unit = 0
     for row in rows:
-        if str(row.get("role") or "") != "officer":
+        if str(row.get("role") or "") != "officer" or row.get("is_active") is False or row.get("is_deleted"):
             continue
         profile = row.get("profile") if isinstance(row.get("profile"), dict) else {}
+        unit_id = str(profile.get("organization_unit_id") or "").strip()
+        if unit_id:
+            organization_unit_counts[unit_id] += 1
+        else:
+            officers_without_unit += 1
         for domain in profile.get("allowed_domains") or []:
             if str(domain).strip():
                 domain_counts[str(domain).strip()] += 1
@@ -313,65 +459,169 @@ def _safe_users_summary(users: Any) -> dict[str, Any]:
             and not bool(row.get("is_deleted"))
         ),
         "by_role": dict(role_counts),
+        "active_by_role": dict(active_role_counts),
         "officers_by_domain": dict(sorted(domain_counts.items())),
         "officers_by_ward": dict(sorted(ward_counts.items())),
+        "officers_by_organization_unit": dict(
+            sorted(organization_unit_counts.items())
+        ),
+        "officers_without_organization_unit": officers_without_unit,
+    }
+
+
+async def _organization_summary() -> dict[str, Any]:
+    from api.system_settings import active_settings
+
+    settings = await active_settings()
+    units = await active_organization_units(settings)
+    domains = normalize_legal_domains(getattr(settings, "legal_domains", None))
+    return {
+        "units": [
+            {
+                "id": unit.id,
+                "code": unit.code,
+                "name": unit.name,
+                "short_name": unit.short_name,
+                "is_active": unit.is_active,
+                "support_enabled": unit.support_enabled,
+            }
+            for unit in units
+        ],
+        "domains": [
+            {
+                "code": domain.code,
+                "name": domain.name,
+                "is_active": domain.is_active,
+                "sort_order": domain.sort_order,
+            }
+            for domain in domains
+        ],
+        # The expensive cutover-readiness query includes crawler candidates.
+        # It is not a statement about whether the current legal corpus has a
+        # responsible unit, so the dashboard derives that badge directly from
+        # its corpus assignment totals instead of timing this whole panel out.
+        "readiness": {"status": "corpus_assignment_reported_separately"},
+        "ready_for_unit_primary": None,
+    }
+
+
+def _active_form_release_summary(release: Any) -> dict[str, Any]:
+    """Project only active-release counts for the dashboard.
+
+    Legacy FAQ JSON and the old file inventory are deliberately excluded: they
+    are not the authority for the published Procedure/Form experience.
+    """
+
+    release_data = release if isinstance(release, dict) else {}
+    manifest = release_data.get("manifest") if isinstance(release_data.get("manifest"), dict) else {}
+    procedures = [item for item in manifest.get("procedures", []) if isinstance(item, dict)]
+    assets = [item for item in manifest.get("assets", []) if isinstance(item, dict)]
+    procedure_statuses = Counter(
+        str(item.get("coverage_status") or "unknown") for item in procedures
+    )
+    asset_statuses = Counter(
+        str(item.get("coverage_status") or "unknown") for item in assets
+    )
+    active = bool(release_data.get("release_id"))
+    return {
+        "active_release": {
+            "id": release_data.get("release_id"),
+            "version": release_data.get("version"),
+            "status": release_data.get("status") if active else "missing",
+        },
+        "procedures": {
+            "total": len(procedures),
+            "released": int(procedure_statuses.get("released", 0)),
+            "owner_deferred": int(procedure_statuses.get("owner_deferred", 0)),
+            "verified_gap": int(procedure_statuses.get("verified_gap", 0)),
+            "by_coverage_status": dict(procedure_statuses),
+        },
+        "forms": {
+            "total": len(assets),
+            "released": int(asset_statuses.get("released", 0)),
+            "official": int(asset_statuses.get("released", 0)),
+            "pending": 0,
+            "by_coverage_status": dict(asset_statuses),
+        },
+        # Compatibility envelope only.  The dashboard no longer presents the
+        # retired FAQ store as a published source.
+        "faqs": {"total": 0, "by_status": {}},
+        "ocr_failures": 0,
     }
 
 
 async def _knowledge_summary() -> dict[str, Any]:
-    """Return aggregate knowledge counts without candidate, FAQ or file content."""
+    """Return published Procedure/Form metrics from the active release only."""
 
-    candidates = await LegalCrawlService.list_candidates(limit=1000)
-    form_candidates = ward_procedures._load_classified_candidates()
-    faq_payload = faq_router._load_faq_data()
-    inventory = _load_json(FORMS_DIR / "forms_inventory_report.json", {})
-    faqs = faq_payload.get("faqs") if isinstance(faq_payload, dict) else []
-    faq_status = Counter(
-        str(item.get("review_status") or "unknown")
-        for item in (faqs or [])
-        if isinstance(item, dict)
+    from api.form_governance_service import get_form_governance_service
+
+    release = await asyncio.to_thread(
+        get_form_governance_service().repository.active_release
     )
-    candidate_status = Counter(
-        str(item.get("status") or item.get("review_status") or "unknown")
-        for item in candidates
-        if isinstance(item, dict)
+    return _active_form_release_summary(release)
+
+
+async def _dashboard_crawl_summary() -> dict[str, Any]:
+    """Small dashboard projection; avoid the 15-query crawler summary."""
+    candidate_rows, job_rows = await asyncio.gather(
+        repo_query("SELECT status, count() AS count FROM legal_crawl_candidate GROUP BY status;"),
+        repo_query("SELECT status, count() AS count FROM legal_import_job GROUP BY status;"),
     )
-    ocr_failures = sum(
-        1
-        for item in candidates
-        if isinstance(item, dict)
-        and str((item.get("raw_metadata") or {}).get("ocr_status") or "").lower()
-        in {"failed", "error"}
-    )
-    form_summary = form_candidates.get("summary") if isinstance(form_candidates, dict) else {}
+    counts = {str(row.get("status") or "unknown"): int(row.get("count") or 0)
+              for row in candidate_rows if isinstance(row, dict)}
+    jobs = {str(row.get("status") or "unknown"): int(row.get("count") or 0)
+            for row in job_rows if isinstance(row, dict)}
+    pending = counts.get("pending", 0)
+    imported = counts.get("imported", 0)
     return {
-        "candidate_status": dict(candidate_status),
-        "forms": {
-            "total": int(inventory.get("total_metadata_records") or 0),
-            "official": int(inventory.get("valid_official_forms_count") or 0),
-            "missing_files": int(inventory.get("missing_files_count") or 0),
-            "invalid_files": int(inventory.get("invalid_files_count") or 0),
-            "pending": int((form_summary or {}).get("pending_count") or 0),
-        },
-        "faqs": {"total": len(faqs or []), "by_status": dict(faq_status)},
-        "ocr_failures": ocr_failures,
+        "total_candidates": sum(counts.values()),
+        "pending_candidates": pending,
+        "pending_document_candidates": pending,
+        "approved_candidates": counts.get("approved", 0),
+        "imported_candidates": imported,
+        "activated_candidates": 0,
+        "unverified_imported_candidates": imported,
+        "rejected_candidates": counts.get("rejected", 0),
+        "needs_attention_candidates": sum(counts.get(key, 0) for key in ("changes_requested", "import_failed", "replacement_review")),
+        "import_queue": {key: jobs.get(key, 0) for key in ("queued", "running", "failed", "completed")},
+        "by_domain": {}, "by_source": {},
+        "by_organization_unit": {},
+        "by_assignment_state": {"assigned": 0, "shared": 0, "unassigned": 0},
     }
 
 
 async def _support_summary() -> dict[str, Any]:
-    rows = [_ticket_record(ticket) for ticket in live_support._list_all_tickets()]
+    repository = live_support._canonical_support_repository()
+    if repository is not None:
+        try:
+            rows = await asyncio.to_thread(repository.admin_ticket_metadata, SupportActor(user_id="dashboard", role="admin"))
+        except Exception:
+            rows = []
+    else:
+        rows = [_ticket_record(ticket) for ticket in live_support._list_all_tickets()]
+    by_organization_unit = Counter(
+        str(row.get("primary_organization_unit_id") or "").strip()
+        for row in rows
+        if str(row.get("primary_organization_unit_id") or "").strip()
+    )
     return {
         "total": len(rows),
-        "waiting": sum(1 for row in rows if row["status"] == "waiting"),
+        "waiting": sum(1 for row in rows if row["status"] in {"waiting", "queued"}),
         "active": sum(1 for row in rows if row["status"] in {"assigned", "active"}),
         "closed": sum(1 for row in rows if row["status"] == "closed"),
         "unassigned": sum(
             1
             for row in rows
-            if row["status"] == "waiting" and not row.get("assigned_officer_id")
+            if row["status"] in {"waiting", "queued"} and not row.get("assigned_officer_id")
         ),
-        "overdue": sum(1 for row in rows if row["sla_overdue"]),
-        "by_domain": dict(Counter(str(row.get("domain") or "unknown") for row in rows)),
+        "overdue": sum(1 for row in rows if row.get("sla_overdue", row.get("overdue", False))),
+        "by_domain": dict(Counter(str(row.get("domain") or row.get("canonical_domain") or "unknown") for row in rows)),
+        "by_organization_unit": dict(sorted(by_organization_unit.items())),
+        "without_organization_unit": sum(
+            1
+            for row in rows
+            if not str(row.get("primary_organization_unit_id") or "").strip()
+        ),
     }
 
 
@@ -461,6 +711,7 @@ def _build_attention_items(
     users: dict[str, Any],
     support: dict[str, Any],
     models: dict[str, Any],
+    organization: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
 
@@ -493,6 +744,21 @@ def _build_attention_items(
         "crawler": "/legal-import?tab=import",
         "effectivity_monitor": "/legal-management/validity",
     }
+    component_labels = {
+        "api": "Máy chủ ứng dụng",
+        "database": "Cơ sở dữ liệu",
+        "ask_retrieval": "Trợ lý hỏi đáp pháp luật",
+        "embedding": "Kho tìm kiếm ngữ nghĩa",
+        "import_worker": "Tiến trình nạp dữ liệu",
+        "crawler": "Tiến trình thu thập văn bản",
+        "effectivity_monitor": "Tiến trình theo dõi hiệu lực",
+    }
+    status_labels = {
+        "available": "có thể sử dụng",
+        "degraded": "hoạt động chưa ổn định",
+        "unavailable": "đang gián đoạn",
+        "unknown": "chưa xác định",
+    }
     for name, component in (components or {}).items():
         status = str((component or {}).get("status") or "unavailable")
         if status == "healthy":
@@ -504,21 +770,23 @@ def _build_attention_items(
         )
         add(
             f"health.{name}.{status}", severity,
-            f"Thành phần {name} cần kiểm tra",
-            f"Trạng thái hiện tại: {status}.", 1, component_links.get(name),
+            f"{component_labels.get(name, 'Dịch vụ hệ thống')} cần kiểm tra",
+            f"Trạng thái hiện tại: {status_labels.get(status, 'cần kiểm tra')}.",
+            1,
+            component_links.get(name),
         )
 
     queue = crawl.get("import_queue") if isinstance(crawl, dict) else {}
     add("import.failed", "critical", "Tác vụ nạp dữ liệu bị lỗi", "Mở hàng chờ để kiểm tra nguyên nhân đã làm sạch.", _number(queue, "failed"), "/legal-import?tab=proposals&status=needs_attention")
-    add("import.running", "info", "Tác vụ nạp dữ liệu đang chạy", "Theo dõi tiến độ chuẩn hóa và tạo vector.", _number(queue, "running") + _number(queue, "queued"), "/legal-import?tab=proposals&status=import_queued")
+    add("import.running", "info", "Tác vụ nạp dữ liệu đang chạy", "Theo dõi tiến độ chuẩn hóa và lập chỉ mục tìm kiếm.", _number(queue, "running") + _number(queue, "queued"), "/legal-import?tab=proposals&status=import_queued")
     add("candidate.pending", "warning", "Đề xuất văn bản chờ duyệt", "Đề xuất chưa được dùng cho trả lời trước khi Admin duyệt và kích hoạt.", _number(crawl, "pending_document_candidates", "pending_candidates"), "/legal-import?tab=proposals&status=pending")
-    add("candidate.unverified_import", "warning", "Bản nhập chưa xác nhận kích hoạt", "Kiểm tra document, chunk và trạng thái active trước khi phục vụ retrieval.", _number(crawl, "unverified_imported_candidates"), "/legal-import?tab=proposals&status=imported")
+    add("candidate.unverified_import", "warning", "Bản nhập chưa xác nhận kích hoạt", "Kiểm tra văn bản, các đoạn nội dung và trạng thái kích hoạt trước khi đưa vào tra cứu.", _number(crawl, "unverified_imported_candidates"), "/legal-import?tab=proposals&status=imported")
 
     documents = legal.get("documents") if isinstance(legal, dict) else {}
     structure = legal.get("structure") if isinstance(legal, dict) else {}
     add("legal.missing_source", "warning", "Văn bản thiếu nguồn chính thức", "Bổ sung và xác minh URL nguồn trước khi dùng làm căn cứ.", _number(documents, "missing_source", "missing_sources", "missing_source_count"), "/legal-management?data_quality=missing_source")
-    add("legal.missing_metadata", "warning", "Văn bản thiếu metadata", "Kiểm tra số hiệu, cơ quan ban hành và mốc hiệu lực.", _number(documents, "missing_metadata", "missing_metadata_count"), "/legal-management?data_quality=missing_metadata")
-    add("legal.zero_chunks", "critical", "Văn bản chưa có chunk", "Văn bản không thể phục vụ truy xuất khi chưa có chunk hợp lệ.", _number(documents, "zero_chunks", "zero_chunk_documents") + _number(structure, "zero_chunks", "zero_chunk_documents"), "/legal-management?data_quality=zero_chunks")
+    add("legal.missing_metadata", "warning", "Văn bản thiếu thông tin nhận diện", "Kiểm tra số hiệu, cơ quan ban hành và mốc hiệu lực.", _number(documents, "missing_metadata", "missing_metadata_count"), "/legal-management?data_quality=missing_metadata")
+    add("legal.zero_chunks", "critical", "Văn bản chưa được chia đoạn", "Văn bản chưa thể tra cứu khi nội dung chưa được chia thành các đoạn hợp lệ.", _number(documents, "zero_chunks", "zero_chunk_documents") + _number(structure, "zero_chunks", "zero_chunk_documents"), "/legal-management?data_quality=zero_chunks")
     add("legal.unknown_validity", "warning", "Văn bản chưa rõ hiệu lực", "Đối chiếu nguồn chính thức trước khi kích hoạt cho câu trả lời.", _number(documents, "unknown", "unknown_status", "unknown_validity"), "/legal-management?validity_status=unknown")
 
     forms = knowledge.get("forms") if isinstance(knowledge, dict) else {}
@@ -526,12 +794,30 @@ def _build_attention_items(
     faq_status = faqs.get("by_status") if isinstance(faqs, dict) else {}
     add("forms.pending", "warning", "Biểu mẫu chờ duyệt", "Xác minh tệp và nguồn chính thức của biểu mẫu.", _number(forms, "pending"), "/legal-import?tab=forms&form_status=candidate_pending_review")
     add("forms.missing_files", "warning", "Biểu mẫu thiếu tệp vật lý", "Danh mục có metadata nhưng chưa có tệp chính thức hợp lệ.", _number(forms, "missing_files"), "/legal-import?tab=forms")
-    add("knowledge.ocr_failures", "warning", "Trích xuất OCR thất bại", "Kiểm tra lại tệp nguồn hoặc bộ đọc tài liệu.", _number(knowledge, "ocr_failures"), "/legal-import?tab=proposals&status=needs_attention")
-    add("faq.pending", "info", "FAQ chưa được duyệt", "FAQ nháp không được hiển thị như hướng dẫn đã xác minh.", _number(faq_status, "draft", "pending"), "/faq-management")
+    add("knowledge.ocr_failures", "warning", "Không đọc được nội dung tệp", "Kiểm tra lại tệp nguồn hoặc công cụ đọc tài liệu.", _number(knowledge, "ocr_failures"), "/legal-import?tab=proposals&status=needs_attention")
+    add("faq.pending", "info", "Câu hỏi thường gặp chưa được duyệt", "Nội dung nháp chưa được hiển thị như hướng dẫn đã xác minh.", _number(faq_status, "draft", "pending"), "/faq-management")
 
     add("users.locked", "warning", "Tài khoản đang bị khóa", "Rà soát trạng thái và lý do khóa tài khoản.", _number(users, "locked"), "/users?status=locked")
     add("users.must_change_password", "info", "Tài khoản cần đổi mật khẩu", "Tài khoản chưa thể sử dụng nghiệp vụ trước khi đổi mật khẩu tạm.", _number(users, "must_change_password"), "/users?status=password-change")
-    add("support.overdue", "critical", "Phiên hỗ trợ quá SLA", "Cần điều phối cán bộ đúng lĩnh vực; Dashboard không hiển thị nội dung trao đổi.", _number(support, "overdue"), None)
+    readiness = organization.get("readiness") if isinstance(organization, dict) else {}
+    readiness_blockers = readiness.get("blocking_issue_count") if readiness else None
+    if readiness_blockers is None:
+        readiness_blockers = sum(
+            int(value)
+            for key, value in (readiness or {}).items()
+            if key not in {"ready_for_unit_primary", "pending_candidates_without_assignment"}
+            and isinstance(value, (int, float))
+            and not isinstance(value, bool)
+        )
+    add(
+        "organization.cutover_not_ready",
+        "warning",
+        "Dữ liệu phòng ban chưa sẵn sàng",
+        "Mở cài đặt để xử lý các bản ghi chưa phân công trước khi chuyển chế độ vận hành.",
+        readiness_blockers,
+        "/settings",
+    )
+    add("support.overdue", "critical", "Phiên hỗ trợ quá SLA", "Cần điều phối cán bộ đúng lĩnh vực; Dashboard không hiển thị nội dung trao đổi.", _number(support, "overdue"), "/admin/support?sla=overdue")
     add("support.unassigned", "warning", "Phiên hỗ trợ chưa có cán bộ", "Kiểm tra phân công cán bộ và phạm vi lĩnh vực.", _number(support, "unassigned"), None)
     if isinstance(models, dict) and not _is_unavailable(models) and models.get("ready_for_answers") is False:
         add("models.not_ready", "critical", "Cấu hình AI chưa sẵn sàng", "Cần có model chat và embedding mặc định.", 1, "/settings/api-keys")
@@ -550,7 +836,11 @@ def _build_attention_items(
     return sorted(items, key=lambda item: (order[item["severity"]], item["code"]))
 
 
-async def _build_dashboard_snapshot(request: Request) -> dict[str, Any]:
+async def _build_dashboard_snapshot(
+    request: Request,
+    *,
+    section_timeout_seconds: float = DASHBOARD_SECTION_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
     # Local import avoids changing router initialization order.
     from api.routers import legal_search as legal_search_router
 
@@ -560,17 +850,39 @@ async def _build_dashboard_snapshot(request: Request) -> dict[str, Any]:
         observed_dt.astimezone(_dashboard_timezone).replace(hour=0, minute=0, second=0, microsecond=0)
         - timedelta(days=6)
     ).astimezone(timezone.utc).isoformat()
-    results = await asyncio.gather(
-        _dashboard_read(_system_health()),
-        _dashboard_read(legal_search_router.legal_management_summary(request)),
-        _dashboard_read(LegalCrawlService.summary()),
-        _dashboard_read(_knowledge_summary()),
-        _dashboard_read(list_users_with_profiles()),
-        _dashboard_read(_support_summary()),
-        _dashboard_read(_model_configuration_summary()),
-        _dashboard_read(list_audit_logs(limit=5001, date_from=audit_start)),
+    # The Surreal client is guarded by one operation lock.  Launching these
+    # reads with gather() only queues eight cancellations behind the first
+    # query, which both loses data and prolongs the lock.  Keep the projection
+    # bounded but read it in a deterministic sequence instead.
+    operations = (
+        (_system_health(), section_timeout_seconds),
+        (
+            legal_search_router.legal_management_summary(request),
+            max(section_timeout_seconds, LEGAL_REPOSITORY_SECTION_TIMEOUT_SECONDS),
+        ),
+        (_dashboard_crawl_summary(), section_timeout_seconds),
+        (
+            _knowledge_summary(),
+            max(section_timeout_seconds, DASHBOARD_METADATA_SECTION_TIMEOUT_SECONDS),
+        ),
+        (list_users_with_profiles(), section_timeout_seconds),
+        (
+            _organization_summary(),
+            max(section_timeout_seconds, DASHBOARD_METADATA_SECTION_TIMEOUT_SECONDS),
+        ),
+        (_support_summary(), section_timeout_seconds),
+        (_model_configuration_summary(), section_timeout_seconds),
+        (list_audit_logs(limit=500, date_from=audit_start), section_timeout_seconds),
     )
-    health_raw, legal_raw, crawl_raw, knowledge_raw, users_raw, support_raw, models_raw, audits_raw = results
+    results: list[Any] = []
+    for operation, timeout_seconds in operations:
+        results.append(
+            await _dashboard_read(
+                operation,
+                timeout_seconds=timeout_seconds,
+            )
+        )
+    health_raw, legal_raw, crawl_raw, knowledge_raw, users_raw, organization_raw, support_raw, models_raw, audits_raw = results
 
     health_status = "available"
     if not _is_unavailable(health_raw):
@@ -587,6 +899,7 @@ async def _build_dashboard_snapshot(request: Request) -> dict[str, Any]:
     crawl = _dashboard_section(crawl_raw, observed_at=observed_at)
     knowledge = _dashboard_section(knowledge_raw, observed_at=observed_at)
     users = _dashboard_section(_safe_users_summary(users_raw), observed_at=observed_at)
+    organization = _dashboard_section(organization_raw, observed_at=observed_at)
     support = _dashboard_section(support_raw, observed_at=observed_at)
     models = _dashboard_section(models_raw, observed_at=observed_at)
     metrics_raw = telemetry.summary()
@@ -608,6 +921,7 @@ async def _build_dashboard_snapshot(request: Request) -> dict[str, Any]:
         crawl=crawl,
         knowledge=knowledge,
         users=users,
+        organization=organization,
         support=support,
         models=models,
     )
@@ -617,6 +931,9 @@ async def _build_dashboard_snapshot(request: Request) -> dict[str, Any]:
             "generated_at": observed_at,
             "cache_ttl_seconds": DASHBOARD_CACHE_TTL_SECONDS,
             "cached": False,
+            "refreshing": False,
+            "stale": False,
+            "age_seconds": 0.0,
         },
         "attention_items": attention_items,
         "operational_alerts": project_operational_alerts(attention_items),
@@ -625,6 +942,7 @@ async def _build_dashboard_snapshot(request: Request) -> dict[str, Any]:
         "crawl_import": crawl,
         "knowledge": knowledge,
         "users": users,
+        "organization": organization,
         "support": support,
         "models": models,
         "runtime_metrics": runtime_metrics,
@@ -639,6 +957,129 @@ async def _build_dashboard_snapshot(request: Request) -> dict[str, Any]:
     }
 
 
+async def _refresh_dashboard_cache(
+    *,
+    section_timeout_seconds: float = 1.0,
+) -> None:
+    """Refresh the projection without delaying a normal dashboard read."""
+
+    global _dashboard_cache, _dashboard_cache_created_at
+    async with _dashboard_cache_lock:
+        snapshot = await _build_dashboard_snapshot(
+            _internal_admin_request(),
+            section_timeout_seconds=section_timeout_seconds,
+        )
+        snapshot = _preserve_last_good_dashboard_sections(
+            previous=_dashboard_cache,
+            current=snapshot,
+        )
+        _dashboard_cache = deepcopy(snapshot)
+        _dashboard_cache_created_at = monotonic()
+
+
+def _dashboard_refresh_done(task: asyncio.Task[None]) -> None:
+    global _dashboard_refresh_task
+    _dashboard_refresh_task = None
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        # The stale projection remains valid. Errors are intentionally not
+        # exposed to the dashboard client and the next poll can retry.
+        pass
+
+
+async def _delayed_dashboard_refresh() -> None:
+    # Give the first page paint and adjacent read-only requests a chance to
+    # complete before the aggregate projection starts using the serialized DB
+    # connection.
+    await asyncio.sleep(0.35)
+    await _refresh_dashboard_cache()
+
+
+def _schedule_dashboard_refresh(*, force: bool = False) -> None:
+    """Start one background projection without ever delaying a dashboard read.
+
+    A manual refresh is a request for newer data, not permission to make the
+    admin's browser wait for every serialized database/read-model operation.
+    It may bypass the ordinary retry cooldown, but it still joins an already
+    running refresh rather than creating a second competing projection.
+    """
+
+    global _dashboard_refresh_task, _dashboard_refresh_last_attempt
+    if _dashboard_refresh_task is not None and not _dashboard_refresh_task.done():
+        return
+    now = monotonic()
+    if not force and now - _dashboard_refresh_last_attempt < 30.0:
+        return
+    _dashboard_refresh_last_attempt = now
+    _dashboard_refresh_task = asyncio.create_task(_delayed_dashboard_refresh())
+    _dashboard_refresh_task.add_done_callback(_dashboard_refresh_done)
+
+
+def _dashboard_cached_response(*, force_stale: bool = False) -> dict[str, Any]:
+    """Return the last coherent snapshot while a newer one is prepared."""
+
+    cached = deepcopy(_dashboard_cache or {})
+    cache_age = max(0.0, monotonic() - _dashboard_cache_created_at)
+    refreshing = (
+        _dashboard_refresh_task is not None
+        and not _dashboard_refresh_task.done()
+    )
+    cached.setdefault("freshness", {})
+    cached["freshness"].update(
+        {
+            "cached": True,
+            "refreshing": refreshing,
+            # Keep polling if a manual refresh is in flight even when the
+            # existing cached projection is younger than its normal TTL.
+            "stale": bool(force_stale or refreshing or cache_age >= DASHBOARD_CACHE_TTL_SECONDS),
+            "age_seconds": round(cache_age, 3),
+        }
+    )
+    return cached
+
+
+async def prewarm_admin_dashboard_cache() -> dict[str, Any]:
+    """Build the first complete projection before the frontend is declared ready."""
+
+    await _refresh_dashboard_cache(section_timeout_seconds=30.0)
+    return deepcopy(_dashboard_cache or {})
+
+
+def _preserve_last_good_dashboard_sections(
+    *,
+    previous: dict[str, Any] | None,
+    current: dict[str, Any],
+) -> dict[str, Any]:
+    """Do not replace usable cached sections with a transient timeout."""
+
+    if not previous:
+        return current
+    merged = deepcopy(current)
+    for key in (
+        "health",
+        "legal_repository",
+        "crawl_import",
+        "knowledge",
+        "users",
+        "organization",
+        "support",
+        "models",
+        "runtime_metrics",
+        "audit_7d",
+    ):
+        if _is_unavailable(merged.get(key)) and not _is_unavailable(previous.get(key)):
+            merged[key] = deepcopy(previous[key])
+    if isinstance(merged.get("recent_audit"), dict) and _is_unavailable(
+        merged["recent_audit"]
+    ):
+        if not isinstance(previous.get("recent_audit"), dict):
+            merged["recent_audit"] = deepcopy(previous["recent_audit"])
+    return merged
+
+
 @router.get("/dashboard", response_model=AdminDashboardResponse)
 async def dashboard_overview(
     request: Request,
@@ -650,29 +1091,35 @@ async def dashboard_overview(
     global _dashboard_cache, _dashboard_cache_created_at
 
     now = monotonic()
-    if (
-        not force_refresh
-        and _dashboard_cache is not None
-        and now - _dashboard_cache_created_at < DASHBOARD_CACHE_TTL_SECONDS
-    ):
-        cached = deepcopy(_dashboard_cache)
-        cached["freshness"]["cached"] = True
-        return cached
+    if force_refresh:
+        # Do not serialize a manual click behind the dashboard's aggregate
+        # database projection.  The frontend receives the last valid values
+        # immediately and polls until this one refresh has completed.
+        _schedule_dashboard_refresh(force=True)
+        if _dashboard_cache is not None:
+            return _dashboard_cached_response(force_stale=True)
+        return _dashboard_warming_snapshot()
 
-    async with _dashboard_cache_lock:
-        now = monotonic()
-        if (
-            not force_refresh
-            and _dashboard_cache is not None
-            and now - _dashboard_cache_created_at < DASHBOARD_CACHE_TTL_SECONDS
-        ):
-            cached = deepcopy(_dashboard_cache)
-            cached["freshness"]["cached"] = True
-            return cached
-        snapshot = await _build_dashboard_snapshot(request)
-        _dashboard_cache = deepcopy(snapshot)
-        _dashboard_cache_created_at = monotonic()
-        return snapshot
+    if not force_refresh and _dashboard_cache is not None:
+        cache_age = max(0.0, now - _dashboard_cache_created_at)
+        refresh_active = (
+            _dashboard_refresh_task is not None
+            and not _dashboard_refresh_task.done()
+        )
+        if cache_age >= DASHBOARD_CACHE_TTL_SECONDS and not refresh_active:
+            _schedule_dashboard_refresh()
+        return _dashboard_cached_response()
+
+    # A warming request must never wait behind the background projection.  The
+    # frontend polls this lightweight response until the cache is available.
+    if not force_refresh and _dashboard_cache is None:
+        _schedule_dashboard_refresh()
+        return _dashboard_warming_snapshot()
+
+    # Both branches above are exhaustive. Keep a truthful non-blocking
+    # fallback in case a future caller changes the cache lifecycle.
+    _schedule_dashboard_refresh()
+    return _dashboard_warming_snapshot()
 
 
 def _ticket_record(ticket: dict[str, Any]) -> dict[str, Any]:
@@ -683,16 +1130,26 @@ def _ticket_record(ticket: dict[str, Any]) -> dict[str, Any]:
         age_minutes = int((_now() - datetime.fromisoformat(created.replace("Z", "+00:00"))).total_seconds() // 60)
     except (TypeError, ValueError):
         pass
+    projection = {
+        "first_response_overdue": False,
+        "resolution_overdue": False,
+        "sla_overdue": False,
+        "overdue_minutes": 0,
+        "sla_basis": "unknown",
+    }
     return {
         "id": str(ticket.get("id") or ""),
         "domain": ticket.get("domain"),
+        "primary_organization_unit_id": ticket.get(
+            "primary_organization_unit_id"
+        ),
         "status": live_support._normalize_status(ticket.get("status")),
         "priority": ticket.get("priority") or "normal",
         "assigned_officer_id": ticket.get("assigned_officer_id"),
         "created_at": created,
         "updated_at": updated,
         "age_minutes": age_minutes,
-        "sla_overdue": bool(age_minutes is not None and age_minutes > 60 and live_support._normalize_status(ticket.get("status")) in {"waiting", "assigned", "active"}),
+        **projection,
         "rating": ticket.get("rating"),
         "message_count": len(ticket.get("messages") or []),
     }
@@ -954,10 +1411,16 @@ async def knowledge_overview(request: Request) -> dict[str, Any]:
 
 async def _retired_review_candidate(candidate_id: str, body: CandidateActionRequest, request: Request) -> dict[str, Any]:
     await _require_admin(request)
+    from api.system_settings import active_settings
+
+    settings = await active_settings()
     reason = _reason(body.reason)
     candidate = await LegalCrawlService.review_candidate(
         candidate_id, body.decision, body.review_note or reason,
         reviewed_by=get_request_user_id(request), reviewed_role="admin",
+        organization_routing_mode=getattr(
+            settings, "organization_routing_mode", "legacy"
+        ),
     )
     await _audit(
         request, action="admin.knowledge.candidate.review", resource_type="legal_crawl_candidate",
@@ -995,18 +1458,21 @@ def _audit_export_rows(rows: list[dict[str, Any]], content: str) -> list[dict[st
     return result
 
 
-def _audit_export_bytes(rows: list[dict[str, str]], export_format: str) -> tuple[bytes, str]:
-    columns = ["Thời điểm", "Vai trò", "Thao tác", "Loại dữ liệu", "Định danh", "Lý do"]
+def _audit_export_bytes(
+    rows: list[dict[str, str]], export_format: str, *, columns: list[str] | None = None,
+) -> tuple[bytes, str]:
+    columns = columns or ["Thời điểm", "Vai trò", "Thao tác", "Loại dữ liệu", "Định danh", "Lý do"]
     if export_format == "csv":
         stream = io.StringIO(newline="")
         writer = csv.DictWriter(stream, fieldnames=columns)
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows([{column: row.get(column, "") for column in columns} for row in rows])
         return stream.getvalue().encode("utf-8-sig"), "text/csv; charset=utf-8"
     if export_format == "xlsx":
         try:
             from openpyxl import Workbook
             from openpyxl.styles import Font
+            from openpyxl.utils import get_column_letter
         except ImportError as exc:
             raise HTTPException(status_code=503, detail="Chưa cài thành phần xuất Excel.") from exc
         workbook = Workbook()
@@ -1016,11 +1482,12 @@ def _audit_export_bytes(rows: list[dict[str, str]], export_format: str) -> tuple
         for cell in sheet[1]:
             cell.font = Font(bold=True)
         for row in rows:
-            sheet.append([row[column] for column in columns])
+            sheet.append([row.get(column, "") for column in columns])
         sheet.freeze_panes = "A2"
         sheet.auto_filter.ref = sheet.dimensions
-        for column, width in zip("ABCDEF", (24, 14, 36, 24, 34, 48)):
-            sheet.column_dimensions[column].width = width
+        widths = (24, 14, 36, 24, 34, 48)
+        for index, column in enumerate(columns, start=1):
+            sheet.column_dimensions[get_column_letter(index)].width = widths[index - 1] if index <= len(widths) else 32
         stream = io.BytesIO()
         workbook.save(stream)
         return stream.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -1061,8 +1528,11 @@ def _audit_export_bytes(rows: list[dict[str, str]], export_format: str) -> tuple
         title.fontName = "NotoSans"
         title.fontSize = 14
         data = [[Paragraph(column, normal) for column in columns]]
-        data.extend([[Paragraph(str(row[column]), normal) for column in columns] for row in rows])
-        table = Table(data, repeatRows=1, colWidths=[31 * mm, 20 * mm, 46 * mm, 30 * mm, 47 * mm, 62 * mm])
+        data.extend([[Paragraph(str(row.get(column, "")), normal) for column in columns] for row in rows])
+        base_widths = [31, 20, 46, 30, 47, 62] if len(columns) == 6 else [31] * len(columns)
+        max_width = 270
+        scale = min(1, max_width / sum(base_widths))
+        table = Table(data, repeatRows=1, colWidths=[width * scale * mm for width in base_widths])
         table.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E8F0FE")),
             ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#C8CDD4")),

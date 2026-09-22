@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react'
+import { render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const api = vi.hoisted(() => ({ snapshot: vi.fn() }))
@@ -33,14 +33,15 @@ function dashboardSnapshot() {
     },
     legal_repository: {
       status: 'available', observed_at: observed,
-      documents: { total: 12, active: 10, expired: 1, unknown_status: 1 },
+      documents: { total: 12, active: 10, expired: 1, unknown_status: 1, by_primary_organization_unit: { 'tu-phap': 4 } },
       structure: { articles: 40, chunks: 80 }, tiers: {},
       vectors: { collections: { legal_core: 70 }, database_chunks: 80 }, validity: {}, faq_impacts: {},
     },
-    crawl_import: { status: 'available', observed_at: observed },
+    crawl_import: { status: 'available', observed_at: observed, by_organization_unit: { 'tu-phap': 2 } },
     knowledge: { status: 'available', observed_at: observed },
-    users: { status: 'available', observed_at: observed },
-    support: { status: 'available', observed_at: observed, total: 5, waiting: 2, active: 1, closed: 2, unassigned: 1, overdue: 1 },
+    users: { status: 'available', observed_at: observed, officers_by_organization_unit: { 'tu-phap': 3 } },
+    organization: { status: 'available', observed_at: observed, ready_for_unit_primary: false, units: [{ id: 'tu-phap', code: 'tu_phap', name: 'Tư pháp - Hộ tịch', short_name: 'Tư pháp', is_active: true, support_enabled: true }] },
+    support: { status: 'available', observed_at: observed, total: 5, waiting: 2, active: 1, closed: 2, unassigned: 1, overdue: 1, by_organization_unit: { 'tu-phap': 1 } },
     models: { status: 'available', observed_at: observed },
     runtime_metrics: { status: 'available', observed_at: observed },
     audit_7d: { status: 'available', observed_at: observed },
@@ -60,30 +61,61 @@ describe('AdminDashboardPage', () => {
 
     expect(await screen.findByRole('heading', { name: 'Tổng quan hệ thống' })).toBeInTheDocument()
     expect(screen.getByText('Tác vụ nạp dữ liệu bị lỗi')).toBeInTheDocument()
-    expect(screen.getByText('Văn bản pháp lý')).toBeInTheDocument()
-    expect(screen.getByText('Độ phủ tra cứu')).toBeInTheDocument()
-    expect(screen.getByText('Hỗ trợ quá hạn')).toBeInTheDocument()
-    expect(screen.getByText('Tình trạng dịch vụ')).toBeInTheDocument()
-
-    expect(screen.queryByRole('button')).not.toBeInTheDocument()
-    expect(screen.queryByRole('link')).not.toBeInTheDocument()
-    expect(screen.queryByText('Chi tiết kỹ thuật')).not.toBeInTheDocument()
-    expect(screen.queryByText(/Văn bản mới chưa vào hàng rà soát/)).not.toBeInTheDocument()
+    expect(screen.getByText('Kho văn bản pháp luật')).toBeInTheDocument()
+    expect(screen.getByText('Độ phủ dữ liệu tra cứu')).toBeInTheDocument()
+    expect(screen.getByText('Người dùng & Hỗ trợ')).toBeInTheDocument()
+    expect(screen.getByText('Trạng thái 7 Dịch vụ cốt lõi')).toBeInTheDocument()
+    expect(screen.getByText('Phòng ban & Dữ liệu')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Đến quản lý kho văn bản' })).toBeInTheDocument()
+    expect(screen.getByText(/Văn bản mới chưa vào hàng rà soát/)).toBeInTheDocument()
   })
 
-  it('shows missing section data explicitly instead of displaying zero', async () => {
+  it('keeps the overview usable when support data is unavailable', async () => {
     const snapshot = dashboardSnapshot()
     snapshot.support = {
       status: 'unavailable', observed_at: snapshot.observed_at,
       total: 0, waiting: 0, active: 0, closed: 0, unassigned: 0, overdue: 0,
+      by_organization_unit: { 'tu-phap': 0 },
     }
     api.snapshot.mockResolvedValue(snapshot)
 
     render(<AdminDashboardPage />)
 
     await screen.findByRole('heading', { name: 'Tổng quan hệ thống' })
-    const label = screen.getByText('Hỗ trợ quá hạn')
-    expect(within(label.parentElement as HTMLElement).getByText('—')).toBeInTheDocument()
-    expect(screen.getByText('Chưa đọc được dữ liệu hỗ trợ')).toBeInTheDocument()
+    expect(screen.getByText('Người dùng & Hỗ trợ')).toBeInTheDocument()
+    expect(screen.queryByText('Phiên hỗ trợ quá SLA')).not.toBeInTheDocument()
+  })
+
+  it('does not turn missing legal statistics into an empty repository or claim search readiness', async () => {
+    const snapshot = dashboardSnapshot()
+    api.snapshot.mockResolvedValue({ ...snapshot, legal_repository: { status: 'unavailable' } })
+    render(<AdminDashboardPage />)
+    await screen.findByRole('heading', { name: 'Tổng quan hệ thống' })
+    expect(screen.getByText('— hiệu lực')).toBeInTheDocument()
+    expect(screen.getByText('— hết hiệu lực')).toBeInTheDocument()
+    expect(screen.getByText('— đoạn văn bản')).toBeInTheDocument()
+    expect(screen.getByText('Chưa có số liệu xác nhận')).toBeInTheDocument()
+    expect(screen.queryByText('Sẵn sàng tra cứu')).not.toBeInTheDocument()
+  })
+
+  it('uses the inventory expiry total and does not estimate coverage from overlapping collections', async () => {
+    const snapshot = dashboardSnapshot()
+    api.snapshot.mockResolvedValue({
+      ...snapshot,
+      freshness: { ...snapshot.freshness, stale: true },
+      legal_repository: {
+        ...snapshot.legal_repository,
+        serving_release: {
+          cards: { total_retrievable: 11, current_effective: 9, expired_total: 27 },
+        },
+      },
+    })
+    render(<AdminDashboardPage />)
+    await screen.findByRole('heading', { name: 'Tổng quan hệ thống' })
+    expect(screen.getByText('11')).toBeInTheDocument()
+    expect(screen.getByText('9 hiệu lực')).toBeInTheDocument()
+    expect(screen.getByText('27 hết hiệu lực')).toBeInTheDocument()
+    expect(screen.getByText('Chưa có số liệu xác nhận')).toBeInTheDocument()
+    expect(screen.getByText(/Đang hiển thị số liệu đã lưu/)).toBeInTheDocument()
   })
 })

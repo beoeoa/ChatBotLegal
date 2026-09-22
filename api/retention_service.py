@@ -17,6 +17,7 @@ from typing import Any
 from loguru import logger
 
 from api.user_service import write_audit_log
+from api import conversation_service as conversation_store
 from api.legal_audit_chain import is_critical_legal_action
 from open_notebook.database.repository import ensure_record_id, repo_query, repo_update
 
@@ -108,6 +109,14 @@ async def _purge_surreal_conversations(now: datetime, dry_run: bool) -> int:
     for row in rows or []:
         conversation_id = str(row.get("id"))
         if not dry_run:
+            try:
+                await repo_query(
+                    "DELETE conversation_state WHERE conversation = $conversation;",
+                    {"conversation": ensure_record_id(conversation_id)},
+                )
+            except Exception:
+                # Migration 48 is prepared but may not be activated yet.
+                pass
             # Remove message payload/citations/attachments first, then mark conversation.
             await repo_query("DELETE conversation_message WHERE conversation = $conversation;", {"conversation": ensure_record_id(conversation_id)})
             await repo_update("conversation", conversation_id, {"status": "purged", "purged_at": now, "title": "?? x?a theo ch?nh s?ch l?u tr?"})
@@ -120,6 +129,8 @@ def _purge_json_conversations(now: datetime, dry_run: bool) -> int:
         return 0
     count = 0
     for path in CONVERSATIONS_DIR.rglob("*.json"):
+        if "_memory" in path.parts:
+            continue
         data = _load_json(path)
         if not data or data.get("status") == "purged":
             continue
@@ -135,6 +146,66 @@ def _purge_json_conversations(now: datetime, dry_run: bool) -> int:
             # Parent dirs can remain harmlessly empty; never infer another owner's data.
             count += 1
     return count
+
+
+async def _purge_surreal_chat_memory(now: datetime, dry_run: bool) -> dict[str, int]:
+    """Purge expired optional memory after migration 48 is activated."""
+
+    counts = {"conversation_state": 0, "user_memory_item": 0}
+    try:
+        states = await repo_query(
+            "SELECT id FROM conversation_state WHERE expires_at <= $now;",
+            {"now": now},
+        )
+        items = await repo_query(
+            "SELECT id FROM user_memory_item WHERE expires_at <= $now;",
+            {"now": now},
+        )
+    except Exception:
+        return counts
+    counts["conversation_state"] = len(states or [])
+    counts["user_memory_item"] = len(items or [])
+    if not dry_run:
+        await repo_query("DELETE conversation_state WHERE expires_at <= $now;", {"now": now})
+        await repo_query("DELETE user_memory_item WHERE expires_at <= $now;", {"now": now})
+    return counts
+
+
+def _purge_json_chat_memory(now: datetime, dry_run: bool) -> dict[str, int]:
+    counts = {"conversation_state": 0, "user_memory_item": 0}
+    roots = {CONVERSATIONS_DIR, Path(conversation_store.JSON_FALLBACK_DIR)}
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for path in root.rglob("_memory/conversation_states/*.json"):
+            data = _load_json(path)
+            expires = parse_datetime((data or {}).get("expires_at"))
+            if not expires or expires > now:
+                continue
+            counts["conversation_state"] += 1
+            if not dry_run:
+                _safe_remove(path)
+        for path in root.rglob("_memory/long_term_*.json"):
+            data = _load_json(path)
+            if not data:
+                continue
+            items = list(data.get("items") or [])
+            retained: list[dict[str, Any]] = []
+            changed = False
+            for item in items:
+                expires = parse_datetime(item.get("expires_at"))
+                if expires and expires <= now:
+                    counts["user_memory_item"] += 1
+                    changed = True
+                else:
+                    retained.append(item)
+            if changed and not dry_run:
+                data["items"] = retained
+                path.write_text(
+                    json.dumps(data, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+    return counts
 
 
 def _purge_json_ask_sessions(now: datetime, dry_run: bool) -> int:
@@ -449,6 +520,8 @@ async def run_retention_purge(*, now: datetime | None = None, dry_run: bool = Fa
         "started_at": now.isoformat(), "dry_run": dry_run,
         "chat_surreal": await _purge_surreal_conversations(now, dry_run),
         "chat_json": _purge_json_conversations(now, dry_run),
+        "chat_memory": await _purge_surreal_chat_memory(now, dry_run),
+        "chat_memory_json": _purge_json_chat_memory(now, dry_run),
         "ask_sessions_json": _purge_json_ask_sessions(now, dry_run),
         "case_files": _purge_case_files(now, dry_run),
         "case_surreal": await _purge_surreal_legal_cases(now, dry_run),

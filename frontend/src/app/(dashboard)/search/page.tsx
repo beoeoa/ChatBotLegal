@@ -1,45 +1,71 @@
 'use client'
+import { AttachmentCard } from '@/components/search/AttachmentCard'
+import { restoreConversationAttachment } from '@/lib/utils/conversation-attachment'
+import { LegalPreviewProvider } from '@/components/legal/LegalPreviewProvider'
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams, useRouter } from 'next/navigation'
 import dynamic from 'next/dynamic'
 import { toast } from 'sonner'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import { AppShell } from '@/components/layout/AppShell'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Button } from '@/components/ui/button'
-import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { Label } from '@/components/ui/label'
 import { Checkbox } from '@/components/ui/checkbox'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { Search, ChevronDown, AlertCircle, Settings, Save, MessageCircleQuestion, Paperclip, X, FileText, ImageIcon, Mic, Square, Shield, User } from 'lucide-react'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { AlertCircle, ArrowUp, Settings, Paperclip } from 'lucide-react'
 import { useSearch } from '@/lib/hooks/use-search'
 import { useAsk } from '@/lib/hooks/use-ask'
 import { useModelDefaults, useModels } from '@/lib/hooks/use-models'
-import { useModalManager } from '@/lib/hooks/use-modal-manager'
-import { LoadingSpinner } from '@/components/common/LoadingSpinner'
+import { shouldLoadAdminModelMetadata } from '@/lib/utils/model-access'
 import { AskMessageHistory } from '@/components/search/AskMessageHistory'
+import { ChatModelSelector, type ChatModelOption } from '@/components/search/ChatModelSelector'
+import { ChatMemoryContinuations } from '@/components/search/ChatMemoryContinuations'
 import { ConversationSidebar, type ConversationDetail } from '@/components/search/ConversationSidebar'
 import { useAuthStore } from '@/lib/stores/auth-store'
 import { searchApi, LocalModelInfo } from '@/lib/api/search'
 import { legalImportApi, LegalDomain } from '@/lib/api/legal-import'
 import { apiClient } from '@/lib/api/client'
+import { formatApiError, getApiErrorCode } from '@/lib/utils/error-handler'
 import type { AskMessage } from '@/lib/types/search'
-import { appendPendingAskTurn, cancelAskTurn, completeAskTurn, failAskTurn } from '@/lib/utils/ask-turn-history'
+import {
+  appendPendingAskTurn,
+  cancelAskTurn,
+  completeAskTurn,
+  failAskTurn,
+} from '@/lib/utils/ask-turn-history'
+import { isCurrentSessionEpoch, nextSessionEpoch, shouldAutoLoadLatestConversation } from '@/lib/utils/conversation-session'
+import { chatStarterQuestions, inferOfficerDepartment, welcomeMessage, type ChatViewerIdentity } from '@/lib/utils/chat-address'
+import { mergeConversationMessagePage, normalizeConversationMessages } from '@/lib/utils/conversation-message-pages'
+import { shouldOfferOfficerSupport } from '@/lib/utils/support-routing'
 
 const AdvancedModelsDialog = dynamic(
   () => import('@/components/search/AdvancedModelsDialog').then((module) => module.AdvancedModelsDialog),
   { ssr: false },
 )
-const SaveToNotebooksDialog = dynamic(
-  () => import('@/components/search/SaveToNotebooksDialog').then((module) => module.SaveToNotebooksDialog),
-  { ssr: false },
-)
+
+type SupportRoutingOption = {
+  domain: string
+  domain_name: string
+  unit_id: string
+  unit_name: string
+  unit_short_name?: string | null
+}
+
+type SupportPreview = {
+  config_revision: number
+  conversation_id?: string | null
+  source_message_id?: string | null
+  question: string
+  ai_summary?: string | null
+  suggested_domain?: string | null
+  suggested_unit?: SupportRoutingOption | null
+  options: SupportRoutingOption[]
+}
 
 const WARD_AGENCY_OPTIONS = [
   {
@@ -79,44 +105,21 @@ const WARD_AGENCY_OPTIONS = [
   },
 ] as const
 
-
-function buildVbplSearchUrl(lawNumber?: string | null, documentTitle?: string | null): string {
-  const query = [lawNumber, documentTitle].filter(Boolean).join(' ').trim() || 'văn bản pháp luật'
-  return `https://www.google.com/search?q=${encodeURIComponent(`${query} site:vbpl.vn`)}`
-}
-
-function isLikelyBrokenVbplUrl(url?: string | null): boolean {
-  if (!url) return true
-  // Old VBPL deep links frequently 404 / blank blank; treat as unreliable.
-  return /vbpl\.vn\/Pages\/vbpq-toanvan\.aspx\?ItemID=/i.test(url)
-}
-
-function resolveLegalSourceLinks(opts: {
-  sourceUrl?: string | null
-  lawNumber?: string | null
-  documentTitle?: string | null
-}) {
-  const fallbackSearchUrl = buildVbplSearchUrl(opts.lawNumber, opts.documentTitle)
-  const directUrl = opts.sourceUrl && !isLikelyBrokenVbplUrl(opts.sourceUrl) ? opts.sourceUrl : null
-  return {
-    directUrl,
-    searchUrl: fallbackSearchUrl,
-  }
-}
-
-
 export default function SearchPage() {
   const { t } = useTranslation()
   const router = useRouter()
   const role = useAuthStore((state) => state.role) || 'citizen'
+  const username = useAuthStore((state) => state.username)
   const canUseSearchTab = false
   const isAuthenticated = useAuthStore((state) => state.isAuthenticated)
   const hasHydrated = useAuthStore((state) => state.hasHydrated)
-  const [userDept, setUserDept] = useState<string | null>(null)
+  const [officerAssignment, setOfficerAssignment] = useState<string | null>(null)
+  const [viewerIdentity, setViewerIdentity] = useState<ChatViewerIdentity | null>({ username })
   
 // URL params
   const searchParams = useSearchParams()
   const urlQuery = searchParams?.get('q') || ''
+  const explicitNewConversation = searchParams?.get('new') === '1'
   const rawMode = searchParams?.get('mode')
   // Citizen cannot use Search tab; force ask even if mode=search is in URL.
   const urlMode: 'ask' | 'search' =
@@ -129,9 +132,9 @@ export default function SearchPage() {
 
   // Search state
   const [searchQuery, setSearchQuery] = useState(urlMode === 'search' ? urlQuery : '')
-  const [searchType, setSearchType] = useState<'text' | 'vector'>('text')
-  const [searchSources, setSearchSources] = useState(true)
-  const [searchNotes, setSearchNotes] = useState(true)
+  const [searchType] = useState<'text' | 'vector'>('text')
+  const [searchSources] = useState(false)
+  const [searchNotes] = useState(false)
 
   // Ask state
   const [askQuestion, setAskQuestion] = useState(urlMode === 'ask' ? urlQuery : '')
@@ -139,110 +142,196 @@ export default function SearchPage() {
   const [offlineModel, setOfflineModel] = useState('qwen2.5:3b')
   const [showRagTrace, setShowRagTrace] = useState(true)
   const [selectedDomain, setSelectedDomain] = useState<string>('__auto__')
-  const [selectedAgency, setSelectedAgency] = useState<string>('__auto__')
   const [domains, setDomains] = useState<LegalDomain[]>([])
   const [localModels, setLocalModels] = useState<LocalModelInfo | null>(null)
+  const [chatModelOptions, setChatModelOptions] = useState<ChatModelOption[]>([])
+  const [selectedModelOption, setSelectedModelOption] = useState<string>('')
+  const [attachmentText, setAttachmentText] = useState('')
+  const extractionEpoch = useRef(0)
+  const [answerDepth, setAnswerDepth] = useState<'quick' | 'balanced' | 'deep'>('balanced')
+  const askInputRef = useRef<HTMLTextAreaElement>(null)
+  const focusComposerAfterTransitionRef = useRef(false)
 
   // --- Persistent Conversation Management ---
   // The API is the source of truth. Local state only mirrors the currently-open conversation.
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null)
   const [chatHistory, setChatHistory] = useState<AskMessage[]>([])
+  const [olderMessageCursor, setOlderMessageCursor] = useState<string | null>(null)
+  const [hasOlderMessages, setHasOlderMessages] = useState(false)
+  const [loadingOlderMessages, setLoadingOlderMessages] = useState(false)
   const [mobileConversationDrawerOpen, setMobileConversationDrawerOpen] = useState(false)
   const [conversationRefreshKey, setConversationRefreshKey] = useState(0)
+  const [selectedMemoryItemIds, setSelectedMemoryItemIds] = useState<string[]>([])
   const [latestConversationLoaded, setLatestConversationLoaded] = useState(false)
-  const chatEndRef = useRef<HTMLDivElement>(null)
+  const [sessionHydrating, setSessionHydrating] = useState(false)
+  const chatContainerRef = useRef<HTMLDivElement>(null)
   const askSubmitLockRef = useRef(false)
   const lastAskSubmissionRef = useRef<{ key: string; at: number } | null>(null)
+  const sessionEpochRef = useRef(0)
+  const observedNewParamRef = useRef(false)
+  const pendingScrollRestoreRef = useRef<{ height: number; top: number } | null>(null)
 
-  const loadConversation = useCallback((conversation: ConversationDetail) => {
+  const loadConversation = useCallback((conversation: ConversationDetail, expectedEpoch = sessionEpochRef.current) => {
+    if (!isCurrentSessionEpoch(expectedEpoch, sessionEpochRef.current)) return false
     setCurrentSessionId(conversation.id)
     // A conversation must alternate user/assistant turns. Older duplicate
     // requests could leave two assistant messages next to each other; keep
     // the latest completed answer when repairing that persisted history.
-    const normalizedMessages = conversation.messages.reduce<AskMessage[]>((acc, message) => {
-      const previous = acc[acc.length - 1]
-      const previousUser = acc[acc.length - 2]
-      const normalizeMessage = (value?: string | null) => (value || '').replace(/\s+/g, ' ').trim()
-      const messageTime = Date.parse(message.created_at || '')
-      const previousUserTime = Date.parse(previousUser?.created_at || '')
-      const isImmediateDuplicateFailedUserTurn =
-        message.role === 'user' &&
-        previous?.role === 'assistant' &&
-        previous.status === 'error' &&
-        previousUser?.role === 'user' &&
-        normalizeMessage(previousUser.content) === normalizeMessage(message.content) &&
-        Number.isFinite(messageTime) &&
-        Number.isFinite(previousUserTime) &&
-        Math.abs(messageTime - previousUserTime) <= 10000
-
-      // Older builds could persist the same failed turn twice. Keep the first
-      // question and let the adjacent-assistant rule below keep one error.
-      if (isImmediateDuplicateFailedUserTurn) {
-        return acc
-      }
-      if (message.role === 'assistant' && previous?.role === 'assistant') {
-        acc[acc.length - 1] = message
-      } else {
-        acc.push(message)
-      }
-      return acc
-    }, [])
+    const normalizedMessages = normalizeConversationMessages(conversation.messages)
     setChatHistory(normalizedMessages)
+    const savedContext = restoreConversationAttachment(conversation.messages)
+    extractionEpoch.current += 1
+    setExtracting(false)
+    setExtractError(null)
+    setAttachmentText(savedContext?.text || '')
+    setAttachedFile(savedContext ? {
+      name: savedContext.name,
+      size: savedContext.size,
+      type: savedContext.type,
+      file_id: savedContext.file_id,
+      sha256: savedContext.sha256,
+    } : null)
+    setExtractionStatus(savedContext?.status || 'complete')
+    const latestModelMessage = [...normalizedMessages]
+      .reverse()
+      .find((message) => message.model_option_id)
+    const persistedOption = conversation.model_option_id || latestModelMessage?.model_option_id
+    if (persistedOption) setSelectedModelOption(persistedOption)
+    setOlderMessageCursor(conversation.next_cursor || null)
+    setHasOlderMessages(Boolean(conversation.has_older_messages && conversation.next_cursor))
+    setLoadingOlderMessages(false)
+    pendingScrollRestoreRef.current = null
+    setSelectedMemoryItemIds([])
+    setSessionHydrating(false)
+    return true
   }, [])
-
-  const createNewSession = useCallback(async () => {
-    try {
-      const res = await apiClient.post('/conversations/', {
-        title: 'Cuộc trò chuyện mới',
-        domain: selectedDomain === '__auto__' ? null : selectedDomain,
-      })
-      loadConversation(res.data as ConversationDetail)
-      setConversationRefreshKey((value) => value + 1)
-    } catch {
-      toast.error('Không tạo được cuộc trò chuyện mới.')
-    }
-  }, [loadConversation, selectedDomain])
 
   const handleConversationDeleted = useCallback((conversationId: string) => {
     if (currentSessionId === conversationId) {
+      sessionEpochRef.current = nextSessionEpoch(sessionEpochRef.current)
       setCurrentSessionId(null)
       setChatHistory([])
+      setOlderMessageCursor(null)
+      setHasOlderMessages(false)
+      setSelectedMemoryItemIds([])
+      setSessionHydrating(false)
+      setLatestConversationLoaded(true)
       setConversationRefreshKey((value) => value + 1)
+      router.replace('/search?new=1')
     }
-  }, [currentSessionId])
+  }, [currentSessionId, router])
 
   useEffect(() => {
-    if (!hasHydrated || !isAuthenticated || latestConversationLoaded || currentSessionId) {
+    if (explicitNewConversation && !observedNewParamRef.current) {
+      observedNewParamRef.current = true
+      sessionEpochRef.current = nextSessionEpoch(sessionEpochRef.current)
+      setCurrentSessionId(null)
+      setChatHistory([])
+      setOlderMessageCursor(null)
+      setHasOlderMessages(false)
+      setSelectedMemoryItemIds([])
+      setSessionHydrating(false)
+    } else if (!explicitNewConversation) {
+      observedNewParamRef.current = false
+    }
+  }, [explicitNewConversation])
+
+  useEffect(() => {
+    if (explicitNewConversation) {
+      if (hasHydrated && isAuthenticated && !latestConversationLoaded) {
+        setLatestConversationLoaded(true)
+      }
+      return
+    }
+    if (!shouldAutoLoadLatestConversation({
+      hasHydrated,
+      isAuthenticated,
+      latestConversationLoaded,
+      currentSessionId,
+      explicitNewConversation,
+    })) {
       return
     }
 
     let cancelled = false
+    const controller = new AbortController()
+    const requestEpoch = sessionEpochRef.current
+    setSessionHydrating(true)
     const loadLatestConversation = async () => {
       try {
-        const listRes = await apiClient.get('/conversations/', { params: { limit: 1 } })
-        const latest = Array.isArray(listRes.data) ? listRes.data[0] : null
-        if (!latest?.id || cancelled) return
-        const detailRes = await apiClient.get(`/conversations/${latest.id}`)
-        if (!cancelled) {
-          loadConversation(detailRes.data as ConversationDetail)
+        const detailRes = await apiClient.get('/conversations/latest', {
+          signal: controller.signal,
+        })
+        if (!detailRes.data || cancelled || !isCurrentSessionEpoch(requestEpoch, sessionEpochRef.current)) return
+        if (!cancelled && isCurrentSessionEpoch(requestEpoch, sessionEpochRef.current)) {
+          loadConversation(detailRes.data as ConversationDetail, requestEpoch)
         }
       } catch {
         // Empty or temporarily unavailable history should not block asking.
       } finally {
-        if (!cancelled) setLatestConversationLoaded(true)
+        if (!cancelled && isCurrentSessionEpoch(requestEpoch, sessionEpochRef.current)) {
+          setLatestConversationLoaded(true)
+          setSessionHydrating(false)
+        }
       }
     }
 
     void loadLatestConversation()
     return () => {
       cancelled = true
+      controller.abort()
     }
-  }, [currentSessionId, hasHydrated, isAuthenticated, latestConversationLoaded, loadConversation, role])
+  }, [currentSessionId, explicitNewConversation, hasHydrated, isAuthenticated, latestConversationLoaded, loadConversation, role])
 
-  // Scroll to bottom on new messages
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  // Preserve the visible anchor when older pages are prepended. Normal answer
+  // updates still follow the latest message at the bottom.
+  useLayoutEffect(() => {
+    if (chatContainerRef.current) {
+      const restore = pendingScrollRestoreRef.current
+      if (restore) {
+        chatContainerRef.current.scrollTop =
+          restore.top + (chatContainerRef.current.scrollHeight - restore.height)
+        pendingScrollRestoreRef.current = null
+        return
+      }
+      chatContainerRef.current.scrollTo({
+        top: chatContainerRef.current.scrollHeight,
+        behavior: 'smooth',
+      })
+    }
   }, [chatHistory])
+
+  const loadOlderMessages = useCallback(async () => {
+    if (!currentSessionId || !olderMessageCursor || loadingOlderMessages) return
+    const requestEpoch = sessionEpochRef.current
+    const container = chatContainerRef.current
+    if (container) {
+      pendingScrollRestoreRef.current = {
+        height: container.scrollHeight,
+        top: container.scrollTop,
+      }
+    }
+    setLoadingOlderMessages(true)
+    try {
+      const response = await apiClient.get(`/conversations/${currentSessionId}/messages`, {
+        params: { before: olderMessageCursor, limit: 30 },
+      })
+      if (!isCurrentSessionEpoch(requestEpoch, sessionEpochRef.current)) return
+      const messages = Array.isArray(response.data?.messages)
+        ? response.data.messages as AskMessage[]
+        : []
+      setChatHistory((current) => mergeConversationMessagePage(current, messages))
+      setOlderMessageCursor(response.data?.next_cursor || null)
+      setHasOlderMessages(Boolean(response.data?.has_more && response.data?.next_cursor))
+    } catch {
+      pendingScrollRestoreRef.current = null
+      toast.error('Không tải được các tin nhắn cũ.')
+    } finally {
+      if (isCurrentSessionEpoch(requestEpoch, sessionEpochRef.current)) {
+        setLoadingOlderMessages(false)
+      }
+    }
+  }, [currentSessionId, loadingOlderMessages, olderMessageCursor])
 
   // Advanced models dialog
   const [showAdvancedModels, setShowAdvancedModels] = useState(false)
@@ -252,30 +341,138 @@ export default function SearchPage() {
     finalAnswer: string
   } | null>(null)
 
-  // Save to notebooks dialog
-  const [showSaveDialog, setShowSaveDialog] = useState(false)
-
   // Citizen upload context state
   const MAX_UPLOAD_BYTES = 10 * 1024 * 1024
-  const SUPPORTED_UPLOAD_EXTENSIONS = ['.txt', '.docx', '.pdf', '.png', '.jpg', '.jpeg']
-  const [attachedFile, setAttachedFile] = useState<File | null>(null)
+  const SUPPORTED_UPLOAD_EXTENSIONS = ['.txt', '.doc', '.docx', '.pdf', '.xls', '.xlsx', '.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tif', '.tiff']
+  type ChatAttachment = {name: string; size: number; type: string; file_id?: string; sha256?: string}
+  const [attachedFile, setAttachedFile] = useState<ChatAttachment | null>(null)
   const [extracting, setExtracting] = useState(false)
+  const [removingAttachment, setRemovingAttachment] = useState(false)
   const [extractError, setExtractError] = useState<string | null>(null)
+  const [extractionStatus, setExtractionStatus] = useState<'processing' | 'complete' | 'partial' | 'error'>('complete')
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const [voiceError, setVoiceError] = useState<string | null>(null)
-  const [isRecordingVoice, setIsRecordingVoice] = useState(false)
-  const [isTranscribingVoice, setIsTranscribingVoice] = useState(false)
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
-  const voiceChunksRef = useRef<Blob[]>([])
-  const voiceStreamRef = useRef<MediaStream | null>(null)
+
 
 
   // Hooks
   const searchMutation = useSearch()
   const ask = useAsk()
-  const { data: modelDefaults, isLoading: modelsLoading } = useModelDefaults()
-  const { data: availableModels } = useModels()
-  const { openModal } = useModalManager()
+  // Conversation hydration is the critical first-load request. Model catalog
+  // requests are useful for the composer but must not compete with restoring
+  // the latest answer on a cold page load.
+  const backgroundMetadataEnabled = hasHydrated && isAuthenticated && latestConversationLoaded
+  const adminModelMetadataEnabled = shouldLoadAdminModelMetadata(role, backgroundMetadataEnabled)
+  const { data: modelDefaults, isLoading: modelsLoading } = useModelDefaults(adminModelMetadataEnabled)
+  const { data: availableModels } = useModels(adminModelMetadataEnabled)
+
+  const beginSessionTransition = useCallback(() => {
+    sessionEpochRef.current = nextSessionEpoch(sessionEpochRef.current)
+    setSessionHydrating(true)
+  }, [])
+
+  const handleSessionTransitionError = useCallback(() => {
+    setSessionHydrating(false)
+  }, [])
+
+  const handleConversationCreated = useCallback((conversation: ConversationDetail) => {
+    const epoch = sessionEpochRef.current
+    setSessionHydrating(false)
+    loadConversation(conversation, epoch)
+    router.replace('/search')
+    // A new conversation must not inherit a failed STT attempt, an attachment
+    // extraction error, or a draft from the previous conversation.  Keeping
+    // those states made the citizen composer look enabled while the submit
+    // path still carried stale voice/new-chat state.
+    setAskQuestion('')
+    setSelectedMemoryItemIds([])
+    extractionEpoch.current += 1
+    setAttachmentText('')
+    setExtracting(false)
+    setAttachedFile(null)
+    setExtractionStatus('complete')
+    setExtractError(null)
+    setExtracting(false)
+    if (fileInputRef.current) fileInputRef.current.value = ''
+    ask.reset()
+    lastAskSubmissionRef.current = null
+    focusComposerAfterTransitionRef.current = true
+  }, [ask, loadConversation, router])
+
+  const handleConversationSelected = useCallback((conversation: ConversationDetail) => {
+    const epoch = sessionEpochRef.current
+    setSessionHydrating(false)
+    loadConversation(conversation, epoch)
+    router.replace('/search')
+  }, [loadConversation, router])
+
+  const handleMemoryContinuation = useCallback((question: string, memoryItemId: string) => {
+    setAskQuestion(question)
+    setSelectedMemoryItemIds([memoryItemId])
+  }, [])
+
+  const handleDraftQuestion = useCallback((question: string) => {
+    setAskQuestion(question)
+    setSelectedMemoryItemIds([])
+  }, [])
+
+  useEffect(() => {
+    if (!focusComposerAfterTransitionRef.current || ask.isStreaming) return
+    let cancelled = false
+    let retryTimer: number | undefined
+    const focusComposer = () => {
+      if (cancelled) return
+      const input = askInputRef.current
+      if (!input || input.disabled) {
+        retryTimer = window.setTimeout(focusComposer, 50)
+        return
+      }
+      input.focus()
+      if (document.activeElement === input) {
+        focusComposerAfterTransitionRef.current = false
+        if (retryTimer !== undefined) window.clearTimeout(retryTimer)
+      }
+    }
+    const frame = requestAnimationFrame(focusComposer)
+    retryTimer = window.setTimeout(focusComposer, 100)
+    return () => {
+      cancelled = true
+      cancelAnimationFrame(frame)
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer)
+    }
+  }, [ask.isStreaming, currentSessionId, sessionHydrating])
+
+  // Keep the composer compact for short questions and let it grow naturally
+  // for pasted text, without forcing a second scrollbar inside the page.
+  useEffect(() => {
+    const input = askInputRef.current
+    if (!input) return
+    input.style.height = 'auto'
+    input.style.height = `${Math.min(input.scrollHeight, 180)}px`
+  }, [askQuestion])
+
+  useEffect(() => {
+    if (!backgroundMetadataEnabled) return
+
+    let cancelled = false
+    void apiClient.get<ChatModelOption[]>('/chat/model-options')
+      .then((response) => {
+        if (cancelled) return
+        const options = Array.isArray(response.data) ? response.data : []
+        setChatModelOptions(options)
+        setSelectedModelOption((current) => (
+          options.some((item) => item.option_id === current)
+            ? current
+            : options.find((item) => item.is_default)?.option_id || options[0]?.option_id || ''
+        ))
+      })
+      .catch(() => {
+        if (!cancelled) setChatModelOptions([])
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [backgroundMetadataEnabled, role])
 
   const modelNameById = useMemo(() => {
     if (!availableModels) {
@@ -288,9 +485,6 @@ export default function SearchPage() {
     if (!id) return t('searchPage.notSet')
     return modelNameById.get(id) ?? id
   }
-
-  const hasEmbeddingModel = !!modelDefaults?.default_embedding_model
-
 
   const formatFileSize = (bytes: number) => {
     if (bytes < 1024 * 1024) return `${Math.ceil(bytes / 1024)} KB`
@@ -305,160 +499,122 @@ export default function SearchPage() {
   const validateCitizenUpload = (file: File): string | null => {
     const ext = getFileExtension(file.name)
     if (!SUPPORTED_UPLOAD_EXTENSIONS.includes(ext)) {
-      return `Định dạng ${ext || 'không rõ'} chưa được hỗ trợ. Chỉ nhận: txt, docx, pdf, png, jpg, jpeg. Không hỗ trợ video/audio.`
+      return `Định dạng ${ext || 'không rõ'} chưa được hỗ trợ. Chỉ nhận: doc, docx, pdf, txt, xls, xlsx, png, jpg, jpeg, webp, bmp, tiff. Không hỗ trợ video/audio.`
     }
     if (file.size > MAX_UPLOAD_BYTES) {
       return `File quá lớn (${formatFileSize(file.size)}). Giới hạn tối đa là ${formatFileSize(MAX_UPLOAD_BYTES)}.`
     }
     if (file.type.startsWith('video/') || file.type.startsWith('audio/')) {
-      return 'Không hỗ trợ audio/video trong bước này. Vui lòng gửi txt, docx, pdf hoặc ảnh png/jpg/jpeg.'
+      return 'Không hỗ trợ audio/video trong bước này. Vui lòng gửi txt, docx, pdf hoặc ảnh PNG/JPG/WEBP/BMP/TIFF.'
     }
     return null
   }
 
-  const clearAttachedFile = () => {
+  const clearAttachedFile = async () => {
+    if (removingAttachment || ask.isStreaming) return
+    const sessionEpoch = sessionEpochRef.current
+    setRemovingAttachment(true)
+    try {
+      if (currentSessionId) await apiClient.delete(`/conversations/${currentSessionId}/attachment`)
+      if (sessionEpoch !== sessionEpochRef.current) return
+    extractionEpoch.current += 1
+    setAttachmentText('')
+    setExtracting(false)
     setAttachedFile(null)
+    setExtractionStatus('complete')
     setExtractError(null)
     if (fileInputRef.current) fileInputRef.current.value = ''
-  }
-
-  const stopVoiceTracks = () => {
-    voiceStreamRef.current?.getTracks().forEach((track) => track.stop())
-    voiceStreamRef.current = null
-  }
-
-  const appendVoiceTranscript = (transcript: string) => {
-    setAskQuestion((prev) => {
-      const cleanTranscript = transcript.trim()
-      if (!prev.trim()) return cleanTranscript
-      return `${prev.trim()}
-${cleanTranscript}`
-    })
+    } catch {
+      toast.error('Chưa gỡ được tệp khỏi hội thoại. Vui lòng thử lại.')
+    } finally { setRemovingAttachment(false) }
   }
 
   const extractApiErrorMessage = (err: unknown, fallback: string) => {
-    if (err && typeof err === 'object' && 'response' in err) {
-      const response = (err as { response?: { data?: { detail?: unknown; message?: unknown } } }).response
-      const detail = response?.data?.detail ?? response?.data?.message
-      if (typeof detail === 'string' && detail.trim()) return detail
-    }
-    if (err instanceof Error && err.message) return err.message
-    return fallback
-  }
-
-  const transcribeVoiceBlob = async (blob: Blob) => {
-    setIsTranscribingVoice(true)
-    setVoiceError(null)
-    try {
-      const result = await searchApi.transcribeVoice(blob, 'voice-input.webm')
-      appendVoiceTranscript(result.transcript)
-    } catch (err: unknown) {
-      const msg = extractApiErrorMessage(
-        err,
-        'Không thể chuyển giọng nói thành văn bản. Hãy kiểm tra cấu hình speech-to-text model.'
-      )
-      setVoiceError(msg)
-    } finally {
-      setIsTranscribingVoice(false)
-    }
-  }
-
-  const startVoiceRecording = async () => {
-    if (typeof window === 'undefined' || !navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
-      setVoiceError('Trình duyệt chưa hỗ trợ ghi âm. Vui lòng nhập câu hỏi bằng văn bản.')
-      return
-    }
-
-    setVoiceError(null)
-    voiceChunksRef.current = []
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false })
-      voiceStreamRef.current = stream
-      const recorder = new MediaRecorder(stream, { mimeType: MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : undefined })
-      mediaRecorderRef.current = recorder
-      recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) voiceChunksRef.current.push(event.data)
-      }
-      recorder.onstop = () => {
-        stopVoiceTracks()
-        setIsRecordingVoice(false)
-        const audioBlob = new Blob(voiceChunksRef.current, { type: recorder.mimeType || 'audio/webm' })
-        voiceChunksRef.current = []
-        if (audioBlob.size > 0) void transcribeVoiceBlob(audioBlob)
-      }
-      recorder.start()
-      setIsRecordingVoice(true)
-    } catch (err: unknown) {
-      stopVoiceTracks()
-      setIsRecordingVoice(false)
-      const msg = err instanceof DOMException && err.name === 'NotAllowedError'
-        ? 'Bạn chưa cấp quyền microphone. Hãy cho phép microphone hoặc nhập bằng văn bản.'
-        : 'Không thể bắt đầu ghi âm. Vui lòng kiểm tra microphone.'
-      setVoiceError(msg)
-    }
-  }
-
-  const stopVoiceRecording = () => {
-    const recorder = mediaRecorderRef.current
-    if (recorder && recorder.state !== 'inactive') {
-      recorder.stop()
-    } else {
-      stopVoiceTracks()
-      setIsRecordingVoice(false)
-    }
+    return formatApiError(err, fallback)
   }
 
   const handleCitizenFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
 
+    const epoch = ++extractionEpoch.current
+    setExtracting(false)
+    setAttachmentText('')
     setAttachedFile(file)
     setExtractError(null)
+    setExtractionStatus('processing')
 
     const validationError = validateCitizenUpload(file)
     if (validationError) {
       setExtractError(validationError)
+      setExtractionStatus('error')
       if (fileInputRef.current) fileInputRef.current.value = ''
       return
     }
 
     setExtracting(true)
     try {
-      const result = await searchApi.extractTextFromFile(file)
-      if (result.extracted_text) {
-        setAskQuestion((prev) =>
-          prev
-            ? `${prev}
-
----
-Nội dung trích xuất từ file "${file.name}":
-${result.extracted_text}`
-            : `Nội dung trích xuất từ file "${file.name}":
-${result.extracted_text}`
-        )
+      let result = await searchApi.extractTextFromFile(file)
+      if (epoch !== extractionEpoch.current) return
+      setAttachedFile({
+        name: file.name,
+        size: file.size,
+        type: file.type,
+        file_id: result.file_id || undefined,
+        sha256: result.sha256,
+      })
+      if (result.extraction_status === 'processing' && result.job_id) {
+        for (let attempt = 0; attempt < 120 && epoch === extractionEpoch.current; attempt += 1) {
+          await new Promise((resolve) => window.setTimeout(resolve, 750))
+          const job = await searchApi.getExtractionJob(result.job_id)
+          if (job.extraction_status === 'processing') continue
+          result = {...result, ...job}
+          break
+        }
+      }
+      if (epoch !== extractionEpoch.current) return
+      if (result.extraction_status === 'complete' || result.extraction_status === 'partial') {
+        // Indexed attachments are referenced by owner-scoped ID. Keep text
+        // only for backward compatibility with conversations saved pre-v2.
+        setAttachmentText(result.file_id ? '' : result.extracted_text)
+        setExtractionStatus(result.extraction_status)
+      } else if (result.extraction_status === 'processing') {
+        setExtractError('Tài liệu mất quá nhiều thời gian để đọc. Có thể thử lại sau khi tải lại tệp.')
+        setExtractionStatus('error')
       } else {
         setExtractError('Không trích xuất được văn bản từ file này. Hãy kiểm tra file có chữ rõ ràng hoặc thử định dạng khác.')
+        setExtractionStatus('error')
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Lỗi không xác định'
-      setExtractError(`Không đọc được file: ${msg}`)
+      if (epoch !== extractionEpoch.current) return
+      setExtractError(formatApiError(err, 'Không đọc được tệp. Vui lòng kiểm tra định dạng rồi thử lại.'))
+      setExtractionStatus('error')
     } finally {
-      setExtracting(false)
+      if (epoch === extractionEpoch.current) setExtracting(false)
     }
   }
 
   useEffect(() => {
-    if (!hasHydrated || !isAuthenticated) {
+    if (!backgroundMetadataEnabled) {
       return
     }
 
     let cancelled = false
+    setViewerIdentity({ username })
 
     const loadSearchDependencies = async () => {
       try {
-        const [domainList, modelInfo] = await Promise.all([
+        // These requests are independent. Starting the profile request with
+        // the public metadata requests removes one full network round trip
+        // from the first paint after login.
+        const viewerPromise = apiClient.get('/users/me').catch((error) => {
+          console.error('Failed to load viewer profile for greeting', error)
+          return null
+        })
+        const [domainList, modelInfo, meRes] = await Promise.all([
           legalImportApi.domains().catch(() => []),
           searchApi.localModels().catch(() => null),
+          viewerPromise,
         ])
 
         if (cancelled) {
@@ -472,27 +628,52 @@ ${result.extracted_text}`
           setOfflineModel(modelInfo.recommended)
         }
 
-        // Load department if officer
-        if (role === 'officer') {
-          try {
-            const meRes = await apiClient.get('/users/me')
-            const dept = meRes.data.profile?.department || meRes.data.department || null
-            const allowed = meRes.data.profile?.allowed_domains || meRes.data.allowed_domains || []
+        // Keep names/titles local to the UI. They are used for respectful
+        // greetings and are not inserted into the external LLM prompt.
+        if (meRes) {
+          const profile = meRes.data.profile || {}
+          if (cancelled) return
+          setViewerIdentity({
+            gender: profile.preferences?.gender || null,
+            fullName: profile.full_name || meRes.data.full_name || null,
+            department: profile.department || meRes.data.department || null,
+            jobTitle: profile.job_title || meRes.data.job_title || null,
+            username: meRes.data.username || null,
+          })
+
+          if (role === 'officer') {
+            const rawDomain = String(
+              (Array.isArray(profile.allowed_domains) && profile.allowed_domains[0]) ||
+                (Array.isArray(meRes.data.allowed_domains) && meRes.data.allowed_domains[0]) ||
+                '',
+            ).trim()
+            const canonicalDomain = ({
+              ho_tich: 'ho_tich_chung_thuc',
+              tu_phap_ho_tich: 'ho_tich_chung_thuc',
+              dat_dai: 'dat_dai_xay_dung',
+              cu_tru: 'cu_tru_an_ninh',
+              khieu_nai: 'khieu_nai_to_cao_xu_phat',
+              xu_phat: 'khieu_nai_to_cao_xu_phat',
+            } as Record<string, string>)[rawDomain] || rawDomain
+            const matchedDomain = WARD_AGENCY_OPTIONS.find(
+              (item) => item.domain === canonicalDomain,
+            )
+            const dept =
+              profile.department ||
+              meRes.data.department ||
+              matchedDomain?.domainName ||
+              inferOfficerDepartment(meRes.data.username || username) ||
+              null
             if (!cancelled) {
-              setUserDept(dept)
-              // Preselect agency/domain for officer by department or first allowed domain
-              const byDept = WARD_AGENCY_OPTIONS.find((item) =>
-                dept ? item.agency.toLowerCase().includes(String(dept).toLowerCase()) || String(dept).toLowerCase().includes(item.agency.toLowerCase()) : false
-              )
-              const byDomain = WARD_AGENCY_OPTIONS.find((item) => allowed.includes(item.domain))
-              const picked = byDept || byDomain
-              if (picked) {
-                setSelectedAgency(picked.id)
-                setSelectedDomain(picked.domain)
-              }
+              setOfficerAssignment(dept)
+              setViewerIdentity((current) => ({
+                ...(current || {}),
+                department: dept || current?.department || null,
+              }))
+              // The officer Q&A surface deliberately has no persistent domain
+              // selector.  The server auto-detects the canonical domain and
+              // enforces this profile's allowed_domains before retrieval.
             }
-          } catch (e) {
-            console.error('Failed to load profile for officer indicator', e)
           }
         }
       } catch {
@@ -508,16 +689,17 @@ ${result.extracted_text}`
     return () => {
       cancelled = true
     }
-  }, [hasHydrated, isAuthenticated, role])
+  }, [backgroundMetadataEnabled, role, username])
 
-  useEffect(() => {
-    return () => {
-      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-        mediaRecorderRef.current.stop()
-      }
-      stopVoiceTracks()
-    }
-  }, [])
+  const welcome = useMemo(
+    () => welcomeMessage(role, viewerIdentity),
+    [role, viewerIdentity],
+  )
+  const starterQuestions = useMemo(
+    () => chatStarterQuestions(role, viewerIdentity),
+    [role, viewerIdentity],
+  )
+
 
   // Track if we've already auto-triggered from URL params
   const hasAutoTriggeredRef = useRef(false)
@@ -539,12 +721,6 @@ ${result.extracted_text}`
     })
   }, [searchQuery, searchType, searchSources, searchNotes, searchMutation])
 
-  const handleKeyPress = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter') {
-      handleSearch()
-    }
-  }
-
   const persistConversationMessage = useCallback(async (
     conversationId: string,
     payload: Record<string, unknown>,
@@ -564,10 +740,16 @@ ${result.extracted_text}`
   }, [])
 
   const handleAsk = useCallback(async () => {
-    const questionText = askQuestion.trim()
+    const attachmentReady = Boolean(
+      attachedFile && (attachedFile.file_id || attachmentText) &&
+      (extractionStatus === 'complete' || extractionStatus === 'partial')
+    )
+    const questionText = askQuestion.trim() || (attachmentReady ? 'Hãy đọc và phân tích tài liệu đính kèm.' : '')
     if (!questionText) return
-    if (ask.isStreaming || askSubmitLockRef.current) return
-    // A click, Ctrl+Enter, and a URL auto-submit can arrive in the same
+    if (sessionHydrating || ask.isStreaming || extracting || removingAttachment || extractError || askSubmitLockRef.current) return
+    const requestEpoch = sessionEpochRef.current
+    const requestIsCurrent = () => isCurrentSessionEpoch(requestEpoch, sessionEpochRef.current)
+    // A click, Enter, and a URL auto-submit can arrive in the same
     // render window. Do not create a second conversation turn for that event.
     const submissionKey = `${currentSessionId || 'new'}:${questionText.replace(/\s+/g, ' ')}`
     const previousSubmission = lastAskSubmissionRef.current
@@ -583,6 +765,7 @@ ${result.extracted_text}`
     // Render the pending turn before the first network await. Session creation
     // and persistence may be slow, but this placeholder remains the stable
     // assistant turn for the whole attempt.
+    const turnId = `turn-${crypto.randomUUID()}`
     const turnStartedAt = Date.now()
     const turnCreatedAt = new Date(turnStartedAt).toISOString()
     const userMsg: AskMessage = {
@@ -590,6 +773,17 @@ ${result.extracted_text}`
       role: "user",
       content: questionText,
       created_at: turnCreatedAt,
+      attachments: attachedFile && attachmentReady ? [{
+        kind: 'uploaded_document_context_v1',
+        value: {
+          name: attachedFile.name,
+          size: attachedFile.size,
+          type: attachedFile.type,
+          file_id: attachedFile.file_id,
+          sha256: attachedFile.sha256,
+          status: extractionStatus,
+        },
+      }] : undefined,
     }
     const pendingAssistantId = `a_pending_${turnStartedAt}`
     const pendingAssistantMsg: AskMessage = {
@@ -605,13 +799,15 @@ ${result.extracted_text}`
     let activeSessionId = currentSessionId
     if (!activeSessionId) {
       try {
-        const res = await apiClient.post('/conversations/', {
-          title: askQuestion.substring(0, 60).replace(/\n/g, ' '),
-          domain: selectedDomain === '__auto__' ? null : selectedDomain,
+        const res = await apiClient.post('/conversations', {
+          title: (askQuestion.trim() || attachedFile?.name || questionText).substring(0, 60).replace(/\n/g, ' '),
+          domain: null,
         })
+        if (!requestIsCurrent()) return
         activeSessionId = res.data.id
         setCurrentSessionId(activeSessionId)
         setConversationRefreshKey((value) => value + 1)
+        router.replace('/search')
       } catch (error) {
         setChatHistory((prev) => failAskTurn(
           prev,
@@ -619,7 +815,7 @@ ${result.extracted_text}`
           'Không thể tạo cuộc trò chuyện. Vui lòng kiểm tra kết nối rồi thử lại.',
         ))
         toast.error('Không tạo được cuộc trò chuyện để lưu lịch sử.', {
-          description: extractApiErrorMessage(error, 'Vui lòng kiểm tra kết nối backend rồi thử lại.'),
+          description: extractApiErrorMessage(error, 'Vui lòng kiểm tra kết nối hệ thống rồi thử lại.'),
         })
         return
       }
@@ -627,9 +823,18 @@ ${result.extracted_text}`
 
     if (activeSessionId) {
       try {
+        if (!requestIsCurrent()) return
         await persistConversationMessage(activeSessionId, {
           role: 'user',
           content: questionText,
+          turn_id: turnId,
+          document_context: attachedFile && attachmentReady ? {
+            name: attachedFile.name, size: attachedFile.size, type: attachedFile.type,
+            text: attachedFile.file_id ? '' : attachmentText,
+            file_id: attachedFile.file_id,
+            sha256: attachedFile.sha256,
+            status: extractionStatus,
+          } : null,
         })
       } catch (error) {
         const persistenceError = extractApiErrorMessage(
@@ -654,12 +859,23 @@ ${result.extracted_text}`
     }
 
     const response = await ask.sendAsk(questionText, models, role, {
+      turnId,
       offlineMode,
       offlineModel,
-      domain: selectedDomain === "__auto__" ? null : selectedDomain,
+      domain: null,
+      modelOptionId: selectedModelOption || null,
+      answerDepth,
+      attachmentId: attachedFile?.file_id,
+      attachmentText: attachedFile?.file_id ? undefined : attachmentText,
+      attachmentName: attachedFile?.name,
+      attachmentSha256: attachedFile?.sha256,
+      attachmentStatus: extractionStatus,
       showRagTrace,
       conversationId: activeSessionId,
+      prePersistedUserMessage: Boolean(activeSessionId),
+      memoryItemIds: selectedMemoryItemIds,
     })
+    if (!requestIsCurrent()) return
 
     // Update the pending assistant message in-place with full snapshot
     if (response?.answer) {
@@ -675,59 +891,54 @@ ${result.extracted_text}`
         procedure_detail: response.procedure_detail || undefined,
         rag_trace: response.rag_trace || undefined,
         grounding_status: response.grounding_status || undefined,
+        answer_completeness: response.answer_completeness || undefined,
+        answer_mode: response.answer_mode || undefined,
+        answer_status: response.answer_status || undefined,
+        fallback_tier: response.fallback_tier || undefined,
+        canonical_domain: response.canonical_domain || undefined,
+        evidence_count: response.evidence_count,
+        coverage_warning: response.coverage_warning || undefined,
+        blocked_reason: response.blocked_reason || undefined,
+        outcome: response.outcome || undefined,
+        reason_code: response.reason_code || undefined,
+        retryable: response.retryable,
+        scope: response.scope || undefined,
+        persistence_degraded: response.persistence_degraded === true,
+        quality: response.quality || undefined,
+        forms_unavailable: response.forms_unavailable,
+        presentation_version: response.presentation_version || undefined,
+        answer_route: response.answer_route || undefined,
+        pipeline_version: response.pipeline_version || undefined,
+        data_release_id: response.data_release_id || undefined,
+        release_id: response.release_id || undefined,
+        index_fingerprint: response.index_fingerprint || undefined,
+        manifest_hash: response.manifest_hash || undefined,
+        validity_snapshot: response.validity_snapshot || undefined,
+        verification_label: response.verification_label || undefined,
+        historical_label: response.historical_label || undefined,
+        sections: response.sections || undefined,
+        suggested_questions: response.suggested_questions || undefined,
+        conversation_route: response.conversation_route || undefined,
+        active_document: response.active_document || undefined,
+        related_documents: response.related_documents || undefined,
+        memory_usage: response.memory_usage || undefined,
+        model_option_id: response.model_option_id || undefined,
+        model_display_name: response.model_display_name || undefined,
+        model_locked: response.model_locked,
+        generation_provenance: response.generation_provenance || undefined,
+        timing_summary: response.timing_summary || undefined,
       }
       setChatHistory((prev) => completeAskTurn(prev, pendingAssistantId, completeAssistantMsg))
+      if (response.model_option_id !== undefined && response.model_option_id !== null) {
+        setSelectedModelOption(response.model_option_id)
+      }
 
-      // The ask endpoint normally persists the assistant snapshot. Older or
-      // partially failed requests can persist only the user message, though.
-      // Never replace a completed local answer with that incomplete snapshot.
       if (activeSessionId) {
+        // Direct RAG already commits the assistant snapshot using the same
+        // idempotency key. Do not read the entire conversation or write a
+        // second copy from the browser; refresh only when the user later
+        // navigates/reloads the session.
         setConversationRefreshKey((value) => value + 1)
-        try {
-          let synced = (await apiClient.get(`/conversations/${activeSessionId}`)).data as ConversationDetail
-          const normalizeAnswer = (value?: string | null) =>
-            (value || '').replace(/\s+/g, ' ').trim()
-          const currentAnswer = normalizeAnswer(completeAssistantMsg.content)
-          const hasMatchingAssistant = (conversation: ConversationDetail) =>
-            conversation.messages.some((message) => {
-              if (message.role !== "assistant" || message.status !== "complete") {
-                return false
-              }
-              const persistedAnswer = normalizeAnswer(message.content)
-              if (!persistedAnswer || !currentAnswer) return false
-              const prefix = currentAnswer.substring(0, 120)
-              return persistedAnswer === currentAnswer ||
-                persistedAnswer.includes(prefix) ||
-                currentAnswer.includes(persistedAnswer.substring(0, 120))
-            })
-
-          // An older assistant message is not enough. Only replace local UI
-          // with the server snapshot after this exact answer is persisted.
-          if (!hasMatchingAssistant(synced)) {
-            await persistConversationMessage(activeSessionId, {
-              role: "assistant",
-              content: completeAssistantMsg.content,
-              status: "complete",
-              citations: completeAssistantMsg.citations,
-              recommended_forms: completeAssistantMsg.recommended_forms,
-              faq_refs: completeAssistantMsg.faq_refs,
-              faqs: completeAssistantMsg.faqs,
-              procedure_detail: completeAssistantMsg.procedure_detail,
-              rag_trace: role === "admin" ? completeAssistantMsg.rag_trace : undefined,
-              grounding_status: completeAssistantMsg.grounding_status,
-            })
-            synced = (await apiClient.get(`/conversations/${activeSessionId}`)).data as ConversationDetail
-          }
-
-          if (hasMatchingAssistant(synced)) {
-            setChatHistory((prev) => prev.map((message) =>
-              message.id === pendingAssistantId ? { ...message, persisted: true } : message
-            ))
-            loadConversation(synced)
-          }
-        } catch {
-          // Keep the local completed answer if persistence or refresh fails.
-        }
       }
     } else if (response === null) {
       // Abort is a neutral user action. Keep the turn visible but never mark or
@@ -749,6 +960,7 @@ ${result.extracted_text}`
       }
       if (activeSessionId) {
         try {
+          if (!requestIsCurrent()) return
           await persistConversationMessage(activeSessionId, {
             role: 'assistant',
             content: visibleError,
@@ -769,6 +981,7 @@ ${result.extracted_text}`
     // Clear input after successful turn so citizen can continue the conversation.
     if (response?.answer) {
       setAskQuestion("")
+      setSelectedMemoryItemIds([])
     }
 
       // Reset useAsk state so it does not render a second copy
@@ -776,9 +989,13 @@ ${result.extracted_text}`
     } finally {
       askSubmitLockRef.current = false
     }
-  }, [askQuestion, modelDefaults, customModels, ask, role, offlineMode, offlineModel, selectedDomain, showRagTrace, currentSessionId, loadConversation, persistConversationMessage])
+  }, [askQuestion, modelDefaults, customModels, ask, role, offlineMode, offlineModel, selectedModelOption, answerDepth, attachmentText, attachedFile, extractionStatus, extracting, removingAttachment, extractError, showRagTrace, currentSessionId, persistConversationMessage, router, sessionHydrating, selectedMemoryItemIds])
 
   const [escalating, setEscalating] = useState(false)
+  const [supportDialogOpen, setSupportDialogOpen] = useState(false)
+  const [supportPreview, setSupportPreview] = useState<SupportPreview | null>(null)
+  const [supportDomain, setSupportDomain] = useState('')
+  const [supportConfirming, setSupportConfirming] = useState(false)
 
   const lastCompleteAssistant = useMemo(
     () => [...chatHistory].reverse().find((m) => m.role === 'assistant' && m.status === 'complete' && m.content),
@@ -788,26 +1005,55 @@ ${result.extracted_text}`
   const handleEscalateSupport = useCallback(async () => {
     setEscalating(true)
     try {
-      const contextMessages = chatHistory.map(m => `${m.role}: ${m.content}`).join('\n')
-      const fullContext = contextMessages ? `${contextMessages}\n---\n${askQuestion}` : askQuestion
-      if (selectedDomain === '__auto__') {
-        toast.error('Vui lòng chọn lĩnh vực phụ trách trước khi chuyển câu hỏi cho cán bộ.')
+      if (!currentSessionId) {
+        toast.error('Chưa có phiên hỏi đáp để chuyển cho cán bộ.')
         return
       }
-      const res = await apiClient.post('/support/tickets', {
-        question: fullContext,
-        domain: selectedDomain,
-        ai_summary: lastCompleteAssistant?.content ? lastCompleteAssistant.content.substring(0, 200) : null,
-        priority: 'normal'
+      const sourceMessage = [...chatHistory].reverse().find((message) => message.role === 'user')
+      const response = await apiClient.post<SupportPreview>('/support/tickets/preview', {
+        conversation_id: currentSessionId,
+        source_message_id: sourceMessage?.id,
       })
-      toast.success('Đã gửi yêu cầu hỗ trợ trực tuyến thành công!')
-      router.push(`/live-support?ticket=${res.data.id}`)
+      const preview = response.data
+      setSupportPreview(preview)
+      setSupportDomain(preview.suggested_domain || preview.options[0]?.domain || '')
+      setSupportDialogOpen(true)
     } catch (err) {
-      toast.error('Không thể gửi yêu cầu hỗ trợ trực tuyến.')
+      toast.error(getApiErrorCode(err) === 'conversation_has_no_user_question'
+        ? 'Phiên này chưa có câu hỏi để chuyển hỗ trợ.'
+        : formatApiError(err, 'Không thể chuẩn bị yêu cầu hỗ trợ trực tuyến.'))
     } finally {
       setEscalating(false)
     }
-  }, [askQuestion, selectedDomain, lastCompleteAssistant, router, chatHistory])
+  }, [currentSessionId, chatHistory])
+
+  const confirmSupport = useCallback(async () => {
+    if (!supportPreview || !supportDomain) return
+    setSupportConfirming(true)
+    try {
+      const response = await apiClient.post('/support/tickets', {
+        question: supportPreview.question,
+        domain: supportDomain,
+        ai_summary: supportPreview.ai_summary || null,
+        conversation_id: supportPreview.conversation_id || currentSessionId,
+        source_message_id: supportPreview.source_message_id || undefined,
+        routing_revision: supportPreview.config_revision,
+        priority: 'normal',
+      })
+      toast.success('Đã gửi yêu cầu hỗ trợ trực tuyến thành công!')
+      setSupportDialogOpen(false)
+      router.push(`/live-support?ticket=${response.data.id}`)
+    } catch (err) {
+      if (getApiErrorCode(err) === 'support_routing_changed') {
+        toast.error('Cơ cấu tiếp nhận vừa thay đổi. Vui lòng mở lại hộp xác nhận.')
+        setSupportDialogOpen(false)
+      } else {
+        toast.error('Không thể gửi yêu cầu hỗ trợ trực tuyến.')
+      }
+    } finally {
+      setSupportConfirming(false)
+    }
+  }, [currentSessionId, router, supportDomain, supportPreview])
 
   // Auto-trigger search/ask when arriving with URL params
   useEffect(() => {
@@ -820,11 +1066,11 @@ ${result.extracted_text}`
     if (urlMode === 'search' && canUseSearchTab) {
       handleSearch()
       hasAutoTriggeredRef.current = true
-    } else if (urlMode === 'ask' && modelDefaults?.default_chat_model) {
+    } else if (urlMode === 'ask' && (!adminModelMetadataEnabled || modelDefaults?.default_chat_model)) {
       hasAutoTriggeredRef.current = true
       handleAsk()
     }
-  }, [urlQuery, urlMode, modelsLoading, modelDefaults, handleSearch, handleAsk, canUseSearchTab])
+  }, [urlQuery, urlMode, modelsLoading, modelDefaults, adminModelMetadataEnabled, handleSearch, handleAsk, canUseSearchTab])
 
   // Handle URL param changes while on page (e.g., from command palette again)
   useEffect(() => {
@@ -863,221 +1109,206 @@ ${result.extracted_text}`
   }, [canUseSearchTab, activeTab])
 
   return (
-    <AppShell>
-      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 pb-12 md:p-6 md:pb-16">
-        <h1 className="text-xl md:text-2xl font-bold mb-4 md:mb-6">{t('navigation.askAndSearch', 'Hỏi đáp pháp luật')}</h1>
+    <LegalPreviewProvider><AppShell>
+      <div className="flex min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden">
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b bg-card px-4 py-2 lg:hidden">
+          <div className="min-w-0">
+            <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-primary">Cổng hỏi đáp có căn cứ</p>
+            <h1 className="truncate font-display text-2xl font-bold text-foreground">{t('navigation.askAndSearch', 'Hỏi đáp pháp luật')}</h1>
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            className="h-11 shrink-0 rounded-full px-4 lg:hidden"
+            onClick={() => setMobileConversationDrawerOpen(true)}
+          >
+            Lịch sử
+          </Button>
+        </div>
 
-        <div className="w-full space-y-6">
-            <div className="flex min-h-[calc(100vh-13rem)] overflow-hidden rounded-xl border bg-card">
+        <div className="flex min-h-0 w-full flex-1">
+            <div className="flex h-full min-h-0 w-full overflow-hidden bg-card">
               <ConversationSidebar
                 role={role}
                 currentId={currentSessionId}
-                onSelect={loadConversation}
-                onCreate={loadConversation}
+                onSelect={handleConversationSelected}
+                onCreate={handleConversationCreated}
+                onSelectStart={beginSessionTransition}
+                onCreateStart={beginSessionTransition}
+                onTransitionError={handleSessionTransitionError}
                 onDeleted={handleConversationDeleted}
                 mobileOpen={mobileConversationDrawerOpen}
                 onMobileOpenChange={setMobileConversationDrawerOpen}
                 refreshKey={conversationRefreshKey}
+                contextLabel={role === 'officer' ? officerAssignment : null}
               />
-              <div className="flex min-w-0 flex-1 flex-col">
-            <Card className="flex h-full flex-col border-0 shadow-none">
-              <CardHeader>
-                <CardTitle className="text-lg">{t('searchPage.askYourKb')}</CardTitle>
-                <p className="text-sm text-muted-foreground">
-                  {t('searchPage.askYourKbDesc')}
-                </p>
-                {role === 'officer' && userDept && (
-                  <div className="mt-2 rounded bg-amber-500/5 p-3 text-xs border border-amber-500/20 text-amber-600 dark:text-amber-400 flex items-center gap-2">
-                    <span className="flex h-2 w-2 rounded-full bg-amber-500 animate-pulse shrink-0" />
-                    <span>
-                      Đang kết nối vai trò <strong>Cán bộ ({userDept})</strong>. Kết quả tìm kiếm và câu trả lời sẽ tự động được giới hạn trong lĩnh vực chuyên môn của bạn để đảm bảo nghiệp vụ.
-                    </span>
-                  </div>
+              <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+                <header className="hidden shrink-0 items-center justify-between border-b px-6 py-4 lg:flex">
+                  <h1 className="text-base font-semibold">Hỏi đáp pháp luật</h1>
+                  <span className="text-xs text-muted-foreground">Tra cứu có căn cứ</span>
+                </header>
+            <Card className="flex h-full min-h-0 flex-col border-0 bg-card shadow-none">
+              <CardContent className="relative flex min-h-0 flex-1 flex-col overflow-hidden p-0">
+                {role === 'citizen' && shouldOfferOfficerSupport(lastCompleteAssistant) && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={handleEscalateSupport}
+                    disabled={escalating}
+                    className="absolute right-4 top-3 z-10 h-9 rounded-full border-amber-300 bg-amber-50/95 px-3 text-amber-950 shadow-sm backdrop-blur hover:bg-amber-100 dark:bg-amber-950/90 dark:text-amber-100"
+                    title="Chuyển câu hỏi chưa đủ căn cứ đến cán bộ chuyên trách"
+                  >
+                    <AlertCircle className="mr-1.5 h-4 w-4" aria-hidden="true" />
+                    {escalating ? 'Đang chuyển…' : 'Nhờ cán bộ hỗ trợ'}
+                  </Button>
                 )}
-              </CardHeader>
-              <CardContent className="flex h-full flex-col space-y-5 p-4 md:p-6">
-
-                {/* Cơ quan / lĩnh vực phụ trách */}
-                <div className="rounded-xl border bg-gradient-to-br from-primary/5 via-background to-background p-4 md:p-5 space-y-3">
-                  {role !== 'citizen' && <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <p className="text-sm font-semibold">Cơ quan phụ trách & lĩnh vực</p>
-                      <p className="text-xs text-muted-foreground mt-0.5">
-                        Chọn đúng đơn vị/lĩnh vực để hệ thống hướng dẫn đúng nghiệp vụ phường/xã.
-                      </p>
+                <div
+                  ref={chatContainerRef}
+                  onScroll={(event) => {
+                    if (event.currentTarget.scrollTop <= 24 && hasOlderMessages) {
+                      void loadOlderMessages()
+                    }
+                  }}
+                  className="min-h-0 flex-1 overflow-y-auto overscroll-contain bg-background/45 px-3 py-5 md:px-6"
+                >
+                  <div className="mx-auto w-full max-w-[820px]">
+                  {chatHistory.length === 0 && sessionHydrating && (
+                    <div className="mx-auto max-w-3xl space-y-3 py-8" role="status" aria-live="polite">
+                      <p className="text-sm font-medium text-muted-foreground">Đang mở cuộc trò chuyện gần nhất…</p>
+                      <div className="h-20 animate-pulse rounded-2xl border bg-muted/35" aria-hidden="true" />
+                      <div className="ml-auto h-12 w-2/3 animate-pulse rounded-3xl bg-muted/50" aria-hidden="true" />
                     </div>
-                    {selectedDomain !== '__auto__' && (
-                      <Badge variant="secondary" className="shrink-0">Đã chọn</Badge>
-                    )}
-                  </div>}
-                  <div className={`grid gap-3 ${role !== 'citizen' ? 'md:grid-cols-2' : ''}`}>
-                    {role !== 'citizen' && <div className="space-y-2">
-                      <Label>Cơ quan phụ trách</Label>
-                      <Select
-                        value={selectedAgency}
-                        onValueChange={(value) => {
-                          setSelectedAgency(value)
-                          if (value === '__auto__') {
-                            setSelectedDomain('__auto__')
-                            return
-                          }
-                          const found = WARD_AGENCY_OPTIONS.find((item) => item.id === value)
-                          if (found) setSelectedDomain(found.domain)
-                        }}
-                        disabled={ask.isStreaming}
-                      >
-                        <SelectTrigger>
-                          <SelectValue placeholder="Chọn cơ quan" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="__auto__">Tự nhận diện</SelectItem>
-                          {WARD_AGENCY_OPTIONS.map((item) => (
-                            <SelectItem key={item.id} value={item.id}>
-                              {item.agency}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>}
-                    <div className="space-y-2">
-                      <Label>Lĩnh vực</Label>
-                      <Select
-                        value={selectedDomain}
-                        onValueChange={(value) => {
-                          setSelectedDomain(value)
-                          if (value === '__auto__') {
-                            setSelectedAgency('__auto__')
-                            return
-                          }
-                          const found = WARD_AGENCY_OPTIONS.find((item) => item.domain === value)
-                          if (found) setSelectedAgency(found.id)
-                        }}
-                        disabled={ask.isStreaming}
-                      >
-                        <SelectTrigger>
-                          <SelectValue placeholder="Chọn lĩnh vực" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="__auto__">Tự nhận diện</SelectItem>
-                          {WARD_AGENCY_OPTIONS.map((item) => (
-                            <SelectItem key={`domain-${item.id}`} value={item.domain}>
-                              {item.domainName}
-                            </SelectItem>
-                          ))}
-                          {domains
-                            .filter((d) => !WARD_AGENCY_OPTIONS.some((w) => w.domain === d.slug))
-                            .map((domain) => (
-                              <SelectItem key={domain.slug} value={domain.slug}>
-                                {domain.name}
-                              </SelectItem>
-                            ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  </div>
-                  {selectedDomain !== '__auto__' && (
-                    <p className="text-xs text-muted-foreground">
-                      Đang hỏi theo lĩnh vực: <span className="font-medium text-foreground">{WARD_AGENCY_OPTIONS.find(i => i.domain === selectedDomain)?.domainName || selectedDomain}</span>
-                      {role !== 'citizen' && WARD_AGENCY_OPTIONS.find(i => i.domain === selectedDomain)?.agency ? (
-                        <> · Cơ quan: <span className="font-medium text-foreground">{WARD_AGENCY_OPTIONS.find(i => i.domain === selectedDomain)?.agency}</span></>
-                      ) : null}
-                    </p>
                   )}
-                </div>
-
-                <div className="min-h-[280px] flex-1 overflow-y-auto rounded-xl border bg-muted/10 p-3 md:p-4">
-                  <AskMessageHistory
-                    messages={chatHistory}
-                    role={role}
-                    showRagTrace={showRagTrace}
-                    pendingStageLabel={ask.stageLabel}
-                  />
-                  <div ref={chatEndRef} />
-                </div>
-
-                <div className="sticky bottom-0 z-10 space-y-4 border-t bg-card/95 pt-4 backdrop-blur supports-[backdrop-filter]:bg-card/80">
-                {/* Question Input */}
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <Label htmlFor="ask-question">{t('searchPage.question')}</Label>
-                    {/* Attach file button */}
-                    <div className="flex items-center gap-2">
-                      {attachedFile && (
-                        <span className="flex items-center gap-1 rounded-full border bg-muted px-2 py-0.5 text-xs text-muted-foreground">
-                          {attachedFile.type.startsWith('image/') ? <ImageIcon className="h-3 w-3" /> : <FileText className="h-3 w-3" />}
-                          <span className="max-w-[120px] truncate">{attachedFile.name}</span>
-                          <span>({formatFileSize(attachedFile.size)})</span>
-                          {extracting && <LoadingSpinner size="sm" />}
-                          <button
-                            type="button"
-                            aria-label="Xóa file đính kèm"
-                            className="ml-1 hover:text-destructive"
-                            onClick={clearAttachedFile}
-                          >
-                            <X className="h-3 w-3" />
-                          </button>
-                        </span>
-                      )}
+                  {chatHistory.length === 0 && !sessionHydrating && (
+                    <div className="mx-auto flex min-h-full max-w-2xl items-center justify-center py-8" data-testid="chat-welcome">
+                      <div className="w-full rounded-2xl border bg-card/80 px-5 py-6 text-center shadow-sm">
+                        <p className="text-lg font-semibold text-foreground">{welcome.title}</p>
+                        <p className="mx-auto mt-2 max-w-xl text-sm leading-6 text-muted-foreground">
+                          {welcome.invitation}
+                        </p>
+                        {starterQuestions.length > 0 && (
+                          <div className="mt-4 flex flex-wrap justify-center gap-2" aria-label="Câu hỏi bắt đầu">
+                            {starterQuestions.map((question) => (
+                              <button
+                                key={question}
+                                type="button"
+                                className="max-w-full rounded-full border bg-background px-3 py-1.5 text-left text-xs text-foreground transition-colors hover:border-primary hover:bg-primary/5"
+                                onClick={() => {
+                                  setAskQuestion(question)
+                                  setSelectedMemoryItemIds([])
+                                }}
+                              >
+                                {question}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                        <ChatMemoryContinuations onSelect={handleMemoryContinuation} />
+                      </div>
+                    </div>
+                  )}
+                  {chatHistory.length > 0 && hasOlderMessages && (
+                    <div className="mb-3 flex justify-center">
                       <Button
                         type="button"
                         variant="ghost"
                         size="sm"
-                        className="h-7 px-2 text-xs"
-                        disabled={ask.isStreaming || extracting}
-                        onClick={() => fileInputRef.current?.click()}
-                        title="Đính kèm txt/docx/pdf/png/jpg/jpeg để hệ thống trích xuất nội dung và đưa vào câu hỏi. Không hỗ trợ video."
+                        onClick={() => void loadOlderMessages()}
+                        disabled={loadingOlderMessages}
+                        aria-label="Tải tin nhắn cũ"
                       >
-                        <Paperclip className="h-3.5 w-3.5 mr-1" />
-                        Đính kèm
+                        {loadingOlderMessages ? 'Đang tải…' : 'Tải tin nhắn cũ'}
                       </Button>
-                      <Button
-                        type="button"
-                        variant={isRecordingVoice ? 'destructive' : 'ghost'}
-                        size="sm"
-                        className="h-7 px-2 text-xs"
-                        disabled={ask.isStreaming || extracting || isTranscribingVoice}
-                        onClick={isRecordingVoice ? stopVoiceRecording : startVoiceRecording}
-                        title="Ghi âm câu hỏi: hệ thống chỉ chuyển giọng nói thành văn bản rồi dùng ask pipeline hiện có. Không hỗ trợ video."
-                        aria-label={isRecordingVoice ? 'Dừng ghi âm' : 'Nhập bằng giọng nói'}
-                      >
-                        {isRecordingVoice ? <Square className="h-3.5 w-3.5 mr-1" /> : <Mic className="h-3.5 w-3.5 mr-1" />}
-                        {isRecordingVoice ? 'Dừng' : isTranscribingVoice ? 'Đang chuyển...' : 'Giọng nói'}
-                      </Button>
-                      <input
-                        ref={fileInputRef}
-                        type="file"
-                        className="hidden"
-                        accept=".txt,.docx,.pdf,.png,.jpg,.jpeg,text/plain,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/png,image/jpeg"
-                        onChange={handleCitizenFileChange}
-                      />
+                    </div>
+                  )}
+                  <AskMessageHistory
+                    messages={chatHistory}
+                    role={role}
+                    viewerIdentity={viewerIdentity}
+                    showRagTrace={showRagTrace}
+                    pendingStageLabel={ask.stageLabel}
+                    pendingAnswer={ask.isStreaming ? ask.finalAnswer : null}
+                    pendingCitations={ask.citations}
+                    onSuggestionClick={handleDraftQuestion}
+                    onRetryClick={handleDraftQuestion}
+                  />
+                  </div>
+                </div>
+
+                <div className="mx-auto w-full max-w-[860px] shrink-0 space-y-3 border-t border-border/60 bg-card px-3 py-3 md:px-5">
+                {/* Question Input */}
+                <div className="space-y-2">
+                  <Label htmlFor="ask-question" className="sr-only">{t('searchPage.question')}</Label>
+                  {attachedFile && <AttachmentCard file={attachedFile} busy={extracting} status={extractionStatus} error={extractError} removing={removingAttachment} removeDisabled={ask.isStreaming} onRemove={() => void clearAttachedFile()} />}
+                  <div className="rounded-[28px] border border-border bg-card p-2 shadow-[0_2px_12px_rgba(47,35,22,0.06)] transition-shadow focus-within:border-primary/50 focus-within:shadow-[0_4px_20px_rgba(143,29,44,0.12)]">
+                    <div className="flex min-w-0 flex-col">
+                      <div className="flex min-w-0 items-end gap-1">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="h-11 w-11 shrink-0 rounded-full"
+                          disabled={ask.isStreaming || extracting || removingAttachment}
+                          onClick={() => fileInputRef.current?.click()}
+                          title="Đính kèm văn bản hoặc ảnh tài liệu để đọc chữ"
+                          aria-label="Đính kèm tệp"
+                        >
+                          <Paperclip className="h-5 w-5" />
+                        </Button>
+                        <Textarea
+                          ref={askInputRef}
+                          id="ask-question"
+                          name="ask-question"
+                          placeholder={t('searchPage.enterQuestionPlaceholder')}
+                          value={askQuestion}
+                          onChange={(e) => setAskQuestion(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && !ask.isStreaming && !sessionHydrating && (askQuestion.trim() || (attachedFile && (extractionStatus === 'complete' || extractionStatus === 'partial')))) {
+                              e.preventDefault()
+                              void handleAsk()
+                            }
+                          }}
+                          disabled={ask.isStreaming}
+                          rows={1}
+                          className="min-h-11 max-h-[180px] flex-1 resize-none overflow-y-auto border-0 bg-transparent px-2 py-2.5 text-[17px] leading-7 shadow-none focus-visible:ring-0 md:text-[17px]"
+                          aria-label={t('common.accessibility.enterQuestion')}
+                        />
+                      </div>
+
+                      <div className="mt-1 flex min-h-11 shrink-0 items-center justify-between gap-2 border-t border-border/50 pt-1 pl-1">
+                        <ChatModelSelector compact options={chatModelOptions} value={selectedModelOption}
+                          onValueChange={setSelectedModelOption} depth={answerDepth} onDepthChange={setAnswerDepth} busy={ask.isStreaming} />
+
+                        <Button
+                          type="button"
+                          size="icon"
+                          onClick={ask.isStreaming ? ask.cancel : handleAsk}
+                          disabled={!ask.isStreaming && (extracting || removingAttachment || !!extractError || sessionHydrating || (!askQuestion.trim() && !(attachedFile && (extractionStatus === 'complete' || extractionStatus === 'partial'))))}
+                          className="h-11 w-11 rounded-full"
+                          aria-label={ask.isStreaming ? 'Dừng tạo câu trả lời' : t('searchPage.ask')}
+                        >
+                          {ask.isStreaming ? <span className="h-3.5 w-3.5 rounded-sm bg-current" /> : <ArrowUp className="h-5 w-5" />}
+                        </Button>
+                      </div>
                     </div>
                   </div>
-                  <Textarea
-                    id="ask-question"
-                    name="ask-question"
-                    placeholder={t('searchPage.enterQuestionPlaceholder')}
-                    value={askQuestion}
-                    onChange={(e) => setAskQuestion(e.target.value)}
-                    onKeyDown={(e) => {
-                      // Submit on Cmd/Ctrl+Enter
-                      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && !ask.isStreaming && askQuestion.trim()) {
-                        e.preventDefault()
-                        handleAsk()
-                      }
-                    }}
-                    disabled={ask.isStreaming}
-                    rows={7}
-                    className="min-h-[160px] md:min-h-[200px] resize-y"
-                    aria-label={t('common.accessibility.enterQuestion')}
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    className="hidden"
+                    accept=".txt,.docx,.pdf,.png,.jpg,.jpeg,.webp,.bmp,.tif,.tiff,text/plain,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/png,image/jpeg"
+                    onChange={handleCitizenFileChange}
                   />
                   {extractError && (
                     <p className="text-xs text-destructive flex items-center gap-1">
                       <AlertCircle className="h-3 w-3" /> {extractError}
                     </p>
                   )}
-                  {voiceError && (
-                    <p className="text-xs text-destructive flex items-center gap-1" role="alert">
-                      <AlertCircle className="h-3 w-3" /> {voiceError}
+
+                  {sessionHydrating && (
+                    <p className="text-xs text-muted-foreground" role="status" aria-live="polite">
+                      Bạn có thể nhập ngay; nút gửi sẽ sẵn sàng khi lịch sử tải xong.
                     </p>
                   )}
                   <p className="text-xs text-muted-foreground">{t('searchPage.pressToSubmit')}</p>
@@ -1111,7 +1342,7 @@ ${result.extracted_text}`
                         <div className="space-y-1">
                           <Label htmlFor="show-rag-trace">Hiển thị quy trình RAG</Label>
                           <p className="text-xs text-muted-foreground">
-                            Xem câu hỏi, lĩnh vực, chunk, nguồn và mục bị lọc.
+                            Xem câu hỏi, lĩnh vực, đoạn tra cứu, nguồn và mục bị lọc.
                           </p>
                         </div>
                       </div>
@@ -1197,46 +1428,13 @@ ${result.extracted_text}`
                   </>
                 )}
 
-                <div className="flex flex-col sm:flex-row gap-2">
-                  <Button
-                    type="button"
-                    onClick={handleAsk}
-                    disabled={ask.isStreaming || !askQuestion.trim()}
-                    className="w-full"
-                  >
-                    {ask.isStreaming ? (
-                      <>
-                        <LoadingSpinner size="sm" className="mr-2" />
-                        {t('searchPage.processing')}
-                      </>
-                    ) : (
-                      t('searchPage.ask')
-                    )}
-                  </Button>
-                  {ask.isStreaming && (
-                    <Button type="button" variant="outline" onClick={ask.cancel} className="w-full sm:w-auto">
-                      Dừng
-                    </Button>
-                  )}
 
-                  {chatHistory.some((m) => m.role === 'assistant' && m.status === 'complete' && m.content) && (
-                    <Button
-                      variant="outline"
-                      onClick={() => setShowSaveDialog(true)}
-                      className="w-full"
-                    >
-                      <Save className="h-4 w-4 mr-2" />
-                      {t('searchPage.saveToNotebooks')}
-                    </Button>
-                  )}
-                </div>
 
                 </div>
 
                 {ask.isStreaming && (
                   <div className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">
-                    Hệ thống đang chạy pipeline truy xuất và tổng hợp câu trả lời. Nếu câu hỏi dài hoặc nguồn luật nhiều,
-                    thời gian xử lý có thể lên tới vài phút.
+                    {ask.stageLabel || 'Đang xử lý câu hỏi…'}
                   </div>
                 )}
 
@@ -1266,8 +1464,8 @@ ${result.extracted_text}`
                         </p>
                         <p className="text-xs md:text-sm opacity-90">
                           {role === 'officer'
-                            ? 'Luồng trả lời chuyên sâu đã được tạm dừng. Hãy chọn đúng cơ quan/lĩnh vực phụ trách rồi hỏi lại.'
-                            : 'Hệ thống nhận thấy câu hỏi có thể thuộc lĩnh vực khác. Bạn nên chuyển để được hướng dẫn đúng hơn.'}
+                          ? 'Luồng trả lời chuyên sâu đã được tạm dừng vì câu hỏi nằm ngoài lĩnh vực được phân công. Hãy gửi cho cán bộ đúng lĩnh vực.'
+                            : 'Hệ thống nhận thấy câu hỏi có thể thuộc lĩnh vực khác. Bạn có thể gửi yêu cầu hỗ trợ để được cán bộ phù hợp hướng dẫn.'}
                         </p>
                         {ask.suggestedDomain && (
                           <p className="text-xs md:text-sm">
@@ -1278,16 +1476,14 @@ ${result.extracted_text}`
                       </div>
                     </div>
                     <div className="flex gap-2">
-                      {ask.suggestedDomain && (
+                      {role === 'admin' && ask.suggestedDomain && (
                         <Button
                           type="button"
                           size="sm"
                           variant="outline"
                           className="bg-background"
                           onClick={() => {
-                            const found = WARD_AGENCY_OPTIONS.find((item) => item.domain === ask.suggestedDomain)
                             setSelectedDomain(ask.suggestedDomain || '__auto__')
-                            setSelectedAgency(found?.id || '__auto__')
                           }}
                         >
                           Chuyển sang {WARD_AGENCY_OPTIONS.find(i => i.domain === ask.suggestedDomain)?.domainName || ask.suggestedDomain}
@@ -1308,30 +1504,54 @@ ${result.extracted_text}`
                   </div>
                 )}
 
-                {lastCompleteAssistant?.grounding_status === 'insufficient_evidence' && (
-                  <div className="rounded-lg border border-amber-300 bg-amber-50 dark:bg-amber-950/30 p-4 text-sm text-amber-950 dark:text-amber-100 space-y-3">
-                    <div className="flex items-start gap-2">
-                      <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
-                      <div className="space-y-1">
-                        <p className="font-semibold">Thiếu cơ sở dữ liệu pháp luật</p>
-                        <p className="text-xs md:text-sm opacity-90">
-                          Hệ thống chưa tìm thấy văn bản quy định của địa phương Hải Phòng phù hợp với câu hỏi của bạn. 
-                          Bạn có muốn gửi yêu cầu hỗ trợ trực tiếp đến cán bộ chuyên trách phường/xã không?
-                        </p>
+                <Dialog open={supportDialogOpen} onOpenChange={setSupportDialogOpen}>
+                  <DialogContent className="max-w-2xl">
+                    <DialogHeader>
+                      <DialogTitle>Xác nhận yêu cầu hỗ trợ trực tuyến</DialogTitle>
+                      <DialogDescription>
+                        Kiểm tra nội dung và chọn lĩnh vực để chuyển đúng đơn vị cấp 2. Chưa có ticket nào được tạo ở bước này.
+                      </DialogDescription>
+                    </DialogHeader>
+                    {supportPreview && (
+                      <div className="space-y-4">
+                        <div className="rounded-lg border bg-muted/30 p-3 text-sm">
+                          <p className="mb-1 font-medium">Câu hỏi chuyển cho cán bộ</p>
+                          <p className="whitespace-pre-wrap break-words">{supportPreview.question}</p>
+                        </div>
+                        {supportPreview.ai_summary && (
+                          <div className="rounded-lg border p-3 text-sm">
+                            <p className="mb-1 font-medium">Thông tin AI đã cung cấp</p>
+                            <p className="whitespace-pre-wrap break-words text-muted-foreground">{supportPreview.ai_summary}</p>
+                          </div>
+                        )}
+                        <div className="space-y-2">
+                          <Label htmlFor="support-domain">Lĩnh vực đề xuất / lựa chọn lại</Label>
+                          <Select value={supportDomain} onValueChange={setSupportDomain}>
+                            <SelectTrigger id="support-domain"><SelectValue placeholder="Chọn lĩnh vực" /></SelectTrigger>
+                            <SelectContent>
+                              {supportPreview.options.map((option) => (
+                                <SelectItem key={`${option.domain}:${option.unit_id}`} value={option.domain}>
+                                  {option.domain_name} · {option.unit_short_name || option.unit_name}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        {supportPreview.options.find((option) => option.domain === supportDomain) && (
+                          <p className="text-sm text-muted-foreground">
+                            Đơn vị tiếp nhận: <strong className="text-foreground">{supportPreview.options.find((option) => option.domain === supportDomain)?.unit_name}</strong>
+                          </p>
+                        )}
                       </div>
-                    </div>
-                    {role === 'citizen' && (
-                      <Button
-                        type="button"
-                        size="sm"
-                        onClick={handleEscalateSupport}
-                        disabled={escalating}
-                      >
-                        {escalating ? 'Đang gửi...' : 'Gửi yêu cầu hỗ trợ trực tuyến'}
-                      </Button>
                     )}
-                  </div>
-                )}
+                    <DialogFooter>
+                      <Button type="button" variant="outline" onClick={() => setSupportDialogOpen(false)} disabled={supportConfirming}>Hủy</Button>
+                      <Button type="button" onClick={() => void confirmSupport()} disabled={!supportPreview || !supportDomain || supportConfirming}>
+                        {supportConfirming ? 'Đang gửi…' : 'Xác nhận và gửi'}
+                      </Button>
+                    </DialogFooter>
+                  </DialogContent>
+                </Dialog>
 
                 {/* Advanced Models Dialog */}
                 {showAdvancedModels && <AdvancedModelsDialog
@@ -1345,26 +1565,12 @@ ${result.extracted_text}`
                   onSave={setCustomModels}
                 />}
 
-                {/* Save to Notebooks Dialog */}
-                {showSaveDialog && lastCompleteAssistant && (
-                  <SaveToNotebooksDialog
-                    open={showSaveDialog}
-                    onOpenChange={setShowSaveDialog}
-                    question={
-                      [...chatHistory]
-                        .reverse()
-                        .find((m) => m.role === 'user')
-                        ?.content || askQuestion
-                    }
-                    answer={lastCompleteAssistant.content}
-                  />
-                )}
               </CardContent>
             </Card>
               </div>
             </div>
         </div>
       </div>
-    </AppShell>
+    </AppShell></LegalPreviewProvider>
   )
 }

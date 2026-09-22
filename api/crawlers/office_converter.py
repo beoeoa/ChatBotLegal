@@ -122,3 +122,37 @@ def convert_legacy_doc_bytes(
             "source_sha256": hashlib.sha256(content).hexdigest(),
             "converter": "libreoffice-headless",
         }
+
+
+def convert_legacy_xls_bytes(
+    content: bytes,
+    *,
+    filename: str,
+    timeout_seconds: int = 120,
+    command_runner: Callable[..., Any] = subprocess.run,
+) -> dict[str, Any]:
+    """Convert one legacy OLE XLS to XLSX using the same isolated runtime."""
+    if not content.startswith(OLE_HEADER):
+        return {"status": "failed", "complete": False, "reason_code": "LEGACY_XLS_MAGIC_INVALID", "content": b"", "sha256": None, "converter": None}
+    command = detect_office_converter()
+    if command is None:
+        return {"status": "unavailable", "complete": False, "reason_code": "LIBREOFFICE_RUNTIME_UNAVAILABLE", "content": b"", "sha256": None, "converter": None}
+    safe_stem = Path(filename).stem or "workbook"
+    with tempfile.TemporaryDirectory(prefix="chatbotlegal-xls-") as temp:
+        directory = Path(temp)
+        source = directory / f"{safe_stem}.xls"
+        source.write_bytes(content)
+        try:
+            result = command_runner([
+                str(command), "--headless", "--convert-to", "xlsx", "--outdir", str(directory), str(source)
+            ], capture_output=True, text=True, timeout=timeout_seconds, check=False,
+                creationflags=(subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0))
+        except (OSError, subprocess.TimeoutExpired):
+            return {"status": "failed", "complete": False, "reason_code": "LIBREOFFICE_CONVERSION_FAILED", "content": b"", "sha256": None, "converter": "libreoffice-headless"}
+        destination = directory / f"{safe_stem}.xlsx"
+        if result.returncode != 0 or not destination.is_file():
+            return {"status": "failed", "complete": False, "reason_code": "LIBREOFFICE_CONVERSION_FAILED", "content": b"", "sha256": None, "converter": "libreoffice-headless"}
+        converted = destination.read_bytes()
+        if not converted.startswith(b"PK"):
+            return {"status": "failed", "complete": False, "reason_code": "CONVERTED_XLSX_MAGIC_INVALID", "content": b"", "sha256": None, "converter": "libreoffice-headless"}
+        return {"status": "ok", "complete": True, "reason_code": "LEGACY_XLS_CONVERTED", "content": converted, "sha256": hashlib.sha256(converted).hexdigest(), "source_sha256": hashlib.sha256(content).hexdigest(), "converter": "libreoffice-headless"}

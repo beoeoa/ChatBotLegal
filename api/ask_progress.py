@@ -1,13 +1,13 @@
-"""Safe progress streaming and provider-fallback policy for legal Ask.
+"""Stream lifecycle metadata and provisional answer text for Direct RAG.
 
-The progress contract deliberately carries lifecycle metadata and verified
-sources only.  Generated answer text is emitted exactly once, in ``final``,
-after the existing Ask pipeline has completed validation and persistence.
+Only the final event contains the authoritative, grounded and persisted answer.
+Provisional deltas remain visible if the connection fails or the user stops.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import json
 import os
 import time
@@ -31,9 +31,10 @@ ProgressCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
 ProgressExecutor = Callable[[ProgressCallback], Awaitable[AskResponse]]
 
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
-_ALLOWED_STATUS_STAGES = frozenset(
-    {"retrieving", "generating", "validating", "persisting"}
-)
+# Direct RAG has one bounded citation-membership check inside the answer
+# service; it is not a user-facing lifecycle stage. Keep SSE to the four
+# serving stages and never expose validation/repair progress.
+_ALLOWED_STATUS_STAGES = frozenset({"retrieving", "generating", "persisting"})
 _SOURCE_FIELDS = frozenset(
     {
         "law_number",
@@ -63,9 +64,9 @@ def _env_flag(name: str, *, default: bool) -> bool:
 
 
 def ask_progress_enabled() -> bool:
-    """Return whether the opt-in progress endpoint is enabled."""
+    """Return whether the progress endpoint is enabled."""
 
-    return _env_flag("LEGAL_ASK_PROGRESS_ENABLED", default=False)
+    return _env_flag("LEGAL_ASK_PROGRESS_ENABLED", default=True)
 
 
 def local_fallback_enabled() -> bool:
@@ -187,6 +188,10 @@ def _safe_sources(payload: dict[str, Any]) -> dict[str, Any]:
                     }
                 )
     result: dict[str, Any] = {"citations": citations}
+    if isinstance(payload.get("provisional"), bool):
+        result["provisional"] = bool(payload["provisional"])
+    if payload.get("label"):
+        result["label"] = str(payload["label"])[:120]
     if isinstance(payload.get("retrieval_timing_ms"), (int, float)):
         result["retrieval_timing_ms"] = max(0, round(float(payload["retrieval_timing_ms"]), 1))
     return result
@@ -272,6 +277,30 @@ def safe_public_response_payload(
         ]
         sections.append(section)
     safe["answer_sections"] = sections if payload.get("answer_sections") is not None else None
+    # The answer card may explain which model interpretations were retained as
+    # unverified. Keep that warning useful while preventing arbitrary provider
+    # fields, source ids, raw quotes or internal trace data from crossing the
+    # public boundary.
+    unverified: list[dict[str, Any]] = []
+    for raw in payload.get("unverified_explanations") or []:
+        if not isinstance(raw, dict):
+            continue
+        content = str(raw.get("content") or raw.get("claim") or "").strip()
+        if not content:
+            continue
+        item: dict[str, Any] = {
+            "content": content[:1200],
+            "reason": str(raw.get("reason") or "unverified")[:120],
+            "status": "unverified",
+        }
+        issue_id = str(raw.get("issue_id") or "").strip()
+        if issue_id:
+            item["issue_id"] = issue_id[:120]
+        facets = raw.get("facets")
+        if isinstance(facets, (list, tuple)):
+            item["facets"] = [str(value)[:80] for value in facets if str(value).strip()][:8]
+        unverified.append(item)
+    safe["unverified_explanations"] = unverified
     safe["rag_trace"] = (
         _strip_internal_response_fields(payload.get("rag_trace"))
         if include_admin_trace
@@ -339,7 +368,7 @@ async def stream_ask_progress(
     effective_role: str | None,
     compatibility_data_envelope: bool = False,
 ) -> AsyncGenerator[str, None]:
-    """Run Ask while emitting the validated, ordered progress contract."""
+    """Run Ask while emitting the ordered Direct RAG progress contract."""
 
     started = time.perf_counter()
     queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
@@ -350,6 +379,8 @@ async def stream_ask_progress(
             stage = str(payload.get("stage") or "")
             if stage in _ALLOWED_STATUS_STAGES:
                 await queue.put(("event", ("status", {"stage": stage, "elapsed_ms": elapsed_ms})))
+        elif event == "answer_delta" and isinstance(payload.get("text"), str):
+            await queue.put(("event", ("text_delta", {"text": payload["text"][:16000], "provisional": True, "elapsed_ms": elapsed_ms})))
         elif event == "sources":
             source_payload = _safe_sources(payload)
             source_payload["elapsed_ms"] = elapsed_ms
@@ -362,6 +393,11 @@ async def stream_ask_progress(
             await queue.put(("cancelled", None))
             raise
         except BaseException as exc:  # converted to a safe SSE error below
+            logging.getLogger(__name__).warning(
+                "ask_progress_error trace_id=%s type=%s status=%s detail=%s",
+                trace_id, type(exc).__name__, getattr(exc, "status_code", None),
+                str(exc.detail)[:500] if isinstance(exc, HTTPException) else type(exc).__name__,
+            )
             await queue.put(("error", exc))
         else:
             await queue.put(("result", response))
@@ -375,11 +411,15 @@ async def stream_ask_progress(
         },
         compatibility_data_envelope=compatibility_data_envelope,
     )
-    yield _encode_progress_event(
-        "status",
-        {"stage": "retrieving", "elapsed_ms": 0.0},
-        compatibility_data_envelope=compatibility_data_envelope,
-    )
+    if compatibility_data_envelope:
+        # The legacy data-envelope endpoint historically exposed a bounded
+        # initial retrieval stage immediately after acknowledgement.
+        yield _encode_progress_event(
+            "status",
+            {"stage": "retrieving", "elapsed_ms": round((time.perf_counter() - started) * 1000, 1)},
+            compatibility_data_envelope=True,
+        )
+
 
     task = asyncio.create_task(runner(), name=f"ask-progress-{trace_id[:12]}")
     try:
@@ -397,12 +437,12 @@ async def stream_ask_progress(
                 raise asyncio.CancelledError()
             if kind == "error":
                 yield _encode_progress_event(
-                    "error",
+                    "failed",
                     _safe_error(payload, trace_id=trace_id),
                     compatibility_data_envelope=compatibility_data_envelope,
                 )
                 yield _encode_progress_event(
-                    "complete",
+                    "completed",
                     {
                         "trace_id": trace_id,
                         "total_ms": round((time.perf_counter() - started) * 1000, 1),
@@ -418,12 +458,12 @@ async def stream_ask_progress(
                     "Ask progress executor returned an invalid response"
                 )
                 yield _encode_progress_event(
-                    "error",
+                    "failed",
                     _safe_error(contract_error, trace_id=trace_id),
                     compatibility_data_envelope=compatibility_data_envelope,
                 )
                 yield _encode_progress_event(
-                    "complete",
+                    "completed",
                     {
                         "trace_id": trace_id,
                         "total_ms": round(
@@ -464,7 +504,9 @@ async def stream_ask_progress(
             complete_payload: dict[str, Any] = {
                 "trace_id": trace_id,
                 "total_ms": round((time.perf_counter() - started) * 1000, 1),
-                "outcome": "success",
+                "outcome": response.outcome or "answered",
+                "transport_status": "completed",
+                "answer_status": response.answer_status,
             }
             if compatibility_data_envelope:
                 complete_payload.update(
@@ -480,7 +522,7 @@ async def stream_ask_progress(
                     }
                 )
             yield _encode_progress_event(
-                "complete",
+                "complete" if compatibility_data_envelope else "completed",
                 complete_payload,
                 compatibility_data_envelope=compatibility_data_envelope,
             )

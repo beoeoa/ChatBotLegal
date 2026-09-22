@@ -102,8 +102,9 @@ describe('BulkLegalReviewPanel', () => {
     expect(screen.getByText('Tờ khai đăng ký khai sinh')).toBeInTheDocument()
     expect(screen.getByText('dang_ky_khai_sinh')).toBeInTheDocument()
     expect(screen.getByText('60/2014/QH13')).toBeInTheDocument()
-    expect(screen.getByText('EFFECTIVITY_UNKNOWN')).toBeInTheDocument()
-    expect(screen.getByText('SEED_DEMO_QUARANTINED')).toBeInTheDocument()
+    expect(screen.getAllByText('Cần kiểm tra thêm dữ liệu nguồn').length).toBeGreaterThan(0)
+    expect(screen.queryByText('EFFECTIVITY_UNKNOWN')).not.toBeInTheDocument()
+    expect(screen.queryByText('SEED_DEMO_QUARANTINED')).not.toBeInTheDocument()
     expect(screen.getByRole('link', { name: /Nguồn chính thức/i })).toHaveAttribute(
       'href',
       preview.eligible_items[0].source_page_url,
@@ -176,11 +177,11 @@ describe('BulkLegalReviewPanel', () => {
       />,
     )
 
-    expect(screen.getByText('Đã loại khỏi catalog phục vụ')).toBeInTheDocument()
+    expect(screen.getByText('Đã loại khỏi danh mục phục vụ')).toBeInTheDocument()
     expect(
       screen.getByText('Biểu mẫu không có trong thủ tục chính thức'),
     ).toBeInTheDocument()
-    expect(screen.getByText('NO_OFFICIAL_STATE_FORM_CONFIRMED')).toBeInTheDocument()
+    expect(screen.getAllByText('Cần kiểm tra thêm dữ liệu nguồn').length).toBeGreaterThan(0)
   })
 
   it('starts the automated completion campaign without approving forms', () => {
@@ -272,7 +273,7 @@ describe('BulkLegalReviewPanel', () => {
       screen.queryByRole('button', { name: 'Cần tạo lại lô duyệt' }),
     ).not.toBeInTheDocument()
     fireEvent.click(
-      screen.getByRole('button', { name: 'Tạo lại lô từ checksum mới' }),
+      screen.getByRole('button', { name: 'Tạo lại lô từ dữ liệu nguồn mới' }),
     )
     expect(onRunCampaign).toHaveBeenCalledTimes(1)
     expect(onConfirm).not.toHaveBeenCalled()
@@ -383,8 +384,6 @@ describe('BulkLegalReviewPanel', () => {
         name: 'X\u00e1c nh\u1eadn ph\u00e1p l\u00fd h\u00e0ng lo\u1ea1t',
       }),
     ).toBeEnabled()
-    expect(screen.getByTestId('form-campaign-status')).toHaveTextContent(
-      'READY_FOR_HUMAN_ATTESTATION',
-    )
+    expect(screen.getByTestId('form-campaign-status')).toHaveTextContent('Chờ người duyệt xác nhận')
   })
 })

@@ -22,13 +22,15 @@ from typing import (
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from api.legal_exact_retrieval import plan_exact_lookup
+from api.chat_behavior_policy import render_admin_style_addendum, render_behavior_policy
 from api.legal_claim_validation import (
     contains_internal_citation_marker,
     strip_internal_citation_markers,
     validate_structured_claims,
 )
 from api.legal_determinism import semantic_claim_key
+from api.legal_exact_retrieval import plan_exact_lookup
+from api.legal_prompt_contract import build_shared_grounded_prompt, live_prompt_variant
 from api.legal_section_grounding import (
     LegalIssue,
     aggregate_answer_sections,
@@ -112,13 +114,26 @@ async def await_with_hard_deadline(
 
 
 async def invoke_blocking_model_with_deadline(
-    model: Any, prompt: str, *, timeout: float
+    model: Any,
+    prompt: str,
+    *,
+    timeout: float,
+    structured_output: bool = True,
 ) -> Any:
     """Run adapters with blocking internals outside the API event loop."""
-    invocation_options = structured_model_invocation_options(model)
+    invocation_options = structured_model_invocation_options(
+        model,
+        structured=structured_output,
+    )
+    from api.chat_execution import remaining_timeout
+    # Native async transports cancel the HTTP request with the coroutine.
+    if callable(getattr(model, "ainvoke", None)):
+        async with asyncio.timeout(remaining_timeout(timeout)):
+            return await model.ainvoke(prompt, **invocation_options)
+    # Optional legacy/local adapters with no async protocol remain explicit.
     return await await_with_hard_deadline(
         asyncio.to_thread(model.invoke, prompt, **invocation_options),
-        timeout=timeout,
+        timeout=remaining_timeout(timeout),
     )
 
 
@@ -168,7 +183,11 @@ def structured_retrieval_timeout_seconds(
     environ: Mapping[str, str] | None = None,
 ) -> float:
     if optimized_profile_enabled(role, environ):
-        return (6.0 if hard_question else 4.0) if tier == "expanded" else (15.0 if hard_question else 10.0)
+        # The canary profile follows the documented 4/6-second core and
+        # 2/3-second expanded retrieval budgets (normal/hard).  Keeping the
+        # tighter expanded budget is important because it is a bounded
+        # recovery tier, not a second full-corpus attempt.
+        return (3.0 if hard_question else 2.0) if tier == "expanded" else (6.0 if hard_question else 4.0)
     return (20.0 if hard_question else 15.0) if tier == "expanded" else (45.0 if hard_question else 35.0)
 
 
@@ -305,7 +324,11 @@ def structured_model_options(
     return options
 
 
-def structured_model_invocation_options(model: Any) -> dict[str, Any]:
+def structured_model_invocation_options(
+    model: Any,
+    *,
+    structured: bool = True,
+) -> dict[str, Any]:
     """Disable provider reasoning for deterministic extraction-only JSON.
 
     DeepSeek V4 defaults to thinking mode. That mode is useful for open-ended
@@ -314,6 +337,9 @@ def structured_model_invocation_options(model: Any) -> dict[str, Any]:
     switch keeps the configured model unchanged.
     """
 
+    if not structured:
+        return {}
+
     model_name = str(
         getattr(model, "model_name", None)
         or getattr(model, "model", None)
@@ -321,6 +347,16 @@ def structured_model_invocation_options(model: Any) -> dict[str, Any]:
     ).strip().casefold()
     if model_name.startswith("deepseek-v4-"):
         return {"extra_body": {"thinking": {"type": "disabled"}}}
+    model_type = type(model)
+    if (
+        model_type.__module__.startswith("langchain_ollama")
+        and model_name.startswith(("qwen3", "qwen3.5"))
+    ):
+        # Qwen thinking is enabled by default in Ollama.  The legal answer
+        # stage is a deterministic evidence-to-JSON transformation and is
+        # already protected by claim/citation validation; hidden reasoning
+        # consumed ~2,000 tokens even for a one-word local probe.
+        return {"reasoning": False}
     return {}
 
 
@@ -365,6 +401,9 @@ class StructuredClaim(BaseModel):
     ]
     evidence_id: str = Field(min_length=1, max_length=64)
     support_quote: str = Field(min_length=1, max_length=1200)
+    facet: str | None = Field(default=None, max_length=64)
+    actor: str | None = Field(default=None, max_length=300)
+    quote_id: str | None = Field(default=None, max_length=96)
 
 
 class StructuredIssueAnswer(BaseModel):
@@ -372,7 +411,8 @@ class StructuredIssueAnswer(BaseModel):
 
     issue_id: str = Field(min_length=1, max_length=96)
     claims: list[StructuredClaim] = Field(default_factory=list, max_length=20)
-    guidance: str | None = Field(default=None, max_length=1000)
+    answer_markdown: str | None = Field(default=None, max_length=5000)
+    guidance: str | None = Field(default=None, max_length=2000)
     clarifying_question: str | None = Field(default=None, max_length=500)
 
 
@@ -380,6 +420,323 @@ class StructuredLegalAnswer(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     issues: list[StructuredIssueAnswer] = Field(min_length=1, max_length=8)
+
+
+def _evidence_text_for_quote(evidence: Mapping[str, Any] | None) -> str:
+    """Return the canonical source text available to quote recovery.
+
+    The provider may echo a whole evidence unit into ``support_quote``.  Quote
+    recovery must search only text that crossed the provider boundary; it must
+    never use model-generated text as its own evidence.
+    """
+
+    if not evidence:
+        return ""
+    for key in (
+        "content",
+        "evidence_capsule",
+        "clean_content",
+        "exact_article_assembled_content",
+        "parent_context",
+    ):
+        value = evidence.get(key)
+        if isinstance(value, str) and value.strip():
+            return unicodedata.normalize("NFC", value)
+    return ""
+
+
+def _quote_occurs_in_source(quote: str, source: str) -> bool:
+    """Match a quote using the same conservative normalization as verification."""
+
+    if not quote or not source:
+        return False
+    quote_nfc = unicodedata.normalize("NFC", quote).strip()
+    source_nfc = unicodedata.normalize("NFC", source)
+    return quote_nfc in source_nfc or _fold(quote_nfc) in _fold(source_nfc)
+
+
+def _recover_bounded_support_quote(
+    quote: Any,
+    evidence: Mapping[str, Any] | None,
+    *,
+    max_chars: int = 1200,
+) -> str | None:
+    """Recover a short, contiguous source excerpt from an overlong quote.
+
+    Recovery is deliberately claim-local.  We prefer one or two sentence
+    boundaries and return ``None`` when no bounded substring can be proven to
+    occur in the evidence.  The caller then rejects only that claim.
+    """
+
+    raw_quote = unicodedata.normalize("NFC", str(quote or "")).strip()
+    source = _evidence_text_for_quote(evidence)
+    if not raw_quote or not source:
+        return None
+    if len(raw_quote) <= max_chars:
+        return raw_quote
+
+    # A model that copied the whole unit normally preserved sentence/newline
+    # boundaries.  Prefer complete sentences, then bounded combinations of
+    # adjacent sentences, and never fabricate a substring.
+    parts = [
+        part.strip()
+        for part in re.split(r"(?<=[.!?;])\s+|\n+", raw_quote)
+        if part.strip()
+    ]
+    candidates: list[str] = []
+    for start in range(len(parts)):
+        current = ""
+        for end in range(start, len(parts)):
+            candidate = (current + " " + parts[end]).strip()
+            if len(candidate) > max_chars:
+                break
+            current = candidate
+            candidates.append(candidate)
+    # Longest bounded candidate gives the verifier useful context while still
+    # respecting the field limit.
+    for candidate in sorted(candidates, key=len, reverse=True):
+        if _quote_occurs_in_source(candidate, source):
+            return candidate
+
+    # If punctuation was absent, use a bounded prefix only when it is itself a
+    # contiguous source excerpt.  This prevents arbitrary truncation.
+    prefix = raw_quote[:max_chars].rstrip()
+    if _quote_occurs_in_source(prefix, source):
+        return prefix
+    return None
+
+
+def recover_complete_issue_payload(raw: Any) -> dict[str, Any] | None:
+    """Recover complete issue objects from a truncated provider JSON stream.
+
+    Providers occasionally stop after finishing an issue but before closing the
+    outer ``issues`` array/object.  We may retain only objects that the JSON
+    decoder parsed completely; no braces, claims, or text are synthesized.
+    Returning ``None`` keeps the fail-closed behavior when even one complete
+    issue is unavailable.
+    """
+
+    text = re.sub(
+        r"^```(?:json)?\s*|\s*```$",
+        "",
+        str(raw or "").strip(),
+        flags=re.IGNORECASE,
+    )
+    marker = re.search(r"\"issues\"\s*:\s*\[", text)
+    if marker is None:
+        return None
+    decoder = json.JSONDecoder()
+    cursor = marker.end()
+    recovered: list[Mapping[str, Any]] = []
+    while cursor < len(text):
+        while cursor < len(text) and text[cursor].isspace():
+            cursor += 1
+        if cursor >= len(text) or text[cursor] == "]":
+            break
+        if text[cursor] == ",":
+            cursor += 1
+            continue
+        try:
+            value, cursor = decoder.raw_decode(text, cursor)
+        except (json.JSONDecodeError, TypeError):
+            break
+        if isinstance(value, Mapping):
+            recovered.append(value)
+        else:
+            break
+    if not recovered:
+        return None
+    return {"issues": recovered}
+
+
+def parse_structured_answer_resilient(
+    raw: Any,
+    *,
+    evidence_by_id: Mapping[str, Mapping[str, Any]] | None = None,
+) -> tuple[StructuredLegalAnswer, list[dict[str, Any]]]:
+    """Parse provider JSON without discarding valid sibling claims.
+
+    Top-level JSON must still be valid.  Inside a valid object, each issue and
+    claim is validated independently.  An overlong quote is recovered only
+    from the matching evidence unit; otherwise that claim is reported in the
+    returned rejection list and omitted from the public answer.  The normal
+    strict parser remains unchanged for legacy callers.
+    """
+
+    text = str(raw or "").strip()
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE)
+    top_level_recovered = False
+    try:
+        payload = json.loads(text)
+    except (json.JSONDecodeError, TypeError) as exc:
+        # Providers sometimes wrap an otherwise valid JSON object in a short
+        # preamble or trailing note despite ``json_object`` mode.  Recover
+        # only a complete object with the standard decoder; never add missing
+        # braces or invent fields for a truncated response.
+        decoder = json.JSONDecoder()
+        start = text.find("{")
+        if start < 0:
+            raise ValueError("model_output_is_not_valid_structured_json") from exc
+        try:
+            payload, _ = decoder.raw_decode(text[start:])
+        except (json.JSONDecodeError, TypeError) as nested_exc:
+            payload = recover_complete_issue_payload(text)
+            if payload is None:
+                raise ValueError("model_output_is_not_valid_structured_json") from nested_exc
+            top_level_recovered = True
+    if not isinstance(payload, Mapping):
+        raise ValueError("model_output_is_not_valid_structured_json")
+
+    rejected: list[dict[str, Any]] = []
+    if top_level_recovered:
+        rejected.append({"scope": "document", "reason": "top_level_json_recovered_complete_issues"})
+    parsed_issues: list[StructuredIssueAnswer] = []
+    raw_issues = payload.get("issues")
+    if not isinstance(raw_issues, list):
+        raise ValueError("model_output_is_not_valid_structured_json")
+
+    allowed_claim_keys = {
+        "claim_text",
+        "claim_type",
+        "evidence_id",
+        "evidence_ids",
+        "support_quote",
+        "facet",
+        "actor",
+        "quote_id",
+    }
+    allowed_issue_keys = {
+        "issue_id",
+        "claims",
+        "answer_markdown",
+        "guidance",
+        "clarifying_question",
+    }
+    for issue_index, raw_issue in enumerate(raw_issues[:8]):
+        if not isinstance(raw_issue, Mapping):
+            rejected.append({"scope": "issue", "index": issue_index, "reason": "issue_not_object"})
+            continue
+        issue_id = str(raw_issue.get("issue_id") or "").strip()
+        if not issue_id or len(issue_id) > 96:
+            rejected.append({"scope": "issue", "index": issue_index, "reason": "invalid_issue_id"})
+            continue
+        valid_claims: list[StructuredClaim] = []
+        raw_claims = raw_issue.get("claims") or []
+        if not isinstance(raw_claims, list):
+            raw_claims = []
+            rejected.append({"scope": "issue", "issue_id": issue_id, "reason": "claims_not_list"})
+        for claim_index, raw_claim in enumerate(raw_claims[:20]):
+            rejection_base = {
+                "scope": "claim",
+                "issue_id": issue_id,
+                "index": claim_index,
+            }
+            if not isinstance(raw_claim, Mapping):
+                rejected.append({**rejection_base, "reason": "claim_not_object"})
+                continue
+            candidate = {
+                key: raw_claim.get(key)
+                for key in allowed_claim_keys
+                if key in raw_claim
+            }
+            # The public web contract uses singular ``evidence_id`` while
+            # the standalone Phase-D contract historically used plural
+            # ``evidence_ids``. Normalize both at this shared parser boundary
+            # so web and benchmark callers exercise identical recovery and
+            # claim-local rejection logic.
+            if not str(candidate.get("evidence_id") or "").strip():
+                raw_evidence_ids = raw_claim.get("evidence_ids")
+                if isinstance(raw_evidence_ids, (list, tuple)):
+                    candidate["evidence_id"] = next(
+                        (
+                            str(value).strip()
+                            for value in raw_evidence_ids
+                            if str(value).strip()
+                        ),
+                        "",
+                    )
+                elif isinstance(raw_evidence_ids, str):
+                    candidate["evidence_id"] = raw_evidence_ids.strip()
+            # It is an input alias only; the normalized web model remains
+            # strict and must not receive the plural field as an extra key.
+            candidate.pop("evidence_ids", None)
+            candidate.setdefault("facet", None)
+            candidate.setdefault("actor", None)
+            candidate.setdefault("quote_id", None)
+            evidence_id = str(candidate.get("evidence_id") or "").strip()
+            quote = candidate.get("support_quote")
+            evidence = (evidence_by_id or {}).get(evidence_id)
+            if evidence is None:
+                # Accept provider aliases for validation/recovery, while the
+                # bridge still canonicalizes the ID before D verification.
+                for context_id, candidate_evidence in (evidence_by_id or {}).items():
+                    if any(
+                        evidence_id == str(candidate_evidence.get(alias) or "").strip()
+                        for alias in (
+                            "evidence_id",
+                            "source_id",
+                            "chunk_id",
+                            "canonical_chunk_id",
+                        )
+                    ):
+                        evidence = candidate_evidence
+                        break
+            if isinstance(quote, str) and len(quote.strip()) > 1200:
+                recovered = _recover_bounded_support_quote(quote, evidence)
+                if recovered is None:
+                    rejected.append({**rejection_base, "reason": "support_quote_too_long_no_exact_excerpt"})
+                    continue
+                candidate["support_quote"] = recovered
+                rejected.append({
+                    **rejection_base,
+                    "reason": "support_quote_recovered",
+                    "original_chars": len(quote),
+                    "recovered_chars": len(recovered),
+                })
+            try:
+                valid_claims.append(StructuredClaim.model_validate(candidate))
+            except (ValidationError, TypeError, ValueError) as exc:
+                rejected.append({
+                    **rejection_base,
+                    "reason": "claim_validation_failed",
+                    "error_type": exc.__class__.__name__,
+                })
+
+        issue_candidate = {
+            key: raw_issue.get(key)
+            for key in allowed_issue_keys
+            if key in raw_issue
+        }
+        issue_candidate["issue_id"] = issue_id
+        issue_candidate["claims"] = valid_claims
+        # Presentation-only fields are omitted when oversized; claims remain
+        # independently verifiable and the renderer can build the final text.
+        for field, limit in (
+            ("answer_markdown", 5000),
+            ("guidance", 2000),
+            ("clarifying_question", 500),
+        ):
+            value = issue_candidate.get(field)
+            if value is not None and len(str(value)) > limit:
+                issue_candidate[field] = None
+                rejected.append({
+                    "scope": "issue",
+                    "issue_id": issue_id,
+                    "reason": f"{field}_omitted_too_long",
+                })
+        try:
+            parsed_issues.append(StructuredIssueAnswer.model_validate(issue_candidate))
+        except (ValidationError, TypeError, ValueError) as exc:
+            rejected.append({
+                "scope": "issue",
+                "issue_id": issue_id,
+                "reason": "issue_validation_failed",
+                "error_type": exc.__class__.__name__,
+            })
+
+    if not parsed_issues:
+        raise ValueError("model_output_has_no_valid_issues")
+    return StructuredLegalAnswer(issues=parsed_issues), rejected
 
 
 _ROLE_CLAIM_LABELS: dict[str, dict[str, str]] = {
@@ -426,18 +783,33 @@ _ROLE_CLAIM_LABELS: dict[str, dict[str, str]] = {
 
 _FACET_COMPATIBILITY: dict[str, set[str]] = {
     "rule": set(_ROLE_CLAIM_LABELS["citizen"]),
-    "condition": {"condition", "exception"},
-    "authority": {"authority"},
-    "documents": {"documents"},
-    "procedure": {"procedure", "next_action"},
-    "verification": {"procedure", "next_action", "warning"},
-    "recording": {"rule", "procedure"},
-    "deadline": {"deadline"},
+    "condition": {"condition", "exception", "rule"},
+    "authority": {"authority", "rule", "procedure"},
+    "documents": {"documents", "rule", "procedure", "form"},
+    "procedure": {
+        "procedure",
+        "next_action",
+        "documents",
+        "authority",
+        "fee",
+        "form",
+        "deadline",
+        "rule",
+        "condition",
+        "exception",
+        "warning",
+    },
+    "verification": {"procedure", "next_action", "warning", "rule"},
+    "recording": {"rule", "procedure", "documents"},
+    "deadline": {"deadline", "rule", "procedure"},
     # Fee and official-form requests share the sixth bounded planner slot when
     # all other administrative facets are also requested.
-    "fee": {"fee", "form"},
-    "form": {"form"},
-    "dispute": {"rule", "procedure", "next_action"},
+    "fee": {"fee", "form", "rule", "procedure"},
+    "form": {"form", "documents", "procedure", "rule"},
+    # Complaint/denunciation siblings are distinct retrieval issues but their
+    # legal conclusion remains a grounded rule; authority and next-action
+    # evidence stay eligible independently for each sibling.
+    "dispute": {"rule", "procedure", "authority", "next_action"},
     "unknown": set(_ROLE_CLAIM_LABELS["citizen"]),
 }
 
@@ -446,15 +818,15 @@ _FACET_CLAIM_TYPES: dict[str, set[str]] = {
     "condition": {"condition", "rule", "exception"},
     "authority": {"authority", "rule", "procedure"},
     "documents": {"documents", "procedure", "rule", "condition", "form"},
-    "procedure": {"procedure", "next_action", "documents", "rule"},
+    "procedure": {"procedure", "next_action", "documents", "rule", "authority", "form"},
     "verification": {"procedure", "next_action", "warning", "rule"},
     "recording": {"rule", "procedure", "documents"},
-    "next_action": {"next_action", "procedure"},
-    "deadline": {"deadline", "procedure"},
-    "fee": {"fee", "rule"},
-    "form": {"form", "documents"},
+    "next_action": {"next_action", "procedure", "rule"},
+    "deadline": {"deadline", "procedure", "rule"},
+    "fee": {"fee", "rule", "procedure", "form"},
+    "form": {"form", "documents", "procedure", "rule"},
     "exception": {"exception", "condition", "rule"},
-    "warning": {"warning", "rule"},
+    "warning": {"warning", "rule", "procedure"},
 }
 
 _SECTION_TO_FACET = {
@@ -482,6 +854,10 @@ _SECTION_TO_FACET = {
     "forms": "form",
     "form": "form",
     "rights_or_explanation": "rule",
+    # The issue planner uses ``dispute`` for the complaint/denunciation
+    # splitter. Normalize its coverage slot to a grounded legal rule rather
+    # than inventing an unsupported claim type named "dispute".
+    "dispute": "rule",
 }
 
 _FACET_EVIDENCE_MARKERS: dict[str, tuple[str, ...]] = {
@@ -549,6 +925,57 @@ def _clean_extractive_text(value: Any) -> str:
         for line in normalized.splitlines()
         if line.strip()
     )
+
+
+def _split_structural_evidence_text(
+    text: str,
+    *,
+    max_chars: int = 1100,
+) -> list[str]:
+    """Split long evidence at legal structure/sentence boundaries.
+
+    The split is a prompt-packing boundary only.  The caller copies the
+    document/article/clause metadata to every part, so a smaller provider
+    unit never becomes a new legal source or loses its parent identity.
+    """
+
+    value = unicodedata.normalize("NFC", str(text or "")).strip()
+    if not value or len(value) <= max_chars:
+        return [value] if value else []
+
+    structural_parts = [
+        part.strip()
+        for part in re.split(
+            r"(?m)(?=^\s*(?:Điều\s+\d+|Khoản\s+\d+|Điểm\s+[a-zđ]\)|\d+\.|[a-zđ]\))\s*)",
+            value,
+            flags=re.IGNORECASE,
+        )
+        if part.strip()
+    ]
+    if len(structural_parts) <= 1:
+        structural_parts = [value]
+
+    parts: list[str] = []
+    for structural in structural_parts:
+        remaining = structural
+        while len(remaining) > max_chars:
+            boundary = max(
+                remaining.rfind(". ", 0, max_chars + 1),
+                remaining.rfind("; ", 0, max_chars + 1),
+                remaining.rfind("\n", 0, max_chars + 1),
+            )
+            if boundary < max_chars // 2:
+                boundary = remaining.rfind(" ", 0, max_chars + 1)
+            if boundary < max_chars // 2:
+                boundary = max_chars
+            cut = boundary + (1 if remaining[boundary:boundary + 2] in {". ", "; "} else 0)
+            piece = remaining[:cut].strip()
+            if piece:
+                parts.append(piece)
+            remaining = remaining[cut:].lstrip()
+        if remaining:
+            parts.append(remaining)
+    return [part for part in parts if part]
 
 
 def _fold(value: Any) -> str:
@@ -966,6 +1393,17 @@ def ensure_required_facet_issues(
             dict.fromkeys(_normalized_facet(issue.intent) for issue in planned)
         )
 
+    # Keep the distinction between an explicit retrieval/coverage contract
+    # named ``rule`` and the presentation aliases ``conclusion`` or
+    # ``applicable_rule``. A multi-facet card should not gain an auxiliary
+    # rule issue merely because it has a conclusion section, but an explicit
+    # planner/evaluation contract for ``rule`` must still be assigned to an
+    # existing substantive issue.
+    explicit_rule_section = any(
+        str(section or "").strip().casefold() == "rule"
+        for section in (required_sections or ())
+    )
+
     selected: list[LegalIssue] = []
     used_indexes: set[int] = set()
     base_domain = planned[0].domain if planned else "unknown"
@@ -1058,6 +1496,16 @@ def ensure_required_facet_issues(
                     if source_index is not None
                     else base_context.procedure_family if base_context else None
                 ),
+                subject_anchor=(
+                    source.retrieval_subject
+                    if source_index is not None
+                    else base_context.retrieval_subject if base_context else ""
+                ),
+                fact_anchors=(
+                    source.retrieval_facts
+                    if source_index is not None
+                    else base_context.retrieval_facts if base_context else ()
+                ),
             )
         )
 
@@ -1102,6 +1550,8 @@ def ensure_required_facet_issues(
                 expected_sources=issue.expected_sources,
                 expected_form=issue.expected_form,
                 procedure_family=issue.procedure_family,
+                subject_anchor=issue.retrieval_subject,
+                fact_anchors=issue.retrieval_facts,
             )
         )
         selected_issue_keys.add(key)
@@ -1118,6 +1568,10 @@ def derive_required_facets_by_issue(
     result: dict[str, list[str]] = {
         issue.issue_id: [_normalized_facet(issue.intent)] for issue in issues
     }
+    explicit_rule_section = any(
+        str(section or "").strip().casefold() == "rule"
+        for section in (required_sections or ())
+    )
     # Free-text facet inference is only a compatibility fallback for callers
     # that did not supply an explicit answer contract. Structured orchestration
     # deliberately carries the complete user question in every focused query;
@@ -1147,7 +1601,12 @@ def derive_required_facets_by_issue(
             for issue in issues
             if _normalized_facet(issue.intent) == facet
         ]
-        if facet == "rule" and not exact_matching and len(issues) > 1:
+        if (
+            facet == "rule"
+            and not exact_matching
+            and len(issues) > 1
+            and not explicit_rule_section
+        ):
             # Each explicit facet card already states its verified legal
             # proposition.  Attaching a generic "conclusion" rule to the
             # first condition/dossier issue creates a second retrieval target
@@ -1389,8 +1848,16 @@ def build_compact_evidence_context(
     issues: Sequence[LegalIssue],
     evidence_rows: Sequence[Mapping[str, Any]],
     max_chars: int = 9000,
+    preserve_structural_units: bool = False,
+    max_evidence_units: int | None = None,
 ) -> tuple[str, dict[str, dict[str, Any]]]:
-    """Create a bounded, deduplicated context and opaque evidence lookup."""
+    """Create a bounded, deduplicated context and opaque evidence lookup.
+
+    ``max_evidence_units`` is an optional provider-boundary cap.  It is kept
+    separate from the retrieval packet so deterministic fallback and audit can
+    retain the full packet while a remote model receives only a small,
+    round-robin, issue-balanced evidence set.
+    """
 
     issue_ids = {issue.issue_id for issue in issues}
     request_ids = {issue.request_id for issue in issues if issue.request_id}
@@ -1436,9 +1903,19 @@ def build_compact_evidence_context(
             if rank < len(rows):
                 ordered_rows.append(rows[rank])
 
+    per_issue_limit = None
+    if max_evidence_units is not None:
+        configured_limit = max(1, int(max_evidence_units))
+        per_issue_limit = max(1, configured_limit // max(1, len(issues)))
+    units_by_issue: dict[str, int] = {}
     for row in ordered_rows:
         item = project_legal_evidence(row)
-        if str(item.get("issue_id") or "") not in issue_ids:
+        item_issue_id = str(item.get("issue_id") or "")
+        if item_issue_id not in issue_ids:
+            continue
+        if max_evidence_units is not None and len(evidence) >= max(1, int(max_evidence_units)):
+            break
+        if per_issue_limit is not None and units_by_issue.get(item_issue_id, 0) >= per_issue_limit:
             continue
         if request_ids and str(item.get("request_id") or "") not in request_ids:
             continue
@@ -1462,13 +1939,10 @@ def build_compact_evidence_context(
                 or item.get("parent_context")
             )
             if item.get("exact_article_serving_mode") == "bounded_long_article_window":
-                content = (
-                    "PHẠM VI BẰNG CHỨNG: Hệ thống đã kiểm tra đủ toàn bộ chunk của "
-                    "Điều luật cực dài. Phần dưới đây chỉ là cửa sổ theo đúng thứ tự "
-                    "nguồn, liên quan trực tiếp đến câu hỏi; không được trình bày nó "
-                    "như toàn bộ Điều luật.\n\n"
-                    + content
-                )
+                # Keep the scope note as metadata, never as source content.
+                # Otherwise a provider can quote this internal instruction and
+                # accidentally attach an unrelated legal conclusion to it.
+                item["evidence_scope_note"] = "bounded_long_article_window"
             item.update(
                 {
                     "content": content,
@@ -1483,78 +1957,119 @@ def build_compact_evidence_context(
             )
             seen_exact_article_packets.add(exact_packet_key)
         else:
-            content = _clean_text(
+            raw_unit = (
                 item.get("evidence_capsule")
                 or item.get("clean_content")
                 or item.get("content")
             )
+            content = (
+                _clean_extractive_text(raw_unit)
+                if preserve_structural_units
+                else _clean_text(raw_unit)
+            )
         if not content:
             continue
-        source_key = (
-            str(item.get("issue_id") or ""),
-            str(
+        content_parts = _split_structural_evidence_text(content, max_chars=1100)
+        for part_index, content_part in enumerate(content_parts, start=1):
+            if max_evidence_units is not None and len(evidence) >= max(1, int(max_evidence_units)):
+                break
+            if per_issue_limit is not None and units_by_issue.get(item_issue_id, 0) >= per_issue_limit:
+                break
+            part_item = dict(item)
+            part_item["content"] = content_part
+            part_item["clean_content"] = content_part
+            part_item["evidence_capsule"] = content_part
+            if len(content_parts) > 1:
+                part_item["exact_article_context_chunked"] = True
+            if len(content_parts) > 1:
+                part_item["evidence_parent_id"] = str(
+                    item.get("source_id")
+                    or item.get("chunk_id")
+                    or item.get("document_id")
+                    or ""
+                )
+                part_item["evidence_part_index"] = part_index
+                part_item["evidence_part_count"] = len(content_parts)
+            source_identity = str(
                 item.get("chunk_id")
                 or item.get("canonical_chunk_id")
                 or item.get("source_id")
                 or ""
-            ),
-        )
-        if source_key[1] and source_key in seen_sources:
-            continue
-        if source_key[1]:
-            seen_sources.add(source_key)
-        dedupe_key = (
-            str(item.get("issue_id") or ""),
-            str(item.get("document_id") or item.get("law_number") or ""),
-            str(item.get("article_id") or item.get("article_number") or ""),
-            content.casefold(),
-        )
-        if dedupe_key in seen:
-            continue
-        seen.add(dedupe_key)
-        evidence_id = f"evidence-{len(evidence) + 1}"
-        title_parts = [
-            part.strip()
-            for part in re.split(r"[>|]", _clean_text(item.get("document_title")))
-            if part.strip()
-        ]
-        compact_title = title_parts[-1] if title_parts else ""
-        header = " | ".join(
-            part
-            for part in (
-                evidence_id,
-                f"issue={item.get('issue_id')}",
-                compact_title,
-                _clean_text(item.get("law_number")),
-                f"Điều {_clean_text(item.get('article_number'))}" if item.get("article_number") else "",
             )
-            if part
-        )
-        remaining = max_chars - consumed - len(header) - 4
-        if remaining < 120:
-            break
-        if exact_packet_complete:
-            # Fail closed: an incomplete packet is not downgraded to a shorter
-            # excerpt. A packet explicitly marked as a bounded long-Article
-            # window is different: retrieval already verified all children,
-            # and the window is the approved representation for the context
-            # budget. Keep a bounded prefix so a later issue is not silently
-            # starved by one very large Article.
-            if len(content) > remaining:
-                if item.get("exact_article_serving_mode") != "bounded_long_article_window":
-                    continue
-                excerpt = content[:remaining]
-                item["exact_article_context_truncated"] = True
+            source_key = (
+                str(item.get("issue_id") or ""),
+                f"{source_identity}#part-{part_index}" if source_identity else "",
+            )
+            if source_key[1] and source_key in seen_sources:
+                continue
+            if source_key[1]:
+                seen_sources.add(source_key)
+            dedupe_key = (
+                str(item.get("issue_id") or ""),
+                str(item.get("document_id") or item.get("law_number") or ""),
+                str(item.get("article_id") or item.get("article_number") or ""),
+                content_part.casefold(),
+            )
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            evidence_id = f"evidence-{len(evidence) + 1}"
+            title_parts = [
+                part.strip()
+                for part in re.split(r"[>|]", _clean_text(item.get("document_title")))
+                if part.strip()
+            ]
+            compact_title = title_parts[-1] if title_parts else ""
+            header = " | ".join(
+                part
+                for part in (
+                    evidence_id,
+                    f"issue={item.get('issue_id')}",
+                    compact_title,
+                    _clean_text(item.get("law_number")),
+                    f"Điều {_clean_text(item.get('article_number'))}" if item.get("article_number") else "",
+                    f"phần {part_index}/{len(content_parts)}" if len(content_parts) > 1 else "",
+                )
+                if part
+            )
+            remaining = max_chars - consumed - len(header) - 4
+            if remaining < 120:
+                break
+            if exact_packet_complete:
+                # A complete exact packet is still bound to the original
+                # Article, but long Articles are exposed to the provider as
+                # bounded structural parts so one quote cannot echo 10k chars.
+                if len(content_part) > remaining:
+                    if item.get("exact_article_serving_mode") != "bounded_long_article_window":
+                        continue
+                    excerpt = content_part[:remaining]
+                    part_item["exact_article_context_truncated"] = True
+                else:
+                    excerpt = content_part
+                part_item["exact_article_context_complete"] = True
             else:
-                excerpt = content
-            item["exact_article_context_complete"] = True
-        else:
-            excerpt = content[: min(remaining, first_source_excerpt_cap)]
-        block = f"[{header}]\n{excerpt}"
-        blocks.append(block)
-        consumed += len(block) + 2
-        evidence[evidence_id] = item
-    context = (prefix + "\n\n".join(blocks))[:max_chars]
+                if preserve_structural_units:
+                    # Simplified serving never crops a verified structural part
+                    # in the middle. If it does not fit, omit that part.
+                    if len(content_part) > remaining:
+                        continue
+                    excerpt = content_part
+                else:
+                    excerpt = content_part[: min(remaining, first_source_excerpt_cap)]
+            part_item["quote_id"] = str(
+                item.get("quote_id") or f"{evidence_id}-quote-1"
+            )
+            block = f"[{header}]\n{excerpt}"
+            blocks.append(block)
+            consumed += len(block) + 2
+            evidence[evidence_id] = part_item
+            units_by_issue[item_issue_id] = units_by_issue.get(item_issue_id, 0) + 1
+    rendered_context = prefix + "\n\n".join(blocks)
+    context = (
+        rendered_context
+        if preserve_structural_units
+        else rendered_context[:max_chars]
+    )
     return context, evidence
 
 
@@ -1564,34 +2079,601 @@ def build_structured_answer_prompt(
     role: str,
     context: str,
     coverage_matrix: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+    system_prompt_addendum: str | None = None,
+    prompt_variant: str | None = None,
+    standalone_queries: Mapping[str, str] | None = None,
 ) -> str:
-    """Return the only prompt used by the section-grounding generation pass."""
+    """Return the shared evidence-only prompt used by live generation.
 
-    role_instruction = {
-        "citizen": "Ưu tiên kết luận dễ hiểu, việc cần làm tiếp theo, nơi nộp, hồ sơ, thời hạn, lệ phí và biểu mẫu đúng phần người dân hỏi.",
-        "officer": "Ưu tiên kết luận chuyên môn, thẩm quyền, căn cứ, quy trình xử lý, hồ sơ và điểm cần xác minh trước khi trả lời dân.",
-        "admin": "Ưu tiên kết luận đã kiểm chứng; dữ liệu nguồn chọn/loại, coverage, timing và provenance biểu mẫu do backend trace cung cấp, không được tự suy đoán.",
-    }.get(role, "Trả lời đúng phần được hỏi bằng ngôn ngữ rõ ràng.")
+    The previous prompt contained a realistic-looking sample answer with
+    invented forms, portals, deadlines and fees.  A model could copy those
+    placeholders even when the packet did not support them.  The output
+    contract below is intentionally schematic; deterministic backend code
+    owns procedure/form metadata.
+    """
+
     coverage_contract = render_coverage_matrix_for_prompt(coverage_matrix or {})
-    return f"""Vai trò: {role}. {role_instruction}
-Câu hỏi: {_clean_text(question)}
+    output_contract = """{
+  \"issues\": [
+    {
+      \"issue_id\": \"issue-id-from-packet\",
+      \"answer_markdown\": null,
+      \"claims\": [
+        {
+          \"claim_text\": \"Nguyên văn hoặc diễn đạt tối thiểu từ quote.\",
+          \"claim_type\": \"rule|condition|authority|documents|procedure|next_action|deadline|fee|form|exception|warning\",
+          \"facet\": \"facet đang được trả lời\",
+          \"actor\": \"chủ thể/cơ quan xuất hiện trong cùng quote hoặc null\",
+          \"evidence_id\": \"evidence-id\",
+          \"quote_id\": \"quote-id của evidence\",
+          \"support_quote\": \"một đoạn trích liên tục ngắn, tối đa 600 ký tự, từ cùng evidence\"
+        }
+      ],
+      \"guidance\": null,
+      \"clarifying_question\": null
+    }
+  ]
+}
+"""
+    few_shot_contract = """
+FEW-SHOT VỀ SUPPORT_QUOTE (dùng đúng quy tắc, không sao chép nội dung ví dụ):
+Evidence: "Cơ quan tiếp nhận hồ sơ tại Bộ phận Một cửa của Ủy ban nhân dân cấp xã."
+ĐÚNG: {"evidence_id":"evidence-1","support_quote":"Cơ quan tiếp nhận hồ sơ tại Bộ phận Một cửa của Ủy ban nhân dân cấp xã."}
+SAI: {"evidence_id":"evidence-1","support_quote":"<chép toàn bộ khối evidence hoặc toàn bộ Điều luật>"}
+Chỉ tạo tối đa 4 claims cho mỗi issue và chỉ tạo claim khi có evidence trực tiếp. Để answer_markdown, guidance và clarifying_question là null trừ khi thật sự cần hỏi lại.
+support_quote phải là 1–2 câu liên tục, khoảng 100–200 ký tự khi có thể, và phải xuất hiện nguyên văn trong đúng evidence_id. Không đưa suy luận, markdown, hay toàn bộ văn bản vào trường này.
+claim_text phải là câu/đoạn ngắn nguyên văn trong support_quote (hoặc chỉ bỏ phần dẫn nhập không mang nội dung pháp lý); không tự tóm tắt bằng cách ghép nhiều điều khoản. Nếu không thể giữ nguyên căn cứ trong quote, bỏ claim đó.
+"""
+    prompt = build_shared_grounded_prompt(
+        question=_clean_text(question),
+        role=str(role or "citizen"),
+        evidence_text=context,
+        coverage_text=coverage_contract,
+        output_contract=output_contract + few_shot_contract,
+        system_addendum=system_prompt_addendum or "",
+        prompt_variant=prompt_variant or live_prompt_variant(),
+        context_label="EVIDENCE PACKET V2",
+    )
+    standalone_block = ""
+    if standalone_queries:
+        standalone_block = "\n\nSTANDALONE ISSUES\n" + "\n".join(
+            f"- {issue_id}: {_clean_text(query)}"
+            for issue_id, query in standalone_queries.items()
+            if _clean_text(issue_id) and _clean_text(query)
+        )
+    max_prompt_chars = 24_000 if standalone_queries else 16_000
+    return (
+        prompt
+        + standalone_block
+        + "\n\nCác claim được phép gồm: next_action (việc cần làm tiếp theo), "
+        "exception (ngoại lệ) và warning (cảnh báo) khi evidence có căn cứ; "
+        "nếu không có evidence thì không tạo claim. "
+        "Mỗi support_quote phải là một đoạn liên tục ngắn (tối đa 600 ký tự); "
+        "không chép nguyên điều luật hoặc toàn bộ evidence vào support_quote."
+    )[:max_prompt_chars]
 
-Chỉ dùng EVIDENCE; không suy đoán hoặc thêm điều luật, thẩm quyền, thời hạn,
-lệ phí hay con số. Trả duy nhất JSON object, không Markdown:
-{{"issues":[{{"issue_id":"issue-1","claims":[{{"claim_text":"...","claim_type":"rule|condition|authority|documents|procedure|next_action|deadline|fee|form|exception|warning","evidence_id":"evidence-1","support_quote":"exact quote"}}],"guidance":null,"clarifying_question":null}}]}}
-Mỗi claim phải gắn đúng evidence_id cùng issue và quote phải tồn tại nguyên văn.
-Chỉ tạo claim cho facet có evidence_available=true trong COVERAGE_MATRIX;
-nếu thiếu căn cứ thì để claims rỗng. Với mỗi facet có evidence_available=true,
-phải tạo ít nhất một claim đúng loại; được tạo tối đa ba claim khác nhau cho
-hồ sơ, điều kiện hoặc quy trình để câu trả lời đủ ý nhưng không lặp. Khi các
-facet đã có bằng chứng, không hỏi lại thông tin và không dùng câu thoái lui
-chung thay cho nội dung nguồn đã xác minh.
 
-COVERAGE_MATRIX
-{coverage_contract}
+_DIRECT_PROMPT_FACET_LABELS: dict[str, str] = {
+    "rule": "quy tắc hoặc kết luận pháp lý áp dụng",
+    "condition": "điều kiện áp dụng",
+    "eligibility": "điều kiện hoặc đối tượng được thực hiện",
+    "documents": "hồ sơ và giấy tờ cần chuẩn bị",
+    "authority": "cơ quan hoặc người có thẩm quyền",
+    "procedure": "trình tự và cách thực hiện",
+    "process": "trình tự và cách thực hiện",
+    "deadline": "thời hạn thực hiện hoặc giải quyết",
+    "processing_time": "thời hạn giải quyết",
+    "fee": "phí và lệ phí",
+    "form": "biểu mẫu cần sử dụng",
+    "legal_basis": "căn cứ pháp lý",
+    "validity": "hiệu lực của quy định",
+    "next_action": "việc cần làm tiếp theo",
+    "verification": "nội dung cán bộ cần kiểm tra",
+    "exception": "ngoại lệ hoặc trường hợp đặc biệt",
+    "warning": "lưu ý và rủi ro cần tránh",
+}
 
-{context}
-"""[:16000]
+
+def _direct_prompt_facet_label(value: object) -> str:
+    normalized = _clean_text(value).casefold().replace("-", "_").replace(" ", "_")
+    return _DIRECT_PROMPT_FACET_LABELS.get(
+        normalized,
+        normalized.replace("_", " ") if normalized else "nội dung được hỏi",
+    )
+
+
+_DETERMINISTIC_FACT_FACETS = {"authority", "deadline"}
+
+
+def _normalized_search_text(value: object) -> str:
+    """Return accent-insensitive text used only for duplicate detection."""
+
+    text = unicodedata.normalize("NFD", _clean_text(value).casefold())
+    text = "".join(char for char in text if unicodedata.category(char) != "Mn")
+    return re.sub(r"[^a-z0-9]+", " ", text).strip()
+
+
+def _indexed_fact_parts(value: object) -> tuple[str, str] | None:
+    raw = _clean_text(value)
+    prefix, separator, fact = raw.partition(":")
+    if not separator or not fact.strip():
+        return None
+    facet = _normalized_facet(prefix.strip())
+    if facet not in _DETERMINISTIC_FACT_FACETS:
+        return None
+    return facet, fact.strip()
+
+
+def _verified_fact_already_present(*, answer: str, facet: str, fact: str) -> bool:
+    answer_key = _normalized_search_text(answer)
+    fact_key = _normalized_search_text(fact)
+    if fact_key and fact_key in answer_key:
+        return True
+
+    if facet == "deadline":
+        # Treat 03 and 3 as the same value, but keep the original spelling in
+        # the deterministic supplement shown to the user.
+        deadline_match = re.search(
+            r"\b0*(\d+)\s+(ngay|thang|nam|gio)(?:\s+lam\s+viec)?\b",
+            fact_key,
+        )
+        if deadline_match:
+            amount = str(int(deadline_match.group(1)))
+            unit = deadline_match.group(2)
+            answer_deadlines = re.findall(
+                r"\b0*(\d+)\s+(ngay|thang|nam|gio)(?:\s+lam\s+viec)?\b",
+                answer_key,
+            )
+            if any(str(int(number)) == amount and found_unit == unit for number, found_unit in answer_deadlines):
+                return True
+
+    if facet == "authority":
+        # Official capsules commonly use ``Cơ quan thực hiện: ...``. Compare
+        # the value after that label so a natural model paraphrase does not
+        # create a duplicate supplement.
+        _, separator, value = fact.partition(":")
+        authority_key = _normalized_search_text(value if separator else fact)
+        if authority_key and authority_key in answer_key:
+            return True
+
+    return False
+
+
+def _format_verified_fact(facet: str, fact: str) -> str:
+    label, separator, value = fact.partition(":")
+    if separator and label.strip() and value.strip() and len(label.strip()) <= 80:
+        return f"- **{label.strip()}:** {value.strip()}"
+    fallback_label = "Thời hạn giải quyết" if facet == "deadline" else "Cơ quan có thẩm quyền"
+    return f"- **{fallback_label}:** {fact.strip()}"
+
+
+def append_missing_verified_facts(
+    *,
+    answer_markdown: str,
+    required_facets_by_issue: Mapping[str, Sequence[str]] | None,
+    available_facts_by_issue: Mapping[str, Sequence[str]] | None,
+) -> tuple[str, list[dict[str, str]]]:
+    """Append short verified facts that the model omitted.
+
+    The model-authored Markdown remains byte-for-byte unchanged. Only facts
+    copied from role/validity-eligible evidence are appended, and only when
+    the corresponding facet was required for the issue. This is deliberately
+    not a claim validator and never removes model prose.
+    """
+
+    answer = str(answer_markdown or "").strip()
+    if not answer or not required_facets_by_issue or not available_facts_by_issue:
+        return answer, []
+
+    appended: list[dict[str, str]] = []
+    rendered: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    comparison_answer = answer
+    for issue_id, raw_facts in available_facts_by_issue.items():
+        required = {
+            _normalized_facet(facet)
+            for facet in required_facets_by_issue.get(issue_id, ())
+        }
+        for raw_fact in raw_facts:
+            parsed = _indexed_fact_parts(raw_fact)
+            if parsed is None:
+                continue
+            facet, fact = parsed
+            fact_key = _normalized_search_text(fact)
+            key = (facet, fact_key)
+            if facet not in required or not fact_key or key in seen:
+                continue
+            seen.add(key)
+            if _verified_fact_already_present(
+                answer=comparison_answer,
+                facet=facet,
+                fact=fact,
+            ):
+                continue
+            rendered.append(_format_verified_fact(facet, fact))
+            appended.append(
+                {
+                    "issue_id": str(issue_id),
+                    "facet": facet,
+                    "fact": fact,
+                }
+            )
+            comparison_answer += "\n" + fact
+
+    if not rendered:
+        return answer, []
+    return (
+        answer
+        + "\n\n## Thông tin quan trọng đã xác minh\n\n"
+        + "\n".join(rendered),
+        appended,
+    )
+
+
+def _build_legacy_direct_markdown_answer_prompt(
+    *,
+    question: str,
+    role: str,
+    context: str,
+    system_prompt_addendum: str | None = None,
+    standalone_queries: Mapping[str, str] | None = None,
+    required_facets_by_issue: Mapping[str, Sequence[str]] | None = None,
+    available_facets_by_issue: Mapping[str, Sequence[str]] | None = None,
+    available_facts_by_issue: Mapping[str, Sequence[str]] | None = None,
+    communication_preferences: Mapping[str, str] | None = None,
+    suggestion_envelope: bool = False,
+    conversation_patch_envelope: bool = False,
+    conversation_context: str | None = None,
+    conversation_is_first_turn: bool = True,
+    suggestion_limit: int = 4,
+) -> str:
+    """Build the raw retrieval-to-LLM prompt for simplified serving.
+
+    This contract deliberately requests ordinary Markdown rather than claim,
+    facet, evidence-ID or quote-ID JSON. The backend has already limited the
+    context to role-eligible, effective sources before this prompt is built.
+    """
+
+    audience = "cán bộ" if str(role).casefold() == "officer" else "người dân"
+    standalone_block = ""
+    if standalone_queries:
+        standalone_block = "\n\nCÁC VẤN ĐỀ ĐỘC LẬP\n" + "\n".join(
+            f"- {issue_id}: {_clean_text(query)}"
+            for issue_id, query in standalone_queries.items()
+            if _clean_text(issue_id) and _clean_text(query)
+        )
+    required_block = ""
+    if required_facets_by_issue:
+        required_lines: list[str] = []
+        for issue_id, facets in required_facets_by_issue.items():
+            labels = list(
+                dict.fromkeys(
+                    _direct_prompt_facet_label(facet)
+                    for facet in facets
+                    if _clean_text(facet)
+                )
+            )
+            if labels:
+                required_lines.append(
+                    f"- {_clean_text(issue_id)}: " + "; ".join(labels)
+                )
+        if required_lines:
+            required_block = (
+                "\n\nCÁC NỘI DUNG BẮT BUỘC PHẢI BAO PHỦ\n"
+                + "\n".join(required_lines)
+            )
+    available_block = ""
+    if available_facets_by_issue:
+        available_lines: list[str] = []
+        for issue_id, facets in available_facets_by_issue.items():
+            labels = list(
+                dict.fromkeys(
+                    _direct_prompt_facet_label(facet)
+                    for facet in facets
+                    if _clean_text(facet)
+                )
+            )
+            if labels:
+                available_lines.append(
+                    f"- {_clean_text(issue_id)}: " + "; ".join(labels)
+                )
+        if available_lines:
+            available_block = (
+                "\n\nCÁC NỘI DUNG NGUỒN ĐÃ CÓ\n"
+                + "\n".join(available_lines)
+                + "\nMỗi nội dung trong danh sách này phải được trả lời từ nguồn; "
+                "không được kết luận là thiếu nguồn trước khi rà soát toàn bộ block nguồn; "
+                "không bỏ sót ý có nguồn."
+            )
+    fact_index_block = ""
+    if available_facts_by_issue:
+        fact_lines: list[str] = []
+        for issue_id, facts in available_facts_by_issue.items():
+            for fact in facts:
+                clean_fact = _clean_text(fact)
+                if clean_fact:
+                    fact_lines.append(f"- {_clean_text(issue_id)}: {clean_fact}")
+        if fact_lines:
+            fact_index_block = (
+                "\n\nCHỈ MỤC TRÍCH NGUYÊN VĂN THEO NỘI DUNG\n"
+                + "\n".join(fact_lines)
+                + "\nĐây là các dòng ngắn lấy nguyên văn từ evidence bên dưới. "
+                "Phải dùng chúng khi trả lời nội dung tương ứng. Với mọi dòng "
+                "`deadline:`, phải chép đúng thời hạn vào câu trả lời; nói rằng "
+                "nguồn không có thời hạn khi dòng này tồn tại là trái yêu cầu."
+            )
+    role_guidance = (
+        "Với cán bộ, ưu tiên kết luận nghiệp vụ, nội dung cần kiểm tra, "
+        "cách xử lý và ranh giới thẩm quyền."
+        if audience == "cán bộ"
+        else "Với người dân, ưu tiên kết luận dễ hiểu và các bước có thể thực hiện ngay."
+    )
+    preference_block = ""
+    if communication_preferences:
+        preference_lines: list[str] = []
+        preferred_address = _clean_text(
+            communication_preferences.get("preferred_address") or ""
+        )[:120]
+        response_style = _clean_text(
+            communication_preferences.get("response_style") or ""
+        )[:120]
+        if preferred_address:
+            preference_lines.append(
+                f"- Cách xưng hô khi cần đại từ: {preferred_address}"
+            )
+        if response_style:
+            preference_lines.append(f"- Phong cách trình bày: {response_style}")
+        if preference_lines:
+            preference_block = (
+                "\n\nSỞ THÍCH GIAO TIẾP ĐÃ ĐƯỢC NGƯỜI DÙNG CHO PHÉP\n"
+                + "\n".join(preference_lines)
+                + "\nCác dòng này chỉ điều chỉnh cách trình bày, không phải căn cứ pháp luật."
+            )
+    patch_contract = (
+        " Thêm trường `conversation_patch` gồm `topic_summary` (tối đa 1.200 ký tự), "
+        "`current_goal` (tối đa 300 ký tự), tối đa 8 `topics`, 10 `user_facts`, "
+        "8 `open_questions` và `referenced_turn_ids`. Mỗi user fact phải có "
+        "`text`, `source_message_id` lấy đúng ID trong lịch sử và `status=user_stated`. "
+        "Patch chỉ ghi mục tiêu/chủ đề/dữ kiện người dùng tự nêu; tuyệt đối không ghi URL, "
+        "citation, số hiệu văn bản, thời hạn, phí hoặc kết luận pháp luật."
+        if conversation_patch_envelope
+        else ""
+    )
+    bounded_suggestions = max(0, min(4, int(suggestion_limit)))
+    output_contract = (
+        "Xuất đúng một JSON object hợp lệ với các trường: "
+        "`answer_markdown` là toàn bộ câu trả lời Markdown; "
+        f"`suggested_questions` là mảng từ 0 đến {bounded_suggestions} object gồm `text`, `issue_id`, `facet`. "
+        "Gợi ý phải là câu hỏi nối tiếp ngắn, cùng issue, chỉ hướng tới nội dung trong nguồn "
+        "hoặc nội dung còn thiếu; không chứa URL hay kết luận pháp luật. "
+        f"{patch_contract} "
+        "Không đặt JSON trong code fence và không thêm chữ ngoài JSON."
+        if suggestion_envelope
+        else "Không xuất JSON, evidence_id, quote_id hay mô tả pipeline."
+    )
+    output_label = (
+        "JSON ANSWER ENVELOPE"
+        if suggestion_envelope
+        else "TRẢ LỜI MARKDOWN"
+    )
+    conversation_block = ""
+    if _clean_text(conversation_context or ""):
+        conversation_block = (
+            "\n\nLỊCH SỬ HỘI THOẠI — KHÔNG PHẢI CĂN CỨ PHÁP LUẬT\n"
+            + _clean_text(conversation_context or "")
+            + "\nLịch sử chỉ dùng để hiểu đại từ, câu nối tiếp và phong cách. "
+            "Không được dùng phát biểu cũ của trợ lý làm căn cứ pháp luật; "
+            "NGUỒN ĐÃ TRUY XUẤT bên dưới là căn cứ duy nhất."
+        )
+    address_guidance = (
+        "- Đây là lượt trả lời đầu tiên: mở đầu ngắn bằng “Thưa anh/chị,”."
+        if conversation_is_first_turn
+        else "- Đây là lượt tiếp nối: không lặp lời chào dài; xưng hô “anh/chị” tự nhiên khi cần."
+    )
+    return (
+        "Bạn là trợ lý pháp luật Việt Nam. Trả lời trực tiếp cho "
+        f"{audience} bằng Markdown tự nhiên, đầy đủ và dễ hiểu.\n"
+        "Phân tích âm thầm ý định, tham chiếu hội thoại, nội dung còn thiếu và "
+        "bước tiếp theo hữu ích; không xuất chain-of-thought hoặc thẻ <think>. "
+        "Chỉ dùng nội dung trong NGUỒN ĐÃ TRUY XUẤT bên dưới. "
+        f"{output_contract} "
+        "Nếu nguồn không đủ cho một ý thì nói ngắn gọn ý đó chưa đủ nguồn; "
+        "không tự tạo điều luật, thời hạn, cơ quan, biểu mẫu hoặc URL.\n\n"
+        "YÊU CẦU NGHIỆP VỤ & NỘI DUNG (ÁP DỤNG MỌI LĨNH VỰC)\n"
+        "- Mặc định phục vụ công dân/tổ chức trong nước tại cấp cơ sở (UBND cấp xã / Công an cấp xã). Tuyệt đối không tự suy diễn hoặc áp dụng quy định có yếu tố nước ngoài hoặc cơ quan cấp huyện/tỉnh trừ khi câu hỏi yêu cầu rõ hoặc quy định chỉ do cấp đó giải quyết.\n"
+        "- Trả lời thẳng vào trọng tâm, phân tích rõ ràng, thiết thực và dễ hiểu; không chép lại nguyên văn cả điều luật dài dòng nếu không cần thiết.\n"
+        "- Chỉ hướng dẫn phương án xử lý, bước tiếp theo hoặc ngoại lệ khi chính nguồn tương ứng có nêu; không dùng ví dụ nghiệp vụ làm quy tắc mặc định.\n"
+        "- Tự bỏ qua nguồn khác chủ thể, khác hành vi hoặc khác thủ tục; khi nguồn chỉ đủ một phần, trả lời phần đã có căn cứ và nêu ngắn gọn phần còn thiếu.\n"
+        "- Tuyệt đối không tự tạo Điều/Khoản, thời hạn, lệ phí, biểu mẫu, URL, cơ quan hoặc dữ kiện ngoài nguồn.\n"
+        "- Giữ nguyên đầy đủ điều kiện, ngoại lệ và phạm vi của quy định. Không biến việc không cần trực tiếp có mặt thành không cần đồng ý, xác nhận hoặc ủy quyền.\n"
+        "- Phân biệt NGUỒN ĐÃ TÌM THẤY với NGUỒN DÙNG LÀM CĂN CỨ: chỉ đưa nguồn hỗ trợ trực tiếp kết luận vào câu trả lời. Mỗi kết luận về điều kiện, đối tượng, phủ định, thời hạn, phí, giấy tờ hoặc biểu mẫu phải có đoạn nguồn tương ứng.\n\n"
+        "QUY CHUẨN TRÌNH BÀY MARKDOWN (BẮT BUỘC ĐẸP, RÕ RÀNG & DỄ ĐỌC)\n"
+        "- Luôn mở đầu bằng 1-2 câu kết luận trực tiếp, đi thẳng vào câu trả lời.\n"
+        "- Bố cục câu trả lời thành các phần/bước rõ ràng, có dòng trống giữa các đoạn; TUYỆT ĐỐI KHÔNG viết thành một đoạn văn dính liền.\n"
+        "- Khi hướng dẫn thủ tục, BẮT BUỘC dùng danh sách gạch đầu dòng (`- `) hoặc đánh số thứ tự (`1.`, `2.`, `3.`) cho từng bước/từng loại giấy tờ.\n"
+        "- In đậm (`**...**`) các thông tin cốt lõi: **Cơ quan giải quyết / Nơi nộp**, **Hồ sơ cần chuẩn bị**, **Trình tự thực hiện**, **Thời hạn**, **Lệ phí**, **Lưu ý quan trọng**.\n"
+        "- Chỉ dùng Markdown thuần trong `answer_markdown`: tuyệt đối không dùng bất kỳ thẻ HTML nào (`<br>`, `<u>`, `<table>` hoặc thẻ dạng `<...>` khác); không đặt ký tự `|` ở đầu dòng trừ khi tạo một bảng Markdown hoàn chỉnh; dùng dòng trống để ngắt đoạn.\n"
+        "- Luôn đóng đủ cặp ký hiệu Markdown như `**`; không bọc toàn bộ câu trả lời trong một khối in đậm.\n"
+        f"{address_guidance}\n"
+        "- Khi cần đại từ, dùng “anh/chị”; không gọi người dùng là “bạn”.\n"
+        f"- {role_guidance}\n"
+        f"{_clean_text(system_prompt_addendum or '')}\n\n"
+        f"CÂU HỎI\n{_clean_text(question)}"
+        f"{conversation_block}"
+        f"{preference_block}"
+        f"{standalone_block}"
+        f"{required_block}"
+        f"{available_block}"
+        f"{fact_index_block}\n\n"
+        f"NGUỒN ĐÃ TRUY XUẤT\n{context}\n\n"
+        f"{output_label}"
+    )
+
+
+def build_unified_chat_answer_prompt(
+    *,
+    question: str,
+    role: str,
+    context: str = "",
+    route: str | None = None,
+    system_prompt_addendum: str | None = None,
+    standalone_queries: Mapping[str, str] | None = None,
+    required_facets_by_issue: Mapping[str, Sequence[str]] | None = None,
+    available_facets_by_issue: Mapping[str, Sequence[str]] | None = None,
+    available_facts_by_issue: Mapping[str, Sequence[str]] | None = None,
+    communication_preferences: Mapping[str, str] | None = None,
+    conversation_context: str | None = None,
+    active_document_context: str | None = None,
+    conversation_is_first_turn: bool = True,
+    suggestion_limit: int = 2,
+    suggestion_envelope: bool = True,
+    conversation_patch_envelope: bool = False,
+    answer_depth: str = "balanced",
+) -> str:
+    from api.chat_prompt import build_answer_prompt
+    return build_answer_prompt(
+        question=question, role=role, sources=context,
+        history=conversation_context or "", natural_chat=route in {"chat_meta", "out_of_scope"},
+        style=system_prompt_addendum, preferences=communication_preferences, depth=answer_depth,
+        active_document=active_document_context or "",
+        suggestion_envelope=suggestion_envelope,
+    )
+
+
+def _citation_labels_from_evidence_context(context: str) -> tuple[str, ...]:
+    """Extract display-ready, evidence-bound citation labels for the prompt.
+
+    The compact packet already renders each evidence header as
+    ``[evidence-N | issue=... | title | law number | Điều N]``.  Repeating
+    only that already-admitted metadata directly before the answer rules gives
+    every provider an explicit, finite citation vocabulary without adding a
+    model-specific prompt or trusting model-invented legal references.
+    """
+
+    labels: list[str] = []
+    seen: set[str] = set()
+    for raw_header in re.findall(r"^\[([^\]\r\n]+)\]", str(context or ""), flags=re.MULTILINE):
+        parts = [part.strip() for part in raw_header.split("|") if part.strip()]
+        visible = [
+            part
+            for part in parts
+            if not part.casefold().startswith("evidence-")
+            and not part.casefold().startswith("issue=")
+        ]
+        label = " | ".join(visible)
+        if not label or "điều" not in label.casefold():
+            continue
+        key = label.casefold()
+        if key not in seen:
+            seen.add(key)
+            labels.append(label)
+    return tuple(labels[:8])
+
+
+def unified_chat_prompt_enabled(
+    role: str = "citizen",
+    environ: Mapping[str, str] | None = None,
+) -> bool:
+    """Feature flag for the provider-neutral answer prompt.
+
+    It defaults on for citizen/officer so the active conversational path uses
+    one contract; setting the flag off restores the previous builders for
+    rollback without changing retrieval or model configuration.
+    """
+
+    values = os.environ if environ is None else environ
+    enabled = str(values.get("CHAT_UNIFIED_PROMPT_V1_ENABLED", "true")).strip().casefold()
+    if enabled not in _TRUE_VALUES:
+        return False
+    roles = {
+        item.strip().casefold()
+        for item in str(values.get("CHAT_UNIFIED_PROMPT_V1_ROLES", "citizen,officer")).split(",")
+        if item.strip()
+    }
+    return str(role or "citizen").strip().casefold() in roles
+
+
+def build_direct_markdown_answer_prompt(
+    *,
+    question: str,
+    role: str,
+    context: str,
+    route: str | None = None,
+    system_prompt_addendum: str | None = None,
+    standalone_queries: Mapping[str, str] | None = None,
+    required_facets_by_issue: Mapping[str, Sequence[str]] | None = None,
+    available_facets_by_issue: Mapping[str, Sequence[str]] | None = None,
+    available_facts_by_issue: Mapping[str, Sequence[str]] | None = None,
+    communication_preferences: Mapping[str, str] | None = None,
+    suggestion_envelope: bool = False,
+    conversation_patch_envelope: bool = False,
+    conversation_context: str | None = None,
+    conversation_is_first_turn: bool = True,
+    suggestion_limit: int = 4,
+) -> str:
+    """Compatibility entry point; active implementation is the unified builder."""
+
+    # Keep the public helper backwards-compatible for small/unit callers that
+    # only request the old raw Markdown contract. Runtime chat passes a route
+    # or conversation context; the memory/router callers also pass the
+    # envelope flags. This makes rollout explicit without allowing a runtime
+    # .env toggle to silently alter an unrelated prompt test.
+    use_unified = bool(
+        unified_chat_prompt_enabled(role)
+        and (
+            route
+            or conversation_context
+            or suggestion_envelope
+            or conversation_patch_envelope
+        )
+    )
+    if not use_unified:
+        return _build_legacy_direct_markdown_answer_prompt(
+            question=question,
+            role=role,
+            context=context,
+            system_prompt_addendum=system_prompt_addendum,
+            standalone_queries=standalone_queries,
+            required_facets_by_issue=required_facets_by_issue,
+            available_facets_by_issue=available_facets_by_issue,
+            available_facts_by_issue=available_facts_by_issue,
+            communication_preferences=communication_preferences,
+            suggestion_envelope=suggestion_envelope,
+            conversation_patch_envelope=conversation_patch_envelope,
+            conversation_context=conversation_context,
+            conversation_is_first_turn=conversation_is_first_turn,
+            suggestion_limit=suggestion_limit,
+        )
+
+    return build_unified_chat_answer_prompt(
+        question=question,
+        role=role,
+        context=context,
+        route=route,
+        system_prompt_addendum=system_prompt_addendum,
+        standalone_queries=standalone_queries,
+        required_facets_by_issue=required_facets_by_issue,
+        available_facets_by_issue=available_facets_by_issue,
+        available_facts_by_issue=available_facts_by_issue,
+        communication_preferences=communication_preferences,
+        conversation_context=conversation_context,
+        conversation_is_first_turn=conversation_is_first_turn,
+        suggestion_limit=suggestion_limit,
+        suggestion_envelope=True,
+        conversation_patch_envelope=False,
+    )
+
+
+def build_qwen_conversational_answer_prompt(base_prompt: str) -> str:
+    """Compatibility alias for the now provider-neutral prompt contract.
+
+    DeepSeek and Qwen must receive byte-identical application prompts for an
+    identical question/history/evidence packet. Provider adapters may enforce
+    transport using native JSON schema, but must not append model-specific
+    content instructions.
+    """
+
+    return base_prompt
 
 
 def parse_structured_answer(raw: Any) -> StructuredLegalAnswer:
@@ -1706,6 +2788,12 @@ def build_extractive_structured_answer(
                         claim_type=claim_type,
                         evidence_id=str(evidence_id),
                         support_quote=quote,
+                        facet=facet,
+                        actor=(
+                            str((evidence.get("actor_anchors") or [""])[0])
+                            or None
+                        ),
+                        quote_id=(str(evidence.get("quote_id") or "") or None),
                     )
                     # A relevant sentence can cite a different provision than
                     # the hydrated chunk metadata. The public validator must
@@ -1725,8 +2813,8 @@ def build_extractive_structured_answer(
                             for value in (
                                 issue.query_text,
                                 issue.text,
-                                issue.subject,
-                                *issue.facts,
+                                issue.retrieval_subject,
+                                *issue.retrieval_facts,
                             )
                             if value
                         ),
@@ -2001,8 +3089,8 @@ def supplement_rule_source_diversity(
                 for value in (
                     issue.query_text,
                     issue.text,
-                    issue.subject,
-                    *issue.facts,
+                    issue.retrieval_subject,
+                    *issue.retrieval_facts,
                 )
                 if value
             ),
@@ -2098,6 +3186,9 @@ def render_structured_answer(
     evidence_by_id: Mapping[str, Mapping[str, Any]],
     role: str = "citizen",
     coverage_matrix: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+    preserve_distinct_claims: bool = False,
+    require_extended_binding: bool = False,
+    hallucination_only_validation: bool = False,
 ) -> tuple[list[Any], dict[str, Any], dict[str, Any]]:
     """Validate claims independently and render only accepted material."""
 
@@ -2131,6 +3222,11 @@ def render_structured_answer(
             {**claim.model_dump(), "issue_id": issue.issue_id}
             for claim in generated.claims
         ]
+        binding_facets = tuple(
+            _normalized_facet(raw_facet.get("facet"))
+            for raw_facet in matrix.get(issue.issue_id, ())
+            if raw_facet.get("facet")
+        )
         validation = validate_structured_claims(
             request_id=request_id,
             claims=raw_claims,
@@ -2141,13 +3237,20 @@ def render_structured_answer(
                 for value in (
                     issue.query_text,
                     issue.text,
-                    issue.subject,
-                    *issue.facts,
+                    issue.retrieval_subject,
+                    *issue.retrieval_facts,
                 )
                 if value
             ),
             issue_intent=issue.intent,
             relevance_topics=issue.relevance_topics,
+            required_facets=binding_facets,
+            require_extended_binding=require_extended_binding,
+            validation_mode=(
+                "hallucination_only"
+                if hallucination_only_validation
+                else "strict"
+            ),
         )
         accepted_count += len(validation.accepted)
         rejected_count += len(validation.rejected)
@@ -2255,8 +3358,10 @@ def render_structured_answer(
                 _normalized_facet(str(value))
                 for value in evidence.get("supported_facets") or ()
             }
-            maximum_for_type = 1
-            if (
+            maximum_for_type = 20 if preserve_distinct_claims else 1
+            if preserve_distinct_claims:
+                pass
+            elif (
                 claim_type in {"condition", "documents", "procedure", "next_action"}
                 and _normalized_facet(claim_type) in explicit_facets
             ):
@@ -2313,14 +3418,19 @@ def render_structured_answer(
         claim_type_order: list[str] = []
         for item in usable_claims:
             claim_type = str(item.get("claim_type") or "rule")
+            cleaned_claim = _clean_text(item.get("claim_text"))
+            if not cleaned_claim:
+                continue
             if claim_type not in grouped_claims:
                 grouped_claims[claim_type] = []
                 claim_type_order.append(claim_type)
-            grouped_claims[claim_type].append(_clean_text(item["claim_text"]))
+            grouped_claims[claim_type].append(cleaned_claim)
         rendered_groups: list[str] = []
         for claim_type in claim_type_order:
             claim_label = labels.get(claim_type, "Nội dung")
-            claim_texts = grouped_claims[claim_type]
+            claim_texts = [text for text in grouped_claims[claim_type] if text]
+            if not claim_texts:
+                continue
             if len(claim_texts) == 1:
                 rendered_groups.append(
                     f"- **{claim_label}:** {claim_texts[0]}"
@@ -2330,11 +3440,10 @@ def render_structured_answer(
                     f"**{claim_label}**\n"
                     + "\n".join(f"- {claim_text}" for claim_text in claim_texts)
                 )
+        # ``answer_markdown`` is model-authored prose and has no independent
+        # evidence binding.  Render only the claim lines that passed the
+        # validator; this keeps every public proposition citation-backed.
         answer = "\n\n".join(rendered_groups) or None
-        # Guidance is model-authored prose, not an independently validated
-        # claim.  Keep the public renderer claim-only; limitations and
-        # clarifying questions remain deterministic/safe when claims are
-        # absent.
         guidance = None
         clarification = (
             _clean_text(generated.clarifying_question)
@@ -2431,6 +3540,86 @@ def render_structured_answer(
     )
 
 
+def build_packet_timeout_fallback(
+    *,
+    question: str,
+    evidence_by_id: Mapping[str, Mapping[str, Any]],
+    max_units: int | None = None,
+    max_chars: int = 6000,
+) -> str:
+    """Render source units when the selected model times out.
+
+    This is deliberately not a claim validator or a second answer model.  It
+    only exposes the complete structural units already admitted to the current
+    evidence packet, preserving their source labels so the user can continue
+    from the same material without losing a successful retrieval.  The display
+    budget is character-based; there is no fixed four-passage fallback.
+    """
+
+    rows = list(evidence_by_id.values())
+    if not rows:
+        return (
+            "Tôi chưa thể hoàn tất câu trả lời trong thời gian quy định và "
+            "chưa có đoạn nguồn phù hợp để trích xuất. Anh/chị vui lòng thử lại."
+        )
+    blocks: list[str] = []
+    consumed = 0
+    source_rows = (
+        rows
+        if max_units is None
+        else rows[: max(1, int(max_units))]
+    )
+    for index, row in enumerate(source_rows, start=1):
+        content = _clean_extractive_text(
+            row.get("evidence_capsule")
+            or row.get("clean_content")
+            or row.get("content")
+            or row.get("parent_context")
+        )
+        if not content:
+            continue
+        title = _clean_text(
+            row.get("document_title")
+            or row.get("law_number")
+            or "Nguồn pháp luật"
+        )
+        law_number = _clean_text(row.get("law_number"))
+        article = _clean_text(row.get("article_number"))
+        label = " — ".join(
+            item
+            for item in (
+                title,
+                law_number if law_number and law_number not in title else "",
+                f"Điều {article}" if article else "",
+            )
+            if item
+        )
+        header = f"{index}. {label or 'Nguồn đã truy xuất'}"
+        remaining = max_chars - consumed - len(header) - 20
+        if remaining < 160:
+            break
+        # A timeout fallback is still a source view. Do not cut a legal unit
+        # in the middle of its lead-in, condition, exception or cross-reference
+        # merely to fill the character budget; skip that unit and keep the
+        # units that fit completely.
+        if len(content) > remaining:
+            continue
+        excerpt = content
+        blocks.append(f"**{header}**\n> {excerpt}")
+        consumed += len(blocks[-1]) + 2
+    if not blocks:
+        return (
+            "Tôi đã tìm thấy nguồn nhưng chưa thể trích xuất trong ngân sách "
+            "hiển thị. Anh/chị vui lòng thử lại."
+        )
+    return (
+        "Model chưa hoàn tất phần diễn giải trong thời gian quy định. "
+        "Dưới đây là các đoạn nguồn đã được retrieval và kiểm tra hiệu lực; "
+        "chưa phải là kết luận pháp lý tự động:\n\n"
+        + "\n\n".join(blocks)
+    )
+
+
 def build_and_render_extractive_answer(
     *,
     request_id: str,
@@ -2438,6 +3627,9 @@ def build_and_render_extractive_answer(
     evidence_by_id: Mapping[str, Mapping[str, Any]],
     role: str,
     coverage_matrix: Mapping[str, Sequence[Mapping[str, Any]]],
+    preserve_distinct_claims: bool = False,
+    require_extended_binding: bool = False,
+    hallucination_only_validation: bool = False,
 ) -> tuple[list[Any], dict[str, Any], dict[str, Any]]:
     """Build and validate the deterministic timeout fallback as one unit.
 
@@ -2458,6 +3650,9 @@ def build_and_render_extractive_answer(
         evidence_by_id=evidence_by_id,
         role=role,
         coverage_matrix=coverage_matrix,
+        preserve_distinct_claims=preserve_distinct_claims,
+        require_extended_binding=require_extended_binding,
+        hallucination_only_validation=hallucination_only_validation,
     )
 
 

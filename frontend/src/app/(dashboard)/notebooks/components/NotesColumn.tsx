@@ -81,10 +81,13 @@ export function NotesColumn({
         collapsedIcon={StickyNote}
         collapsedLabel={t('common.notes')}
       >
-        <Card className="h-full flex flex-col flex-1 overflow-hidden">
-          <CardHeader className="pb-3 flex-shrink-0">
+        <Card className="flex h-full flex-1 flex-col overflow-hidden rounded-2xl border-border/80 bg-card shadow-sm">
+          <CardHeader className="flex-shrink-0 border-b border-border/60 px-4 py-3">
             <div className="flex items-center justify-between gap-2">
-              <CardTitle className="text-lg">{t('common.notes')}</CardTitle>
+              <div>
+                <CardTitle className="text-xl">Ghi chú nghiệp vụ</CardTitle>
+                <p className="mt-1 text-xs text-muted-foreground">Lưu kết luận và điểm cần xử lý</p>
+              </div>
               <div className="flex items-center gap-2">
                 <Button
                   size="sm"
@@ -101,7 +104,7 @@ export function NotesColumn({
             </div>
           </CardHeader>
 
-          <CardContent className="flex-1 overflow-y-auto min-h-0">
+          <CardContent className="min-h-0 flex-1 overflow-y-auto bg-background/25 p-3">
             {isLoading ? (
               <div className="flex items-center justify-center py-8">
                 <LoadingSpinner />

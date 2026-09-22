@@ -10,6 +10,7 @@ import { useAuthStore } from '@/lib/stores/auth-store'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { formatApiError } from '@/lib/utils/error-handler'
 
 export default function ChangePasswordPage() {
   const router = useRouter()
@@ -41,8 +42,7 @@ export default function ChangePasswordPage() {
         router.push('/login')
       }, 1500)
     } catch (error: unknown) {
-      const detail = error as { response?: { data?: { detail?: string } }; message?: string }
-      toast.error(detail.response?.data?.detail || detail.message || 'Không thể đổi mật khẩu.')
+      toast.error(formatApiError(error, 'Không thể đổi mật khẩu.'))
     } finally {
       setLoading(false)
     }

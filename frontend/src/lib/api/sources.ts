@@ -96,6 +96,13 @@ export const sourcesApi = {
     return response.data
   },
 
+  addLegalDocumentToNotebook: async (notebookId: string, legalDocumentId: string) => {
+    const response = await apiClient.post(
+      `/notebooks/${encodeURIComponent(notebookId)}/legal-documents/${encodeURIComponent(legalDocumentId)}`
+    )
+    return response.data
+  },
+
   downloadFile: async (id: string): Promise<AxiosResponse<Blob>> => {
     return apiClient.get(`/sources/${id}/download`, {
       responseType: 'blob',

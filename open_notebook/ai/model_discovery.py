@@ -14,6 +14,10 @@ import httpx
 from loguru import logger
 
 from open_notebook.ai.models import Model
+from open_notebook.ai.openai_compatible_utils import (
+    normalize_openai_compatible_base_url,
+    openai_compatible_models_url,
+)
 from open_notebook.database.repository import repo_query
 from open_notebook.domain.credential import Credential
 
@@ -662,7 +666,7 @@ async def discover_openai_compatible_models() -> List[DiscoveredModel]:
             cred = credentials[0]
             config = cred.to_esperanto_config()
             api_key = config.get("api_key")
-            base_url = config.get("base_url", "").rstrip("/")
+            base_url = normalize_openai_compatible_base_url(config.get("base_url"))
     except Exception as e:
         logger.warning(f"Failed to read openai_compatible config from Credential: {e}")
 
@@ -670,7 +674,9 @@ async def discover_openai_compatible_models() -> List[DiscoveredModel]:
     if not api_key:
         api_key = os.environ.get("OPENAI_COMPATIBLE_API_KEY")
     if not base_url:
-        base_url = os.environ.get("OPENAI_COMPATIBLE_BASE_URL", "").rstrip("/")
+        base_url = normalize_openai_compatible_base_url(
+            os.environ.get("OPENAI_COMPATIBLE_BASE_URL", "")
+        )
 
     if not base_url:
         logger.warning("No base_url configured for openai_compatible provider")
@@ -684,7 +690,7 @@ async def discover_openai_compatible_models() -> List[DiscoveredModel]:
                 headers["Authorization"] = f"Bearer {api_key}"
 
             response = await client.get(
-                f"{base_url}/models",
+                openai_compatible_models_url(base_url),
                 headers=headers,
                 timeout=30.0,
             )

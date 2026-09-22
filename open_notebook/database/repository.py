@@ -117,11 +117,13 @@ async def reset_db_client() -> None:
     lock = _get_db_lock()
     async with lock:
         if _global_db_client is not None:
-            try:
-                await _global_db_client.close()
-            except Exception:
-                pass
+            stale = _global_db_client
             _global_db_client = None
+            try:
+                async with asyncio.timeout(2):
+                    await stale.close()
+            except (Exception, asyncio.CancelledError):
+                pass
 
 
 async def get_db_client() -> AsyncSurreal:
@@ -135,30 +137,43 @@ async def get_db_client() -> AsyncSurreal:
             return _global_db_client
         url = get_database_url()
         client = AsyncSurreal(url)
-        await client.signin(
-            {
-                "username": os.environ.get("SURREAL_USER") or "root",
-                "password": get_database_password(),
-            }
-        )
-        await client.use(
-            os.environ.get("SURREAL_NAMESPACE") or "open_notebook",
-            os.environ.get("SURREAL_DATABASE") or "open_notebook",
-        )
+        await _initialize_db_client(client)
         _global_db_client = client
         return _global_db_client
 
 
+async def _initialize_db_client(client) -> None:
+    """An unpublished connection still owns a receiver that must be closed."""
+    try:
+        await client.signin({"username": os.environ.get("SURREAL_USER") or "root",
+                             "password": get_database_password()})
+        await client.use(os.environ.get("SURREAL_NAMESPACE") or "open_notebook",
+                         os.environ.get("SURREAL_DATABASE") or "open_notebook")
+    except (Exception, asyncio.CancelledError):
+        try:
+            async with asyncio.timeout(2):
+                await client.close()
+        except (Exception, asyncio.CancelledError):
+            pass
+        raise
+
+
 @asynccontextmanager
 async def db_connection():
-    try:
-        db = await get_db_client()
-        yield db
-    except Exception as exc:
-        err_msg = str(exc).lower()
-        if any(kw in err_msg for kw in ("connection", "closed", "websocket", "broken pipe", "disconnect")):
+    # The SDK's WS receive task can die when a cancelled query's late reply
+    # reaches its Future. All CRUD operations share one connection owner;
+    # retire the connection on cancellation before another operation gets it.
+    async with _get_db_operation_lock():
+        try:
+            db = await get_db_client()
+            yield db
+        except asyncio.CancelledError:
             await reset_db_client()
-        raise
+            raise
+        except Exception as exc:
+            if _is_connection_failure(exc):
+                await reset_db_client()
+            raise
 
 
 
@@ -167,26 +182,23 @@ async def repo_query(
 ) -> List[Dict[str, Any]]:
     """Execute a SurrealQL query and return the results"""
 
-    async with _get_db_operation_lock():
-        for attempt in range(2):
-            try:
-                async with db_connection() as connection:
-                    result = parse_record_ids(await connection.query(query_str, vars))
-                    if isinstance(result, str):
-                        raise RuntimeError(result)
-                    return result
-            except RuntimeError as exc:
-                # RuntimeError is raised for retriable transaction conflicts - log at debug to avoid noise.
-                logger.debug(str(exc))
-                raise
-            except Exception as exc:
-                if attempt == 0 and _is_connection_failure(exc):
-                    logger.warning("SurrealDB connection failed; resetting shared client before retry")
-                    await reset_db_client()
-                    continue
-                logger.exception(exc)
-                raise
-        raise RuntimeError("SurrealDB query retry exhausted")
+    for attempt in range(2):
+        try:
+            async with db_connection() as connection:
+                result = parse_record_ids(await connection.query(query_str, vars))
+                if isinstance(result, str):
+                    raise RuntimeError(result)
+                return result
+        except RuntimeError as exc:
+            logger.debug(str(exc))
+            raise
+        except Exception as exc:
+            if attempt == 0 and _is_connection_failure(exc):
+                logger.warning("SurrealDB connection retired; retrying on a fresh client")
+                continue
+            logger.exception(exc)
+            raise
+    raise RuntimeError("SurrealDB query retry exhausted")
 
 
 async def repo_create(table: str, data: Dict[str, Any]) -> Dict[str, Any]:

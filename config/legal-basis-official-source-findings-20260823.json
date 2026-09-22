@@ -1,0 +1,28 @@
+{
+  "schema_version": "legal-basis-official-source-findings-v1",
+  "reviewed_at": "2026-08-23",
+  "review_kind": "automated_official_web_source_verification",
+  "independent_human_legal_qa_complete": false,
+  "records": [
+    {"law_number":"01/2025/TT-BYT","identity_status":"exact","normalized_status":"expired_partial","source_url":"https://vbpl.vn/TW/Pages/ivbpq-lichsu.aspx?ItemID=173951","evidence_status":"sufficient","note":"Official history reports partial expiry/amendment from 2025-07-01; provision scope is not established."},
+    {"law_number":"03/2011/QH13","identity_status":"exact","normalized_status":"expired","source_url":"https://vbpl.vn/bolaodong/Pages/vbpq-thuoctinh.aspx?ItemID=27305","evidence_status":"sufficient","note":"Candidate title identifies Luật Tố cáo, not the same-number resolution; official record expired 2019-01-01."},
+    {"law_number":"118/2025/NĐ-CP","identity_status":"exact","normalized_status":"active","source_url":"https://vbpl.vn/tw/Pages/ivbpq-thuoctinh.aspx?ItemID=178283","evidence_status":"sufficient","note":"Exact official record, effective 2025-07-01."},
+    {"law_number":"18/2024/TT-BCA","identity_status":"missing","normalized_status":"unknown","source_url":null,"evidence_status":"malformed","note":"Official later document references this instrument, but no exact official property page was established."},
+    {"law_number":"184/2025/QĐ-UBND","identity_status":"exact","normalized_status":"active","source_url":"https://vbpl.vn/haiphong/Pages/vbpq-thuoctinh.aspx?ItemID=182925","evidence_status":"sufficient","note":"Exact Hai Phong official record, effective 2025-10-25."},
+    {"law_number":"190/2025/QH15","identity_status":"exact","normalized_status":"active","source_url":"https://vbpl.vn/TW/Pages/ivbpq-thuoctinh.aspx?ItemID=175261","evidence_status":"sufficient","note":"Exact official record, effective 2025-02-19."},
+    {"law_number":"2306/QĐ-BYT","identity_status":"missing","normalized_status":"unknown","source_url":null,"evidence_status":"malformed","note":"No exact stable official source page established."},
+    {"law_number":"24/2026/TT-BXD","identity_status":"missing","normalized_status":"unknown","source_url":null,"evidence_status":"malformed","note":"No exact stable official source page established."},
+    {"law_number":"2418/QĐ-BNNMT","identity_status":"missing","normalized_status":"unknown","source_url":null,"evidence_status":"malformed","note":"Existence is referenced by official consolidated text, but no exact source record/status page was established."},
+    {"law_number":"2628/QĐ-UBND","identity_status":"missing","normalized_status":"unknown","source_url":null,"evidence_status":"malformed","note":"Number is locality-ambiguous and the exact Hai Phong instrument was not established."},
+    {"law_number":"28/2026/QĐ-TTg","identity_status":"missing","normalized_status":"unknown","source_url":null,"evidence_status":"malformed","note":"No exact stable official source page established."},
+    {"law_number":"42/2017/TT-BCA","identity_status":"exact","normalized_status":"expired_partial","source_url":"https://vbpl.vn/bocongan/Pages/vbpq-lichsu.aspx?ItemID=150784","evidence_status":"sufficient","note":"Official history reports partial expiry; procedure-level provision scope is not established."},
+    {"law_number":"42/2025/NĐ-CP","identity_status":"exact","normalized_status":"expired","source_url":"https://vbpl.vn/boyte/Pages/vbpq-vanbanlienquan.aspx?ItemID=176042","evidence_status":"sufficient","note":"Official record reports full expiry on 2025-06-16."},
+    {"law_number":"43/2017/TT-BCA","identity_status":"exact","normalized_status":"active","source_url":"https://vbpl.vn/TW/Pages/vbpq-thuoctinh.aspx?ItemID=177233","evidence_status":"sufficient","note":"Exact official record reports active status."},
+    {"law_number":"54/2025/TT-BCA","identity_status":"missing","normalized_status":"unknown","source_url":null,"evidence_status":"malformed","note":"No exact record found; official residence amendment found under 53/2025/TT-BCA, so substitution is forbidden."},
+    {"law_number":"66.16/2026/NQ-CP","identity_status":"missing","normalized_status":"unknown","source_url":null,"evidence_status":"malformed","note":"No exact stable official source page established."},
+    {"law_number":"72/2025/QH15","identity_status":"exact","normalized_status":"active","source_url":"https://vbpl.vn/bonoivu/Pages/vbpq-toanvan.aspx?ItemID=178340","evidence_status":"sufficient","note":"Exact official record, effective 2025-06-16."},
+    {"law_number":"76/2020/NĐ-CP","identity_status":"exact","normalized_status":"expired_partial","source_url":"https://vbpl.vn/TW/Pages/ivanban.aspx?Page=9&cqbh=1&fromyear=01%2F01%2F2011&toyear=31%2F12%2F2020","evidence_status":"sufficient","note":"Official listing reports partial expiry; provision scope is not established."},
+    {"law_number":"80/2011/TT-BCA","identity_status":"missing","normalized_status":"unknown","source_url":null,"evidence_status":"malformed","note":"No exact stable official source page established."},
+    {"law_number":"96/2016/NĐ-CP","identity_status":"exact","normalized_status":"expired_partial","source_url":"https://vbpl.vn/bogiaoducdaotao/Pages/ivbpq-lichsu.aspx?ItemID=113088","evidence_status":"sufficient","note":"Official history reports partial expiry/amendment; provision scope is not established."}
+  ]
+}
